@@ -26,6 +26,115 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
+fn fixture_blob(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn fixture_digest(out: &mut Vec<u8>, canonicalizer: &str, fill: u8) {
+    fixture_blob(out, b"sha256");
+    fixture_blob(out, canonicalizer.as_bytes());
+    out.extend_from_slice(&[fill; 32]);
+}
+
+fn fixture_frame(out: &mut Vec<u8>, tag: u8, body: Vec<u8>) {
+    out.push(tag);
+    out.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    out.extend_from_slice(&body);
+}
+
+/// Independently transcribed from frozen table §A; it calls no production encoder/decoder helper.
+fn table_fixture_bytes() -> Vec<u8> {
+    let mut out = b"beacon.outcome-fidelity.input.v1\0".to_vec();
+
+    let mut s1 = Vec::new();
+    s1.extend_from_slice(Uuid::from_u128(1).as_bytes());
+    s1.extend_from_slice(&[1; 32]);
+    s1.extend_from_slice(&[2; 32]);
+    fixture_blob(&mut s1, b"outcome-fidelity-draft");
+    s1.extend_from_slice(&1_u32.to_be_bytes());
+    fixture_blob(&mut s1, b"beacon.raw.v1");
+    s1.extend_from_slice(&[3; 32]);
+    s1.extend_from_slice(Uuid::from_u128(10).as_bytes());
+    s1.extend_from_slice(Uuid::from_u128(11).as_bytes());
+    s1.push(0x02);
+    s1.extend_from_slice(Uuid::from_u128(11).as_bytes());
+    s1.push(0x01);
+    s1.extend_from_slice(&1_u32.to_be_bytes());
+    s1.push(0x06);
+    s1.push(0x02);
+    s1.extend_from_slice(Uuid::from_u128(20).as_bytes());
+    s1.extend_from_slice(Uuid::from_u128(20).as_bytes());
+    s1.push(0x01);
+    s1.extend_from_slice(&0_u32.to_be_bytes());
+    s1.push(0x01);
+    fixture_frame(&mut out, 0x01, s1);
+
+    let mut s2 = Vec::new();
+    fixture_digest(&mut s2, "beacon.artifact.v1", 4);
+    fixture_blob(&mut s2, b"artifact-record");
+    fixture_digest(&mut s2, "beacon.raw.v1", 5);
+    fixture_blob(&mut s2, b"# outcome candidate");
+    s2.extend_from_slice(&42_u64.to_be_bytes());
+    fixture_frame(&mut out, 0x02, s2);
+
+    let mut s3 = Vec::new();
+    fixture_blob(&mut s3, b"manifest-bytes");
+    fixture_digest(&mut s3, "beacon.outcome.manifest.v2", 6);
+    fixture_blob(&mut s3, b"beacon.outcome.md.v1");
+    fixture_frame(&mut out, 0x03, s3);
+
+    let mut s4 = Vec::new();
+    s4.extend_from_slice(&9_u32.to_be_bytes());
+    let mut mission = Vec::new();
+    mission.extend_from_slice(Uuid::from_u128(1).as_bytes());
+    mission.extend_from_slice(Uuid::from_u128(99).as_bytes());
+    fixture_blob(&mut mission, b"ship the thing");
+    for item in [b"condition one".as_slice(), b"no network", b"never publish"] {
+        mission.extend_from_slice(&1_u32.to_be_bytes());
+        fixture_blob(&mut mission, item);
+    }
+    fixture_frame(&mut s4, 0x01, mission);
+    for (tag, canonicalizer, fill, size) in [
+        (0x02, "beacon.mission_completion.v1", 2, 8),
+        (0x04, "beacon.proposal.v1", 4, 8),
+        (0x05, "beacon.ruling.v2", 5, 24),
+        (0x06, "beacon.evaluation.v1", 6, 8),
+        (0x07, "beacon.mission_impact.v1", 7, 8),
+        (0x08, "beacon.spend.v2", 8, 8),
+    ] {
+        let mut record = Vec::new();
+        fixture_digest(&mut record, canonicalizer, fill);
+        fixture_blob(&mut record, &vec![fill; size]);
+        fixture_frame(&mut s4, tag, record);
+        if tag == 0x02 {
+            let mut artifact = Vec::new();
+            fixture_digest(&mut artifact, "beacon.artifact.v1", 3);
+            fixture_blob(&mut artifact, &[3; 4]);
+            fixture_digest(&mut artifact, "beacon.raw.v1", 3);
+            fixture_blob(&mut artifact, &[3; 4]);
+            fixture_frame(&mut s4, 0x03, artifact);
+        }
+    }
+    let mut receipt = Vec::new();
+    receipt.extend_from_slice(Uuid::from_u128(200).as_bytes());
+    receipt.extend_from_slice(&1_u32.to_be_bytes());
+    fixture_blob(&mut receipt, b"beacon.outcome.receipt-checksum.v1");
+    receipt.extend_from_slice(&[7; 32]);
+    fixture_blob(&mut receipt, br#"{"version":1}"#);
+    fixture_frame(&mut s4, 0x09, receipt);
+    fixture_frame(&mut out, 0x04, s4);
+
+    let mut s5 = Vec::new();
+    fixture_blob(&mut s5, b"rubric bytes");
+    s5.extend_from_slice(&4_u32.to_be_bytes());
+    for id in CRITERION_IDS {
+        fixture_blob(&mut s5, id.as_bytes());
+    }
+    fixture_frame(&mut out, 0x05, s5);
+    out
+}
+
 fn cap() -> PacketCap {
     PacketCap::new(64 * 1024 * 1024)
 }
@@ -136,7 +245,7 @@ fn receipt_entry(run: u128, version: u32) -> EvidenceEntry {
             version,
             checksum_label: "beacon.outcome.receipt-checksum.v1".to_owned(),
             checksum: [7_u8; 32],
-            receipt_json: br#"{"version":1}"#.to_vec(),
+            receipt_json: format!(r#"{{"version":{version}}}"#).into_bytes(),
         },
     }
 }
@@ -245,6 +354,11 @@ fn malformed_code(
 #[test]
 fn packet_contains_exact_subject_and_independent_owner_bytes_in_canonical_order() {
     let built = packet(one_of_each_reversed());
+    assert_eq!(
+        built.bytes(),
+        table_fixture_bytes(),
+        "the full packet must equal the independently transcribed frozen table"
+    );
 
     // S4 order is the frozen sort, not the insertion order.
     let kinds: Vec<EntryKind> = built.entries().iter().map(|entry| entry.kind).collect();
@@ -293,19 +407,25 @@ fn packet_preserves_owner_scoped_receipt_versions_and_exact_stored_json() {
     // Each admitted version is carried exactly, and the exact stored JSON travels with it.
     for version in 1..=4_u32 {
         let built = packet(vec![receipt_entry(300, version)]);
-        assert!(
-            built
-                .bytes()
-                .windows(13)
-                .any(|window| window == br#"{"version":1}"#),
-            "the exact stored receipt_json must travel, not a re-serialisation"
-        );
-        let mut expected = [0_u8; 4];
-        expected.copy_from_slice(&version.to_be_bytes());
-        assert!(
-            built.bytes().windows(4).any(|window| window == expected),
-            "version {version} must be carried"
-        );
+        let decoded = beacond::decode_packet(built.bytes()).expect("the packet decodes");
+        let [entry] = decoded.inputs().evidence.as_slice() else {
+            panic!("the receipt fixture must decode to exactly one entry");
+        };
+        match &entry.body {
+            EntryBody::Receipt {
+                version: carried_version,
+                receipt_json,
+                ..
+            } => {
+                assert_eq!(*carried_version, version, "the Receipt slot carries its version");
+                assert_eq!(
+                    receipt_json,
+                    format!(r#"{{"version":{version}}}"#).as_bytes(),
+                    "the exact stored receipt_json must travel, not a re-serialisation"
+                );
+            }
+            other => panic!("expected Receipt body, got {other:?}"),
+        }
     }
     // A version outside the SQL domain refuses by its own name.
     let refusal = encode_packet(&inputs(vec![receipt_entry(300, 5)]), cap())
@@ -334,7 +454,7 @@ fn packet_refuses_missing_or_oversized_owner_source_before_returning_partial_byt
         .expect_err("a source over its owner ceiling refuses");
     assert_eq!(
         refusal,
-        FidelityPacketRefusal::Malformed(MalformedFidelityPacket::OverLimitLength)
+        FidelityPacketRefusal::SourceOverOwnerCeiling { kind: "completion" }
     );
 
     // Individually legal sources whose AGGREGATE alone exceeds the caller cap.
@@ -427,8 +547,13 @@ fn overlimit_response_hashes_only_the_bounded_prefix_and_creates_no_evaluation()
     // A retained COMPLETE observation longer than the ceiling is over-limit too: the C2 grammar
     // admits one even though this adapter never emits one.
     match outcome(&complete(&long), &built) {
-        ResultOutcome::OverLimit { observed_bytes, .. } => {
-            assert_eq!(observed_bytes, OVER_LIMIT_WITNESS)
+        ResultOutcome::OverLimit {
+            prefix_sha256,
+            observed_bytes,
+        } => {
+            assert_eq!(observed_bytes, OVER_LIMIT_WITNESS);
+            assert_eq!(prefix_sha256, sha256(&long[..OVER_LIMIT_WITNESS]));
+            assert_ne!(prefix_sha256, ceiling_only);
         }
         other => panic!(
             "complete-over-ceiling must be OverLimit, got {}",
@@ -470,6 +595,24 @@ fn missing_malformed_or_out_of_packet_response_never_becomes_a_valid_result() {
         malformed_code(&complete(duplicated.as_bytes()), &built),
         MalformedCode::UnknownOrDuplicateField
     );
+
+    // Key closure applies at every object depth; serde_json::Value must not collapse duplicates.
+    let nested_cases = [
+        base.replace(
+            r#""id":"completion_fidelity""#,
+            r#""id":"completion_fidelity","id":"completion_fidelity""#,
+        ),
+        base.replace(r#""verdict":"meets""#, r#""verdict":"meets","extra":true"#),
+        base.replace(r#""state":"none""#, r#""state":"none","state":"none""#),
+        base.replace(r#","verdict":"meets""#, ""),
+    ];
+    for nested in nested_cases {
+        assert_eq!(
+            malformed_code(&complete(nested.as_bytes()), &built),
+            MalformedCode::UnknownOrDuplicateField,
+            "nested unknown, missing, and duplicate keys share the frozen refusal"
+        );
+    }
 
     // Identity is compared against HELD values, never adopted.
     let mut wrong_packet = Body::valid(&built);
@@ -581,7 +724,7 @@ fn valid_result_text_is_recordable_human_text() {
     );
 
     // Declared conflict text takes the same predicate, under its own code.
-    for text in ["", " leading", "control\\u0007char"] {
+    for text in ["", " leading", "trailing ", "control\\u0007char"] {
         let mut body = Body::valid(&built);
         body.conflicts = format!(r#"{{"state":"declared","text":"{text}"}}"#);
         assert_eq!(
@@ -665,6 +808,19 @@ fn evidence_entry_order_is_the_frozen_sort_not_collection_order() {
         key_of(&moved).digest(),
         "the request key carries no moving fact, so idempotency survives the change"
     );
+    moved.header.current_configuration_state = beacond::ResidentConfigurationState::Cleared;
+    moved.header.activation = Some(ActivationFacts {
+        configured_activation_id: Uuid::from_u128(20),
+        latest_activation_id: Uuid::from_u128(21),
+        latest_state: beacond::LocalModelActivationState::Inactive,
+    });
+    let cleared_and_superseded = encode_packet(&moved, cap()).expect("packet encodes");
+    assert_ne!(after.bytes(), cleared_and_superseded.bytes());
+    assert_eq!(
+        key_of(&moved).digest(),
+        key_of(&inputs(Vec::new())).digest(),
+        "configuration clearing and activation supersession remain moving packet facts"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -679,6 +835,8 @@ fn every_reachable_truth_table_row_has_exactly_one_outcome() {
     let built = packet(one_of_each_reversed());
     let valid = Body::valid(&built).render();
     let long = vec![b'y'; 200_000];
+    let mut parseable_over_ceiling = valid.as_bytes().to_vec();
+    parseable_over_ceiling.resize(OVER_LIMIT_WITNESS, b' ');
 
     // (B, T, W, P, expected outcome name)
     let rows: Vec<(bool, bool, bool, bool, &str, TerminalObservation)> = vec![
@@ -713,6 +871,17 @@ fn every_reachable_truth_table_row_has_exactly_one_outcome() {
         (
             true,
             false,
+            false,
+            true,
+            "OverLimit",
+            incomplete(
+                parseable_over_ceiling.clone(),
+                IncompleteCause::ResponseOverLimit,
+            ),
+        ),
+        (
+            true,
+            false,
             true,
             false,
             "Incomplete",
@@ -727,6 +896,14 @@ fn every_reachable_truth_table_row_has_exactly_one_outcome() {
             incomplete(valid.as_bytes().to_vec(), IncompleteCause::BodyReadRefused),
         ),
         (true, true, false, false, "OverLimit", complete(&long)),
+        (
+            true,
+            true,
+            false,
+            true,
+            "OverLimit",
+            complete(&parseable_over_ceiling),
+        ),
         (
             true,
             true,

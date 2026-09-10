@@ -2016,22 +2016,24 @@ pub(crate) fn verified_classification_with_event_within(
     // we already hold (`mission_completion_store.rs:1220-1232`'s rule, kept).
     let mut statement = connection
         .prepare(
-            "SELECT payload_json FROM events
+            "SELECT payload_json, occurred_at_ms FROM events
              WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
                AND json_extract(payload_json, '$.digest.value') = ?2",
         )
         .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?;
-    let payloads: Vec<String> = statement
+    let payloads: Vec<(String, i64)> = statement
         .query_map(
             rusqlite::params![workspace_id.to_string(), digest_value],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?;
-    let [payload_json] = payloads.as_slice() else {
+    let [(payload_json, occurred_at_ms)] = payloads.as_slice() else {
         return Err(ClassificationEventProof::RecordingEventUnaccounted);
     };
+    let occurred_at_ms =
+        u64::try_from(*occurred_at_ms).map_err(|_| ClassificationEventProof::DivergentEvidence)?;
 
     let payload: MissionImpactClassifiedPayload = serde_json::from_str(payload_json)
         .map_err(|_| ClassificationEventProof::DivergentEvidence)?;
@@ -2039,12 +2041,20 @@ pub(crate) fn verified_classification_with_event_within(
     // must agree. An Event that says something the record does not is a mismatch, never a
     // correction.
     if payload.workspace_id != workspace_id.to_string()
+        || payload.digest.algorithm != record.digest().algorithm
         || payload.digest.value != *digest_value
-        || payload.digest.canonicalizer != CANONICALIZER
+        || payload.digest.canonicalizer != record.digest().canonicalizer
         || payload.classification_id != record.payload().classification_id.to_string()
         || payload.mission_id != record.payload().mission_id.to_string()
+        || payload.project_id != record.payload().policy.project_id.to_string()
         || payload.version != record.payload().version
+        || payload.impact != record.payload().impact.as_str()
+        || payload.basis != record.payload().basis.as_str()
+        || payload.policy_revision != record.payload().policy.policy_revision
+        || payload.charter_revision != record.payload().policy.charter_revision
         || payload.canonical_bytes_base64 != BASE64.encode(record.canonical_bytes())
+        || payload.classified_at_ms != record.payload().classified_at_ms
+        || occurred_at_ms != record.payload().classified_at_ms
     {
         return Err(ClassificationEventProof::DivergentEvidence);
     }

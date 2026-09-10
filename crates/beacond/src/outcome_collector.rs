@@ -1667,6 +1667,29 @@ impl<'a> Collector<'a> {
         Ok((reference, bytes))
     }
 
+    /// Whether an otherwise unpositioned Receipt belongs to the dispatch owner this registry does
+    /// not yet replay. Candidate evaluation refuses this case by its ruled public name rather than
+    /// broadening the registered preflight/execution owner set.
+    pub(crate) fn receipt_has_unregistered_dispatch_owner(
+        &self,
+        run_uuid: Uuid,
+    ) -> Result<bool, CollectorRefusal> {
+        let count: i64 = self
+            .connection
+            .query_row(
+                "SELECT count(*) FROM events
+                 WHERE workspace_id = ?1 AND kind = 'proposal.dispatched'
+                   AND json_extract(payload_json, '$.runId') = ?2",
+                params![self.workspace_id.to_string(), run_uuid.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| CollectorRefusal::Unverified {
+                kind: "receipt",
+                reason: error.to_string(),
+            })?;
+        Ok(count > 0)
+    }
+
     /// Every run Event naming this run, replayed through its OWNING module's verifier, and the
     /// latest sequence among them.
     ///

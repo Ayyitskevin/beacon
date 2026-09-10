@@ -2213,34 +2213,41 @@ pub(crate) fn verified_spend_with_event_within(
 
     let mut statement = connection
         .prepare(
-            "SELECT payload_json FROM events
+            "SELECT payload_json, occurred_at_ms FROM events
              WHERE workspace_id = ?1 AND kind = 'spend.measured'
                AND json_extract(payload_json, '$.digest.value') = ?2",
         )
         .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?;
-    let payloads: Vec<String> = statement
+    let payloads: Vec<(String, i64)> = statement
         .query_map(
             rusqlite::params![workspace_id.to_string(), digest_value],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?;
-    let [payload_json] = payloads.as_slice() else {
+    let [(payload_json, occurred_at_ms)] = payloads.as_slice() else {
         return Err(SpendEventProof::RecordingEventUnaccounted);
     };
+    let occurred_at_ms =
+        u64::try_from(*occurred_at_ms).map_err(|_| SpendEventProof::DivergentEvidence)?;
 
     let payload: SpendMeasuredPayload =
         serde_json::from_str(payload_json).map_err(|_| SpendEventProof::DivergentEvidence)?;
     // The era decides which canonicalizer these bytes are written in, so the Event's claim is
     // checked against the RECORD's era rather than against whichever spelling is current.
     if payload.workspace_id != workspace_id.to_string()
+        || payload.digest.algorithm != record.digest().algorithm
         || payload.digest.value != *digest_value
         || payload.digest.canonicalizer != record.payload().era.canonicalizer()
         || payload.spend_id != record.payload().spend_id.to_string()
         || payload.mission_id != record.payload().mission_id.to_string()
         || payload.version != record.payload().version
+        || payload.origin != record.payload().origin.as_str()
+        || payload.measurement != record.payload().measurement.literal()
         || payload.canonical_bytes_base64 != BASE64.encode(record.canonical_bytes())
+        || payload.measured_at_ms != record.payload().measured_at_ms
+        || occurred_at_ms != record.payload().measured_at_ms
     {
         return Err(SpendEventProof::DivergentEvidence);
     }
