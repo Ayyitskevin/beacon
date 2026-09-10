@@ -209,21 +209,26 @@ it("C7.VIEW.EVERY_BINDING_IS_THE_HELD_ONE: a reply that answers something else i
 });
 
 it("C7.VIEW.THE_ENCODING_IS_CANONICAL: malformed, non-canonical and over-long bodies refuse", async () => {
-  const bodies: readonly (readonly [string, string])[] = [
-    ["a stray character", "IQ=!"],
-    ["whitespace", `${base64(TEXT).slice(0, 8)}\n${base64(TEXT).slice(8)}`],
-    ["bad padding", `${base64(TEXT)}=`],
-    // "QR==" and "QQ==" both decode to 0x41: the second character carries four unused bits, and a
-    // content-addressed record must not have two encodings.
-    ["non-canonical tail bits", "QR=="],
-    ["over the encoded ceiling", `${"A".repeat(1_398_104)}AAAA`],
+  // Each case carries the byte count its own body actually decodes to, so the refusal under test is
+  // the only one that can fire. The `QR==` row previously kept TEXT's count and therefore refused on
+  // LENGTH -- the row passed while saying something it never tested (root's witness review). The
+  // tail-bit propositions now live in their own named bars below; this row is the malformed-family
+  // sibling, told truthfully.
+  const bodies: readonly (readonly [string, string, number])[] = [
+    ["a stray character", "IQ=!", byteLength(TEXT)],
+    ["whitespace", `${base64(TEXT).slice(0, 8)}\n${base64(TEXT).slice(8)}`, byteLength(TEXT)],
+    ["bad padding", `${base64(TEXT)}=`, byteLength(TEXT)],
+    ["non-canonical tail bits, at its own length", "QR==", 1],
+    // Refusal only. That it refuses BEFORE decoding is a separate proposition with its own bar and
+    // its own instrument; this row does not claim it.
+    ["over the encoded ceiling", `${"A".repeat(1_398_104)}AAAA`, byteLength(TEXT)],
   ];
-  for (const [label, body] of bodies) {
+  for (const [label, body, bytes] of bodies) {
     cleanup();
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue(reply(TEXT, { candidateContentBase64: body }));
+    invokeMock.mockResolvedValue(reply(TEXT, { candidateContentBase64: body, candidateContentBytes: bytes }));
     const user = userEvent.setup();
-    render(<OutcomeCandidateDocument receipt={held()} />);
+    render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: bytes })} />);
     await view(user);
 
     expect(await screen.findByText(UNAVAILABLE), `C7.VIEW.THE_ENCODING_IS_CANONICAL: ${label}`).toBeInTheDocument();
@@ -389,7 +394,10 @@ it("astra_c7_one_byte_noncanonical_tail_is_refused_at_its_actual_length", async 
   invokeMock.mockResolvedValue(reply("A", { candidateContentBase64: "QR==" }));
   render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 1 })} />);
   await view(user);
-  expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.ONE_BYTE_TAIL_BITS_ARE_CANONICAL").toBeInTheDocument();
+  expect(
+    screen.queryByText(UNAVAILABLE) !== null,
+    "C7.ASTRA.ONE_BYTE_TAIL_BITS_ARE_CANONICAL",
+  ).toBe(true);
   expect(screen.queryByText("Stored candidate text"), "C7.ASTRA.ONE_BYTE_NONCANONICAL_TEXT_NOT_SHOWN").toBeNull();
 });
 
@@ -398,7 +406,10 @@ it("astra_c7_two_byte_noncanonical_tail_is_refused_at_its_actual_length", async 
   invokeMock.mockResolvedValue(reply("AB", { candidateContentBase64: "QUJ=" }));
   render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 2 })} />);
   await view(user);
-  expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.TWO_BYTE_TAIL_BITS_ARE_CANONICAL").toBeInTheDocument();
+  expect(
+    screen.queryByText(UNAVAILABLE) !== null,
+    "C7.ASTRA.TWO_BYTE_TAIL_BITS_ARE_CANONICAL",
+  ).toBe(true);
   expect(screen.queryByText("Stored candidate text"), "C7.ASTRA.TWO_BYTE_NONCANONICAL_TEXT_NOT_SHOWN").toBeNull();
 });
 
@@ -412,8 +423,58 @@ it("astra_c7_the_encoded_ceiling_is_checked_before_decoding", async () => {
   try {
     render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 1_048_576 })} />);
     await view(user);
-    expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.OVERLIMIT_IS_UNAVAILABLE").toBeInTheDocument();
+    expect(
+      screen.queryByText(UNAVAILABLE) !== null,
+      "C7.ASTRA.OVERLIMIT_IS_UNAVAILABLE",
+    ).toBe(true);
     expect(decode.mock.calls.length, "C7.ASTRA.ENCODED_LIMIT_PRECEDES_DECODING").toBe(0);
+  } finally {
+    decode.mockRestore();
+  }
+});
+
+it("C7.VIEW.THE_CANONICAL_TAILS_ARE_ACCEPTED: the same lengths, encoded canonically, read", async () => {
+  // The positive siblings of root's two witnesses. Without these, a guard that refused EVERY padded
+  // body would pass them both, and "non-canonical is refused" would be indistinguishable from
+  // "padded is refused".
+  for (const [label, text, body] of [
+    ["one byte", "A", "QQ=="],
+    ["two bytes", "AB", "QUI="],
+  ] as const) {
+    cleanup();
+    invokeMock.mockReset();
+    expect(base64(text), `C7.VIEW.THE_CANONICAL_TAILS_ARE_ACCEPTED: ${label} fixture is canonical`).toBe(body);
+    invokeMock.mockResolvedValue(reply(text, { candidateContentBase64: body }));
+    const user = userEvent.setup();
+    render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: byteLength(text) })} />);
+    await view(user);
+
+    expect(
+      await screen.findByText(text, { collapseWhitespace: false, trim: false }),
+      `C7.VIEW.THE_CANONICAL_TAILS_ARE_ACCEPTED: ${label}`,
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(UNAVAILABLE) === null,
+      `C7.VIEW.THE_CANONICAL_TAILS_ARE_ACCEPTED: ${label} was not refused`,
+    ).toBe(true);
+  }
+});
+
+it("C7.VIEW.THE_DECODER_SPY_OBSERVES_A_REAL_READ: the instrument works before it proves an absence", async () => {
+  // Root's ceiling witness asserts the decoder was never called. That assertion is only worth
+  // something if this spy can see a call at all -- an instrument that observes nothing passes an
+  // absence test for free.
+  const user = userEvent.setup();
+  invokeMock.mockResolvedValue(reply());
+  const decode = vi.spyOn(globalThis, "atob");
+  try {
+    render(<OutcomeCandidateDocument receipt={held()} />);
+    await view(user);
+    await screen.findByText(TEXT, { collapseWhitespace: false, trim: false });
+    expect(
+      decode.mock.calls.length >= 1,
+      "C7.VIEW.THE_DECODER_SPY_OBSERVES_A_REAL_READ: the spy saw the real decoder",
+    ).toBe(true);
   } finally {
     decode.mockRestore();
   }
