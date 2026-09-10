@@ -1528,7 +1528,10 @@ export async function loadMissionClassification(
     isClassificationObservation,
     "Mission classification",
   );
-  if (value.missionId !== missionId) {
+  // The outer id AND the nested record's: an observation whose `latest` belongs to another Mission is
+  // incoherent, and rendering it would show one Mission's record under another's heading. Refused at
+  // the same validation boundary as every other shape fault, not repaired.
+  if (value.missionId !== missionId || (value.latest !== null && value.latest.missionId !== missionId)) {
     throw new Error("Beacon received an invalid Mission classification.");
   }
   return value;

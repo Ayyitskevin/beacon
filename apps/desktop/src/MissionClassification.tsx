@@ -223,6 +223,10 @@ export function MissionClassification({
   function ready(current: ClassificationObservation): boolean {
     return (
       !pending &&
+      // An uncertain submission HOLDS. Re-pressing Record would send a second write against an
+      // observation that is already out of date, and the contract's answer to "unknown" is a READ.
+      // A fresh observation reopens the judgment; nothing here is permanently disabled.
+      !(outcome === "unknown" && recovery === null) &&
       current.publishedPolicy !== null &&
       impact !== "" &&
       reason.trim() === reason &&
@@ -281,7 +285,13 @@ export function MissionClassification({
     );
   }
 
-  /** A second READ of the same Mission, run only when the Operator asks. It writes nothing. */
+  /** A second READ of the same Mission, run only when the Operator asks. It writes nothing.
+   *
+   *  The answer REPLACES the panel's observation, because that observation is what the form's Policy
+   *  citation and predecessor come from: after an uncertain submission or a refusal that says "read
+   *  this", a new attempt has to be built on what was just read, not on the snapshot that is now
+   *  older than the store. It is not attribution and it is not a rollback claim -- it is a newer
+   *  snapshot. */
   function readBack() {
     if (recoveryPending) return;
     const mine = fresh();
@@ -293,6 +303,9 @@ export function MissionClassification({
         if (stale(mine)) return;
         setRecoveryPending(false);
         setRecovery(loaded);
+        setObservation(loaded);
+        // A definite refusal that told the Operator to read has now been read.
+        setWriteFailure("");
       },
       (error: unknown) => {
         if (stale(mine)) return;
@@ -301,6 +314,15 @@ export function MissionClassification({
       },
     );
   }
+
+  /** The definite refusals whose own copy tells the Operator to READ. Each one is actionable here
+   *  rather than only navigable: the Operator can take a fresh verified observation without leaving,
+   *  and the next request then names the Policy and the predecessor that were just read. */
+  const READABLE_REFUSALS: readonly string[] = [
+    "The Project Policy changed. Review the Policy and classify again.",
+    "A classification is already recorded for this Mission. Reclassify it by naming the recorded one.",
+    "That classification is no longer the latest. Read the classification and name the current one.",
+  ];
 
   /** Does this record hold the content that was submitted? EVERY authored field and every echoed
    *  binding, not impact and reason alone -- and a match is a match of CONTENT, never attribution. */
@@ -405,9 +427,16 @@ export function MissionClassification({
                   />
                 </Field>
                 {writeFailure !== "" && (
-                  <p role="alert" className={classes.body}>
-                    {writeFailure}
-                  </p>
+                  <>
+                    <p role="alert" className={classes.body}>
+                      {writeFailure}
+                    </p>
+                    {READABLE_REFUSALS.includes(writeFailure) && (
+                      <Button size="small" onClick={readBack} disabled={recoveryPending}>
+                        Read the classification
+                      </Button>
+                    )}
+                  </>
                 )}
                 {pending && (
                   <p role="status" className={classes.body}>
