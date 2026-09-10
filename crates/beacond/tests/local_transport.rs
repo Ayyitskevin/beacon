@@ -14,18 +14,20 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, AppendixRequestDto, AutonomyProfile, BeaconCapability, BudgetBoundary,
-    ClassificationIntentRequest, CompletionPreview, DeclaredCheck, DiscoveryStatus,
-    LiveDataEncryption, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
-    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionCompletionCommandService, MissionDraft,
-    MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorAccountService,
-    OperatorSessionPhase, OutcomeService, PlatformMonitorState, PolicyAuthor, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProviderFeature, RepositoryAuthor, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationState, ResidentLifecycle, SecretString,
+    ClassificationIntentRequest, CompletionPreview, Conflicts, DeclaredCheck, DiscoveryStatus,
+    EvaluationDraft, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
+    Finding, FindingSeverity, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
+    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
+    MissionCompletionCommandService, MissionDraft, MissionLifecycle, MissionMemberDraft,
+    ModelActivation, OperatorAccountService, OperatorSessionPhase, OutcomeService,
+    PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationState, ResidentLifecycle, RubricDeclaration, SecretString,
     StarterOrganizationDecision, StarterResidentDraft, StarterRole, SupersedesDto, TeamDraft,
     TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind,
-    TrackRecordRequirement, initialize_local_auth_token,
+    TrackRecordRequirement, Verdict, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1618,6 +1620,270 @@ fn a_prepared_candidate_receipt_equals_the_owners_own_records() {
     thread.join().unwrap().unwrap();
 }
 
+/// Re-preparing an ALREADY PUBLISHED candidate: the same identities come back, nothing is written
+/// again, and the publication that exists is untouched.
+///
+/// The published initial state is established through PUBLIC owner commands only —
+/// `EvaluationService::record` with an explicit test draft by an independent Resident, then
+/// `OutcomeService::publish` — which is the same shape the existing `outcome_closure` suite uses. No
+/// publication relation is planted, no Run or Receipt is invented, and nothing here claims a real
+/// evaluator or a model did any work: it is fixture data for the one scenario this bar is about.
+#[test]
+fn re_preparing_a_published_candidate_changes_nothing_that_is_published() {
+    let runtime = TestRuntime::new("c6repub");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let fixture = prepare_c6_fixture_with_reviewer(&client);
+
+    // 1. Prepare over the REAL socket.
+    let first = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLISHED.THE_FIRST_PREPARE_IS_ACCEPTED: {error}"));
+
+    // 2. Publish it, through public owner commands on a second authenticated service.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), fixture.workspace_id);
+    let record = outcomes
+        .candidate(&first.manifest_digest.value)
+        .expect("C6T.PUBLISHED.THE_CANDIDATE_IS_READABLE");
+    let evaluation = EvaluationService::new(Arc::clone(&accounts), fixture.workspace_id)
+        .record(EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(
+                first.candidate_artifact_digest.value.clone(),
+            ),
+            evaluator: Evaluator {
+                // An INDEPENDENT Resident: not the one accountable for the completion.
+                resident_id: fixture.reviewer_resident_id,
+                configuration_id: fixture.reviewer_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "outcome-document-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+            },
+            cited_runs: Vec::new(),
+            verdict: Verdict::Meets,
+            findings: vec![Finding {
+                severity: FindingSeverity::Note,
+                summary: "Read the exact Artifact bytes.".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "An independent Resident read the exact Artifact bytes.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        })
+        .expect("C6T.PUBLISHED.THE_EVALUATION_IS_RECORDED");
+    let published = outcomes
+        .publish(fixture.mission_id, record.digest(), evaluation.digest())
+        .expect("C6T.PUBLISHED.THE_CANDIDATE_IS_PUBLISHED");
+    let published_version = published.publication_version();
+    let published_count = published.publication_version_count();
+    let exported = outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("C6T.PUBLISHED.THE_EXPORT_IS_READABLE");
+    let published_bytes = exported.bytes().to_vec();
+    let creation_event_seq = record.creation_event_seq();
+    let summaries = client.mission_publications(fixture.mission_id).unwrap();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "C6T.PUBLISHED.THE_FIXTURE_HAS_EXACTLY_ONE_PUBLICATION"
+    );
+
+    // 3. Re-prepare the SAME request over the socket. Owner idempotence is the only repeat mechanism.
+    let repeat = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLISHED.THE_REPEAT_IS_ACCEPTED: {error}"));
+
+    assert_eq!(
+        repeat, first,
+        "C6T.PUBLISHED.THE_REPEAT_RETURNS_THE_SAME_RECEIPT"
+    );
+    assert_eq!(
+        (
+            repeat.manifest_id,
+            repeat.manifest_digest.value.clone(),
+            repeat.candidate_artifact_digest.value.clone(),
+            repeat.candidate_content_digest.value.clone(),
+            repeat.candidate_content_bytes,
+        ),
+        (
+            first.manifest_id,
+            first.manifest_digest.value.clone(),
+            first.candidate_artifact_digest.value.clone(),
+            first.candidate_content_digest.value.clone(),
+            first.candidate_content_bytes,
+        ),
+        "C6T.PUBLISHED.EVERY_HELD_IDENTITY_IS_UNCHANGED"
+    );
+
+    // 4. Nothing was written again: the Artifact's creation Event is where a second write would show.
+    let after = outcomes
+        .candidate(&first.manifest_digest.value)
+        .expect("the candidate is still readable");
+    assert_eq!(
+        after.creation_event_seq(),
+        creation_event_seq,
+        "C6T.PUBLISHED.NO_SECOND_MANIFEST_ARTIFACT_OR_EVENT_WRITE"
+    );
+
+    // 5. And the publication is exactly as it was: same version, same count, same bytes.
+    let still = outcomes
+        .get(fixture.mission_id)
+        .expect("C6T.PUBLISHED.THE_PUBLICATION_IS_STILL_READABLE");
+    assert_eq!(
+        (
+            still.publication_version(),
+            still.publication_version_count()
+        ),
+        (published_version, published_count),
+        "C6T.PUBLISHED.THE_PUBLICATION_VERSION_IS_UNCHANGED"
+    );
+    assert_eq!(
+        outcomes
+            .export_markdown(fixture.mission_id)
+            .expect("the export is still readable")
+            .bytes(),
+        published_bytes.as_slice(),
+        "C6T.PUBLISHED.THE_PUBLISHED_BYTES_ARE_UNCHANGED"
+    );
+    assert_eq!(
+        client.mission_publications(fixture.mission_id).unwrap(),
+        summaries,
+        "C6T.PUBLISHED.THE_PUBLICATION_HISTORY_IS_UNCHANGED"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The C6 fixture plus a SECOND, independent Resident, so an Evaluation can name an evaluator that is
+/// not the Resident accountable for the completion.
+///
+/// Public constructors only: `accept_starter_organization` with two drafts, `activate_resident`,
+/// `inspect_local_model`/`activate_local_model`, `configure_resident` — the same client methods the
+/// single-Resident fixture uses, called once more.
+fn prepare_c6_fixture_with_reviewer(client: &LocalSupervisorClient) -> PreparedC6Fixture {
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let residents = client
+        .accept_starter_organization(
+            1,
+            vec![
+                draft(StarterRole::Lead, Some("Northstar")),
+                draft(StarterRole::Reviewer, Some("Second Reader")),
+            ],
+        )
+        .unwrap()
+        .residents;
+    let lead = residents[0].id;
+    let reviewer = residents[1].id;
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configure = |resident_id: Uuid| {
+        client.activate_resident(resident_id, None).unwrap();
+        client
+            .configure_resident(
+                resident_id,
+                None,
+                activation.id,
+                vec![BeaconCapability::WorkCreateMission],
+            )
+            .unwrap()
+            .id
+    };
+    let lead_configuration = configure(lead);
+    let reviewer_configuration = configure(reviewer);
+
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            // Both Residents: a Mission's members must be the Team's, and the evaluator has to be on
+            // the Mission's admission roster for its configuration to be citable.
+            members: vec![
+                TeamMemberDraft {
+                    resident_id: lead,
+                    expected_configuration_id: lead_configuration,
+                },
+                TeamMemberDraft {
+                    resident_id: reviewer,
+                    expected_configuration_id: reviewer_configuration,
+                },
+            ],
+        })
+        .unwrap();
+    let fixture = PreparedC6Fixture {
+        workspace_id: project.workspace_id,
+        project_id: project.id,
+        charter_revision: project.charter.revision,
+        policy_revision: policy.revision,
+        team_id: formed.id,
+        resident_id: lead,
+        configuration_id: lead_configuration,
+        reviewer_resident_id: reviewer,
+        reviewer_configuration_id: reviewer_configuration,
+        mission_id: Uuid::nil(),
+    };
+    let mission_id = admit_another_mission(client, &fixture, "Ship one reviewed feature");
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_CLASSIFICATION_IS_RECORDED: {error}"));
+    complete_mission(client, &fixture, mission_id);
+    PreparedC6Fixture {
+        mission_id,
+        ..fixture
+    }
+}
+
 /// Preparing, and re-preparing, leaves the publication relation exactly as it was.
 ///
 /// The reachable state here is "no publication", and that is what the bar proves: preparing a
@@ -1741,6 +2007,10 @@ struct PreparedC6Fixture {
     team_id: Uuid,
     resident_id: Uuid,
     configuration_id: Uuid,
+    /// A SECOND Resident, for a bar that needs an evaluator who is not the accountable Resident. The
+    /// single-Resident fixture fills these with the lead's own ids and no bar of its own uses them.
+    reviewer_resident_id: Uuid,
+    reviewer_configuration_id: Uuid,
     mission_id: Uuid,
 }
 
@@ -1814,6 +2084,8 @@ fn prepare_c6_fixture(client: &LocalSupervisorClient) -> PreparedC6Fixture {
         team_id: formed.id,
         resident_id,
         configuration_id: configuration.id,
+        reviewer_resident_id: resident_id,
+        reviewer_configuration_id: configuration.id,
         mission_id: Uuid::nil(),
     };
     let mission_id = admit_another_mission(client, &fixture, "Ship one reviewed feature");
@@ -1851,10 +2123,25 @@ fn admit_another_mission(
             success_conditions: vec!["Relevant gates pass".to_owned()],
             constraints: vec![],
             prohibitions: vec![],
-            members: vec![MissionMemberDraft {
-                resident_id: fixture.resident_id,
-                expected_configuration_id: fixture.configuration_id,
-            }],
+            members: if fixture.reviewer_resident_id == fixture.resident_id {
+                vec![MissionMemberDraft {
+                    resident_id: fixture.resident_id,
+                    expected_configuration_id: fixture.configuration_id,
+                }]
+            } else {
+                // The evaluator's configuration is keyed at THIS Mission's admission -- the store's
+                // own foreign key says so -- so an independent evaluator has to be admitted with it.
+                vec![
+                    MissionMemberDraft {
+                        resident_id: fixture.resident_id,
+                        expected_configuration_id: fixture.configuration_id,
+                    },
+                    MissionMemberDraft {
+                        resident_id: fixture.reviewer_resident_id,
+                        expected_configuration_id: fixture.reviewer_configuration_id,
+                    },
+                ]
+            },
         })
         .unwrap()
         .id
