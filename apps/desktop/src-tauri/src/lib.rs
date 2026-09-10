@@ -9,16 +9,15 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CompletionIntentRequest,
-    CompletionPreview, CompletionView, ExportedOutcome, LiveDataEncryptionReport,
-    LocalErrorCode, LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
-    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
-    PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectPolicy,
-    ProjectPolicyDraft, ProjectRepository, ProjectSummary, ProjectView, ProviderFeature,
-    PublicationSummary, RecentReceiptPage, RepositoryDraft, ResidentAgentView,
-    ResidentConfiguration, ReviewedIntent, SampleProjectInstallResult, SampleProjectStatus,
-    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
-    initialize_local_auth_token,
+    CompletionPreview, CompletionView, ExportedOutcome, LiveDataEncryptionReport, LocalErrorCode,
+    LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
+    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
+    OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
+    ProjectSummary, ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage,
+    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ReviewedIntent,
+    SampleProjectInstallResult, SampleProjectStatus, SecretString, StarterOrganizationView,
+    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -1950,15 +1949,17 @@ mod tests {
         DesktopState, accept_starter_organization_value, activate_resident_value,
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
-        current_project_repository_value, get_mission_completion_value,
-        install_sample_project_value, migrate_legacy_app_data, mission_value,
-        outcome_document_value, platform_session_monitor_status_value,
-        preflight_project_checks_value, prepare_runtime_directory, project_charter_history_value,
+        current_project_repository_value, get_mission_completion_intent_value,
+        get_mission_completion_value, install_sample_project_value, migrate_legacy_app_data,
+        mission_value, outcome_document_value, platform_session_monitor_status_value,
+        preflight_project_checks_value, prepare_runtime_directory,
+        preview_mission_completion_value, project_charter_history_value,
         project_policy_history_value, project_policy_value, project_repository_history_value,
         project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
-        residents_value, retire_resident_value, revise_project_charter_value,
-        sample_project_status_value, session_policy_value, session_status_value,
-        set_session_timeout_value, starter_organization_value, suspend_resident_value,
+        record_mission_completion_value, residents_value, retire_resident_value,
+        revise_project_charter_value, sample_project_status_value, session_policy_value,
+        session_status_value, set_session_timeout_value, starter_organization_value,
+        suspend_resident_value,
     };
 
     #[test]
@@ -2253,6 +2254,9 @@ mod tests {
                 "allow-team",
                 "allow-form-team",
                 "allow-get-mission-completion",
+                "allow-preview-mission-completion",
+                "allow-record-mission-completion",
+                "allow-get-mission-completion-intent",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -2351,7 +2355,11 @@ mod tests {
                 SecretString::new("a long local passphrase".to_owned()),
             )
             .unwrap();
-        state.state.supervisor.complete_operator_setup(true).unwrap();
+        state
+            .state
+            .supervisor
+            .complete_operator_setup(true)
+            .unwrap();
 
         let absent = get_mission_completion_intent_value(&state.state, Uuid::new_v4())
             .expect("C4.DESKTOP.COMMANDS_WIRED: an unknown Mission is not an error");
@@ -2390,9 +2398,8 @@ mod tests {
             "C4.DESKTOP.PREVIEW_REFUSAL_IS_THE_SHARED_LINE"
         );
 
-        let record_refusal =
-            record_mission_completion_value(&state.state, request, "a".repeat(64))
-                .expect_err("C4.DESKTOP.RECORD_REACHES_THE_OWNER");
+        let record_refusal = record_mission_completion_value(&state.state, request, "a".repeat(64))
+            .expect_err("C4.DESKTOP.RECORD_REACHES_THE_OWNER");
         assert_eq!(
             (record_refusal.code, record_refusal.message),
             (
