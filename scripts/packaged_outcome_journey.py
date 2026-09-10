@@ -174,6 +174,12 @@ class JourneyPlan:
     appendix_request: str = "policy_default"
     author_capabilities: tuple[str, ...] = ("artifact.produce",)
     reviewer_capabilities: tuple[str, ...] = ("artifact.evaluate",)
+    # The Local model this journey activates. `None` requires the disposable host to expose exactly
+    # one, so an ambiguous host is a loud refusal rather than an arbitrary pick.
+    model_name: str | None = None
+    # `ProviderFeature`, snake_case (`local_model_activation.rs:22-27`). Configuration REQUIRES
+    # Completion (`resident_configuration.rs:400-404`).
+    approved_features: tuple[str, ...] = ("completion",)
 
 
 def evidence_name(order: int, slug: str, suffix: str) -> str:
@@ -393,6 +399,35 @@ def compare_candidate_bytes(prepared: dict, document: dict) -> dict:
     }
 
 
+def select_local_model(models: Iterable[dict], wanted: str | None) -> dict:
+    """Pick the Local model this journey activates, or refuse loudly.
+
+    `DiscoveredLocalModel` carries `name` and `digest` (`resource_discovery.rs:50-58`), which are
+    exactly what `inspect_local_model` takes. An unnamed plan requires the host to expose exactly
+    one model: picking the first of several would make the journey's evidence depend on the order
+    a provider happened to list its models in.
+    """
+    rows = list(models)
+    step = "starter_organization_with_author_and_reviewer"
+    if wanted is not None:
+        matching = [row for row in rows if row.get("name") == wanted]
+        if len(matching) != 1:
+            raise JourneyRefusal(
+                step,
+                "absent",
+                f"the plan names the Local model {wanted!r}; the host offers "
+                f"{sorted(str(row.get('name')) for row in rows)}",
+            )
+        return matching[0]
+    if len(rows) != 1:
+        raise JourneyRefusal(
+            step,
+            "absent",
+            f"the plan names no Local model and the host offers {len(rows)}, not one",
+        )
+    return rows[0]
+
+
 def select_author_and_reviewer(residents: Iterable[dict]) -> tuple[dict, dict]:
     """Two DISTINCT Residents, one to produce and one to evaluate.
 
@@ -429,6 +464,9 @@ COMMAND_RESULT_KIND = {
     "starter_organization": "starter_organization",
     "accept_starter_organization": "starter_organization",
     "residents": "residents",
+    "discover_local_models": "local_model_discovery",
+    "inspect_local_model": "local_model_activation_review",
+    "activate_local_model": "local_model_activation",
     "activate_resident": "resident",
     "configure_resident": "resident_configuration",
     "sample_project_status": "sample_project_status",
@@ -591,6 +629,7 @@ class _Journey:
             author, reviewer = select_author_and_reviewer(residents)
         except JourneyRefusal as refusal:
             raise self._refuse(refusal.status, refusal.detail) from refusal
+        self.activation_id = self._activate_local_model()
         self.author = self._enable(author, self.plan.author_capabilities, "author")
         self.reviewer = self._enable(reviewer, self.plan.reviewer_capabilities, "reviewer")
         self._observe("Residents in this Workspace", "briefing")
@@ -598,6 +637,43 @@ class _Journey:
             f"two distinct Residents: author {self.author['resident_id']} produces, "
             f"reviewer {self.reviewer['resident_id']} evaluates"
         )
+
+    def _activate_local_model(self) -> str:
+        """Activate one Local model and return ITS id.
+
+        Configuring a Resident needs a current active Local-model activation with Completion
+        approved -- `configure_resident` resolves `activation_id` through `activation_by_id` and
+        refuses `ModelActivationUnavailable` otherwise (`resident_configuration.rs:387-404`). That
+        id is minted by `ActivateLocalModel` (`local_transport.rs:1401-1404`,
+        `local_model_activation.rs:99-109`) and has nothing to do with the Resident lifecycle.
+
+        PROVIDER PREREQUISITE: `discover_local_models` and `inspect_local_model` read the local
+        provider (`local_model_activation.rs:328-337` calls discovery, then the provider's show
+        endpoint). The journey therefore needs a reachable local provider -- and it GENERATES
+        nothing: both are metadata reads, and no completion is ever requested.
+        """
+        report = self._request("discovery", "discover_local_models")
+        models = self._field(report, "report", "models")
+        try:
+            model = select_local_model(models, self.plan.model_name)
+        except JourneyRefusal as refusal:
+            raise self._refuse(refusal.status, refusal.detail) from refusal
+        review = self._request(
+            "model-review",
+            "inspect_local_model",
+            model_name=model["name"],
+            expected_digest=model["digest"],
+        )
+        activation = self._request(
+            "model-activated",
+            "activate_local_model",
+            review=self._field(review, "review"),
+            approved_features=list(self.plan.approved_features),
+        )
+        state = self._field(activation, "activation", "state")
+        if state != "active":
+            raise self._refuse("broken", f"the Local model activation is {state!r}, not active")
+        return self._field(activation, "activation", "id")
 
     def _enable(self, resident: dict, capabilities: Sequence[str], tag: str) -> dict:
         """Activate one Resident and configure it, returning the ids a Team draft needs."""
@@ -611,12 +687,28 @@ class _Journey:
         lifecycle = self._field(activated, "resident", "lifecycle")
         if lifecycle != "active":
             raise self._refuse("broken", f"the {tag} Resident is {lifecycle!r}, not active")
+        activation_id = self.activation_id
+        # Two different owners' identities. `require_expected` compares `expected_decision_id` to
+        # the latest CONFIGURATION predecessor (`resident_configuration.rs:385-386,517-523`), while
+        # `activation_id` is resolved through `activation_by_id` (`:387-404`). A value that is both
+        # is a threading mistake, and it is the one this journey nearly shipped: sending the
+        # lifecycle decision id would have failed `StaleDecision` first and hidden the second fault.
+        if activation_id == decision_id:
+            raise self._refuse(
+                "broken",
+                "activation_id is the Resident lifecycle decision id "
+                f"({decision_id!r}); it must be the Local-model activation id",
+            )
         configured = self._request(
             f"{tag}-configured",
             "configure_resident",
             resident_id=resident["id"],
-            expected_decision_id=decision_id,
-            activation_id=decision_id,
+            # This journey configures each Resident exactly once, so the latest CONFIGURATION
+            # predecessor is absent and the guard's expected value is null. A second configuration
+            # would have to carry the prior configuration decision id, and this journey never does
+            # one (`resident_configuration.rs:385-386,517-523`).
+            expected_decision_id=None,
+            activation_id=activation_id,
             capabilities=list(capabilities),
         )
         return {
@@ -866,8 +958,13 @@ class AppImageDriver:
     def request(self, command: str, /, **params: object) -> CommandOutcome:
         import socket as socket_module
 
+        # SNAKE_CASE, verbatim. `LocalCommand` carries `rename_all = "snake_case"` and NO
+        # `rename_all_fields` (`local_transport.rs:1223`), and `rename_all` renames the VARIANTS,
+        # not a struct variant's own fields -- so `model_name`/`expected_digest` are exactly that on
+        # the wire (`local_transport.rs:8521-8523`). The nested DTO bodies this journey sends
+        # (`draft`, `request`, `review`) are camelCase because THOSE structs declare it.
         body: dict[str, object] = {"name": command}
-        body.update({_camel(key): value for key, value in params.items()})
+        body.update(params)
         try:
             path, token = self._endpoint()
             client = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
@@ -1017,11 +1114,6 @@ class AppImageDriver:
                     f"act:{action}", result.returncode, None, result.stderr.decode()[:200]
                 )
         return CommandOutcome(f"act:{action}", 0)
-
-
-def _camel(key: str) -> str:
-    head, *rest = key.split("_")
-    return head + "".join(part.title() for part in rest)
 
 
 def main(argv: Sequence[str]) -> int:
