@@ -301,8 +301,12 @@ impl MissionImpactCommandService {
         .ok_or_else(|| unavailable(Unprovable::MissionAbsent))?;
 
         // The Policy citation, PROVEN against its own `project.policy_published` Event.
-        let (policy_revision, charter_revision) = crate::project_policy::
-            verified_latest_policy_citation(transaction, self.workspace_id, mission.project_id)
+        let (policy_revision, charter_revision) =
+            crate::project_policy::verified_latest_policy_citation(
+                transaction,
+                self.workspace_id,
+                mission.project_id,
+            )
             .map_err(|error| unavailable(Unprovable::PolicyBindingUnproven(format!("{error:?}"))))?
             .ok_or(ClassificationCommandError::NoPolicyPublished)?;
         if request.expected_policy_revision != Some(policy_revision) {
@@ -336,7 +340,8 @@ impl MissionImpactCommandService {
         // The codec's own grammar is the validator; its classes are PROJECTED, not flattened.
         let bytes = record.canonical_bytes().map_err(codec_refusal)?;
 
-        let recorded = classify_within(transaction, self.workspace_id, &bytes).map_err(write_refusal)?;
+        let recorded =
+            classify_within(transaction, self.workspace_id, &bytes).map_err(write_refusal)?;
         if recorded.payload() != &record {
             return Err(unavailable(Unprovable::WriteReadBackDisagrees));
         }
@@ -358,27 +363,57 @@ impl MissionImpactCommandService {
     ) -> Result<Vec<MissionImpactClassification>, ClassificationCommandError> {
         let candidates = {
             let mut statement = transaction.prepare(
-                "SELECT digest_value, version FROM mission_impact_classifications
+                "SELECT digest_value, version, policy_revision, charter_revision, classified_at_ms
+                 FROM mission_impact_classifications
                  WHERE workspace_id = ?1 AND mission_id = ?2",
             )?;
             statement
                 .query_map(
                     rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            [
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                            ],
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
                 )?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        // The stored integer domain of every candidate, before any of them is used for anything.
-        for (digest, version) in &candidates {
-            if u32::try_from(*version).ok().filter(|value| *value >= 1).is_none() {
+        // The RAW stored domain of every column the shipped row loader narrows with an `as` cast
+        // (`mission_impact.rs:764-769`), before that loader is asked anything. A projected column at
+        // `value + 2^32` truncates back to the original and passes the column comparison, so the
+        // narrowed value cannot be the thing that proves the domain (root's probe 3, which names the
+        // two revision columns; `version` and `classified_at_ms` are the other two casts and are
+        // checked here in the same place rather than left as a known sibling).
+        for (digest, revisions, classified_at_ms) in &candidates {
+            for (column, value) in ["version", "policy_revision", "charter_revision"]
+                .into_iter()
+                .zip(revisions)
+            {
+                if u32::try_from(*value)
+                    .ok()
+                    .filter(|proven| *proven >= 1)
+                    .is_none()
+                {
+                    return Err(unavailable(Unprovable::LadderUnprovable(format!(
+                        "{digest} carries {column} {value}"
+                    ))));
+                }
+            }
+            if u64::try_from(*classified_at_ms).is_err() {
                 return Err(unavailable(Unprovable::LadderUnprovable(format!(
-                    "{digest} carries version {version}"
+                    "{digest} carries classified_at_ms {classified_at_ms}"
                 ))));
             }
         }
 
         let mut proven = Vec::with_capacity(candidates.len());
-        for (digest, _) in &candidates {
+        for (digest, _, _) in &candidates {
             let record = verified_classification_within(transaction, self.workspace_id, digest)
                 .map_err(|error| {
                     unavailable(Unprovable::LadderUnprovable(format!("{digest}: {error:?}")))
@@ -397,10 +432,15 @@ impl MissionImpactCommandService {
             .map(|record| record.digest().value.as_str())
             .collect();
         let named = {
+            // `$.mission_id`, NOT `$.missionId`: `MissionImpactClassifiedPayload` carries no
+            // `rename_all` (`mission_impact.rs:1097-1099`), so its keys are the field names. The
+            // camelCase spelling belongs to the completion payload next door, and using it here
+            // matched nothing -- an Event left behind by a deleted row was invisible, and this
+            // owner then recorded a fresh version 1 onto a broken history (root's probe 1).
             let mut statement = transaction.prepare(
                 "SELECT json_extract(payload_json, '$.digest.value') FROM events
                  WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
-                   AND json_extract(payload_json, '$.missionId') = ?2",
+                   AND json_extract(payload_json, '$.mission_id') = ?2",
             )?;
             statement
                 .query_map(
@@ -411,7 +451,9 @@ impl MissionImpactCommandService {
         };
         for digest in named {
             let digest = digest.ok_or_else(|| {
-                unavailable(Unprovable::OrphanClassificationEvent("no digest".to_owned()))
+                unavailable(Unprovable::OrphanClassificationEvent(
+                    "no digest".to_owned(),
+                ))
             })?;
             if !known.contains(digest.as_str()) {
                 return Err(unavailable(Unprovable::OrphanClassificationEvent(digest)));
@@ -441,23 +483,49 @@ impl MissionImpactCommandService {
         };
         let payloads = {
             let mut statement = transaction.prepare(
-                "SELECT payload_json FROM events
+                "SELECT sequence, occurred_at_ms, payload_json FROM events
                  WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
                    AND json_extract(payload_json, '$.digest.value') = ?2",
             )?;
             statement
                 .query_map(
                     rusqlite::params![self.workspace_id.to_string(), digest],
-                    |row| row.get::<_, String>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
                 )?
                 .collect::<Result<Vec<_>, _>>()?
         };
         // Zero is a row the log does not account for; more than one is two claims about one record.
-        let [payload_json] = payloads.as_slice() else {
+        let [(sequence, occurred_at_ms, payload_json)] = payloads.as_slice() else {
             return Err(unproven(format!("{} owning Events", payloads.len())));
         };
+        // The Event's own columns, in their own domains, before anything is read out of them.
+        if *sequence < 1 {
+            return Err(unproven(format!("sequence {sequence}")));
+        }
+        let occurred_at_ms = u64::try_from(*occurred_at_ms)
+            .map_err(|_| unproven(format!("occurred_at_ms {occurred_at_ms}")))?;
         let event: MissionImpactClassifiedPayload = serde_json::from_str(payload_json)
             .map_err(|error| unproven(format!("payload: {error}")))?;
+        // The WHOLE content identity, not the hex alone: an algorithm or a canonicalizer that says
+        // something else describes a different digest of the same bytes (root's probe 2).
+        let claimed = record.digest();
+        if (
+            event.digest.algorithm.as_str(),
+            event.digest.canonicalizer.as_str(),
+            event.digest.value.as_str(),
+        ) != (
+            claimed.algorithm.as_str(),
+            claimed.canonicalizer.as_str(),
+            claimed.value.as_str(),
+        ) {
+            return Err(unproven("the digest triple disagrees".to_owned()));
+        }
         let bytes = BASE64
             .decode(event.canonical_bytes_base64.as_bytes())
             .map_err(|error| unproven(format!("retained bytes: {error}")))?;
@@ -496,6 +564,12 @@ impl MissionImpactCommandService {
         if observed != expected {
             return Err(unproven("a selector disagrees".to_owned()));
         }
+        // The writer appends the Event AT the record's own instant
+        // (`mission_impact.rs:1283-1290`), so a log entry claiming another time is not this
+        // record's owning Event.
+        if occurred_at_ms != payload.classified_at_ms {
+            return Err(unproven(format!("occurred_at_ms {occurred_at_ms}")));
+        }
         Ok(())
     }
 
@@ -513,10 +587,7 @@ impl MissionImpactCommandService {
             }
             (SupersedesDto::Record { predecessor_digest }, Some(latest)) => {
                 let named = digest64(predecessor_digest, "supersedes.predecessorDigest")?;
-                if !ladder
-                    .iter()
-                    .any(|record| record.digest().value == named)
-                {
+                if !ladder.iter().any(|record| record.digest().value == named) {
                     return Err(ClassificationCommandError::PredecessorUnproven);
                 }
                 if latest.digest().value != named {

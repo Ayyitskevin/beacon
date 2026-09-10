@@ -142,11 +142,6 @@ pub use mission_completion_store::{
     MissionCompletionReadError, MissionCompletionReadService, declared_conditions_digest,
     enumerate_completions, record_completion, verified_completion_within,
 };
-pub use mission_impact_command::{
-    ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
-    ClassificationIntentRequest, ClassificationView, MissionImpactCommandService,
-    PolicyCitationDto, SupersedesDto,
-};
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
     ClassificationDigest, ClassificationSupersedes, ImpactLevel, MalformedClassification,
@@ -155,6 +150,11 @@ pub use mission_impact::{
 pub use mission_impact::{
     ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
     MissionImpactService, verified_classification_for_citation, verified_classification_within,
+};
+pub use mission_impact_command::{
+    ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
+    ClassificationIntentRequest, ClassificationView, MissionImpactCommandService,
+    PolicyCitationDto, SupersedesDto,
 };
 pub use model_invocation::{
     ADMISSION_CANONICALIZER, AppendRefusal, Appended, ByteCoherenceFault,
