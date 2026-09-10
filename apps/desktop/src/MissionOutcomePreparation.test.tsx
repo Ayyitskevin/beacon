@@ -286,3 +286,18 @@ it("C6.PREPARE.THE_SURFACE_MEETS_WCAG_2_2", async () => {
   await screen.findByText(LIMIT_COPY);
   await expectNoWcag22Violations(document.body);
 });
+
+
+it("astra_c6_a_coded_transport_failure_is_an_unconfirmed_preparation", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockRejectedValue({ code: "local_request_failed", message: "private transport detail" });
+  render(<MissionOutcomePreparation missionId={MISSION} />);
+  await chooseAndPrepare(user, /Include verification appendix/);
+  expect(await screen.findByText("Beacon could not complete that local request."),
+    "C6.ASTRA.TRANSPORT_COPY_CONTROL").toBeInTheDocument();
+  expect(screen.queryByText(UNKNOWN_COPY),
+    "C6.ASTRA.CODED_TRANSPORT_IS_UNKNOWN").toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Prepare again with the same choice" }),
+    "C6.ASTRA.UNKNOWN_KEEPS_EXPLICIT_RECOVERY").toBeEnabled();
+  expect(invokeMock.mock.calls, "C6.ASTRA.NO_AUTOMATIC_TRANSPORT_REPLAY").toHaveLength(1);
+});
