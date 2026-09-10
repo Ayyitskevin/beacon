@@ -2903,7 +2903,42 @@ fn c4_admitted(
     let mission = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .admit(draft)
         .unwrap();
+    // B15 F1: a completion may not be recorded before its Mission is classified, so every C4 bar
+    // that RECORDS one now classifies first. The Policy is published here because a classification
+    // must cite one; nothing else about these fixtures changes.
+    let policy = beacond::ProjectPolicyService::new(Arc::clone(&accounts), store.workspace_id)
+        .publish(
+            prepared.project.id,
+            prepared.project.charter.revision,
+            None,
+            c4_policy_draft(),
+        )
+        .expect("C4 fixture: one published Policy to cite");
+    beacond::MissionImpactCommandService::new(Arc::clone(&accounts), store.workspace_id)
+        .classify(beacond::ClassificationIntentRequest {
+            mission_id: mission.id,
+            impact: "ordinary".to_owned(),
+            reason: "One reviewed change, fully reversible.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: beacond::SupersedesDto::None,
+        })
+        .expect("C4 fixture: the Mission is classified before any completion");
     (store, accounts, prepared, mission)
+}
+
+fn c4_policy_draft() -> beacond::ProjectPolicyDraft {
+    beacond::ProjectPolicyDraft {
+        team_lead_selection: beacond::TeamLeadSelectionPolicy {
+            required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+            availability_rule: beacond::TeamLeadAvailabilityRule::CurrentTeamEligibility,
+            track_record_requirements: vec![beacond::TrackRecordRequirement {
+                evidence_kind: beacond::TrackRecordEvidenceKind::MissionOutcome,
+                minimum_count: 1,
+            }],
+            conflict_rule: beacond::TeamLeadConflictRule::RequireNoDeclaredConflict,
+            ambiguity_rule: beacond::TeamLeadAmbiguityRule::RequireOperatorDecision,
+        },
+    }
 }
 
 /// The same Mission, with a completion minted through the OWNER rather than the store writer.
