@@ -807,3 +807,126 @@ it("axe: every reachable state meets WCAG 2.2 AA", async () => {
   await expectNoWcag22Violations(document.body);
   void user;
 });
+
+/* ------------------------------------------------------------------------------------------------
+   Root's three executed probes, ADOPTED VERBATIM from
+   `R13/astra-c5-frontend-probes.tsx` -- names and assertion strings unchanged, and not derived from
+   this implementation. Root ran them appended to a fixture copy named
+   `MissionClassification.astra-probe.test.tsx`; here they live beside the fixtures they use, so
+   `-t ^name$` reproduces each one in this file instead. Their positive siblings follow each.
+   ------------------------------------------------------------------------------------------------ */
+it("astra_c5_unknown_submission_cannot_be_resubmitted_before_observation", async () => {
+  const { user, invoked } = await submitWith(() => Promise.reject(new Error("lost after send")));
+  await screen.findByText("Whether your submission was recorded is still unknown.");
+  await user.click(screen.getByRole("button", { name: "Record classification" }));
+  expect(invoked.filter((name) => name === "classify_mission_impact"),
+    "C5.ASTRA.UNKNOWN_OFFERS_READ_NOT_REPLAY").toHaveLength(1);
+});
+
+it("astra_c5_stale_policy_refusal_offers_a_new_observation", async () => {
+  await submitWith(() => Promise.reject({ code: "classification_stale_policy_revision" }));
+  await screen.findByText("The Project Policy changed. Review the Policy and classify again.");
+  expect(screen.queryByRole("button", { name: /(?:retry the read|read the classification|refresh|review.*policy)/i }),
+    "C5.ASTRA.STALE_POLICY_HAS_AN_ACTIONABLE_READ").not.toBeNull();
+});
+
+it("astra_c5_an_observation_cannot_render_another_missions_record", async () => {
+  const alien = { ...record({ reason: "This belongs to Mission B." }), missionId: OTHER_MISSION };
+  invokeMock.mockResolvedValue(observation({ latest: alien }));
+  render(<MissionClassification mission={mission()} />);
+  await screen.findByText(/(?:This belongs to Mission B\.|request.*not.*complete|invalid|could not)/i);
+  expect(document.body.textContent ?? "", "C5.ASTRA.OBSERVATION_OWNS_ITS_NESTED_MISSION")
+    .not.toContain("This belongs to Mission B.");
+});
+
+it("lets a new attempt go out once a fresh observation has been read", async () => {
+  const fresher = record({ version: 2, digestValue: "b".repeat(64), policyRevision: 3 });
+  const writes: unknown[] = [];
+  const { user } = await submitWith(
+    (args) => {
+      writes.push(args);
+      return Promise.reject(new Error("lost after send"));
+    },
+    [observation({}), observation({ latest: fresher, cursor: "9007199254740994" })],
+  );
+  await screen.findByText("Whether your submission was recorded is still unknown.");
+
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+  await screen.findByText(/Recorded Ordinary impact, version 2/);
+
+  // A deliberate new judgment on the FRESH observation: enabled again, and naming what was just read.
+  const again = screen.getByRole("button", { name: "Record classification" });
+  expect(again, "C5S.RECOVERY.A_FRESH_OBSERVATION_REOPENS_THE_JUDGMENT").toBeEnabled();
+  await user.click(again);
+  expect(writes.length, "C5S.RECOVERY.A_FRESH_OBSERVATION_REOPENS_THE_JUDGMENT").toBe(2);
+  expect(
+    (writes[1] as { request: { supersedes: unknown; expectedPolicyRevision: number } }).request,
+    "C5S.RECOVERY.THE_NEW_ATTEMPT_NAMES_WHAT_WAS_READ",
+  ).toMatchObject({
+    supersedes: { kind: "record", predecessorDigest: "b".repeat(64) },
+    expectedPolicyRevision: 3,
+  });
+});
+
+it("names the newly read Policy and predecessor after a stale-Policy refusal", async () => {
+  const writes: unknown[] = [];
+  const moved = record({ version: 4, digestValue: "c".repeat(64), policyRevision: 9 });
+  const { user } = await submitWith(
+    (args) => {
+      writes.push(args);
+      return writes.length === 1
+        ? Promise.reject({ code: "classification_stale_policy_revision" })
+        : new Promise(() => {});
+    },
+    [observation({}), observation({ publishedPolicy: policy(9, 2), latest: moved })],
+  );
+  await screen.findByText("The Project Policy changed. Review the Policy and classify again.");
+
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+  await screen.findByText(/Recorded Ordinary impact, version 4/);
+  await choose(user, "Impact", "High");
+  await user.click(screen.getByRole("button", { name: "Record classification" }));
+
+  expect(
+    (writes[1] as { request: { supersedes: unknown; expectedPolicyRevision: number } }).request,
+    "C5S.REFUSAL.THE_NEXT_REQUEST_NAMES_THE_NEWLY_READ_BINDINGS",
+  ).toMatchObject({
+    supersedes: { kind: "record", predecessorDigest: "c".repeat(64) },
+    expectedPolicyRevision: 9,
+  });
+});
+
+it("renders a coherent nested record, which is the positive twin of the alien one", async () => {
+  invokeMock.mockImplementation(() =>
+    Promise.resolve(observation({ latest: record({ reason: "This belongs to this Mission." }) })),
+  );
+  render(<MissionClassification mission={mission()} />);
+  expect(
+    await screen.findByText("This belongs to this Mission."),
+    "C5S.READ.A_COHERENT_NESTED_MISSION_RENDERS",
+  ).toBeVisible();
+});
+
+it("refuses an alien nested record by its own independent literal", async () => {
+  const alien = { ...record({ reason: "This belongs to Mission B." }), missionId: OTHER_MISSION };
+  invokeMock.mockImplementation(() => Promise.resolve(observation({ latest: alien })));
+  render(<MissionClassification mission={mission()} />);
+
+  // The literal is held here, independently of the component's own copy. It is the app-wide line, NOT
+  // the guard's own message: a shape fault's internal text never reaches a caller, so
+  // "Beacon received an invalid Mission classification." stays inside `session.ts` and the Operator
+  // sees the generic local-request line. Measured, not assumed -- asserting the internal message was
+  // this test's first RED.
+  expect(
+    await screen.findByText("Beacon could not complete that local request."),
+    "C5S.READ.AN_ALIEN_NESTED_MISSION_IS_REFUSED",
+  ).toBeVisible();
+  expect(
+    document.body.textContent ?? "",
+    "C5S.READ.AN_ALIEN_NESTED_MISSION_IS_REFUSED",
+  ).not.toContain("This belongs to Mission B.");
+  expect(
+    screen.queryByLabelText("Impact"),
+    "C5S.READ.AN_ALIEN_NESTED_MISSION_OFFERS_NO_FORM",
+  ).toBeNull();
+});
