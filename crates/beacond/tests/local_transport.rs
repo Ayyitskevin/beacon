@@ -13,18 +13,18 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, CompletionPreview,
-    DeclaredCheck, DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
-    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
+    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, ClassificationIntentRequest,
+    CompletionPreview, DeclaredCheck, DiscoveryStatus, LiveDataEncryption, LocalErrorCode,
+    LocalModelActivationState, LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient,
+    LocalSupervisorServer, LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
     MissionCompletionCommandService, MissionDraft, MissionLifecycle, MissionMemberDraft,
     ModelActivation, OperatorAccountService, OperatorSessionPhase, PlatformMonitorState,
     PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProviderFeature,
     RepositoryAuthor, RepositoryDraft, RepositorySourceKind, ResidentConfigurationState,
     ResidentLifecycle, SecretString, StarterOrganizationDecision, StarterResidentDraft,
-    StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+    StarterRole, SupersedesDto, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1413,6 +1413,410 @@ fn wide_completion_request(
         spend: beacond::SpendDto::NotMeasured("r".repeat(500)),
         summary: "y".repeat(2_000),
     }
+}
+
+/// C5's two commands are KNOWN to the wire, and answer with the account's own refusal.
+///
+/// The smallest real socket bar for this slice, and the one that must be RED before any wiring
+/// exists: today neither name parses, so the supervisor answers `protocol_error` from its own
+/// `Json` refusal. A command that is merely unknown and a command that exists and refused the caller
+/// are different answers, and this is the difference the wiring has to make.
+///
+/// Deliberately raw bytes rather than a client method: at the moment this test is written there is no
+/// client method to call, and a test that cannot compile cannot be RED by a named behaviour.
+#[test]
+fn the_classification_commands_are_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c5route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+
+    let mission_id = Uuid::new_v4();
+    let cases: [(&str, serde_json::Value); 2] = [
+        (
+            "classify_mission_impact",
+            json!({
+                "request": {
+                    "missionId": mission_id,
+                    "impact": "ordinary",
+                    "reason": "No operator-visible surface changed.",
+                    "expectedPolicyRevision": null,
+                    "supersedes": { "kind": "none" },
+                },
+            }),
+        ),
+        (
+            "get_mission_classification",
+            json!({ "mission_id": mission_id }),
+        ),
+    ];
+
+    for (name, fields) in cases {
+        let mut command = serde_json::Map::new();
+        command.insert("name".to_owned(), serde_json::Value::from(name));
+        for (key, value) in fields.as_object().expect("the fields are an object") {
+            command.insert(key.clone(), value.clone());
+        }
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": serde_json::Value::Object(command),
+        }))
+        .unwrap();
+
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+
+        assert_eq!(
+            answered
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("not_authenticated"),
+            "C5T.ROUTE.IS_A_KNOWN_COMMAND: {name}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C5T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT: {name}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The classification write and its bounded observation, end to end on a real store and socket.
+///
+/// One Mission, one Project, one published Policy, through the public services that mint real records.
+/// Everything asserted here came back over the socket from the REAL owner; nothing is stubbed.
+#[test]
+fn classification_crosses_the_socket_and_its_observation_is_bounded() {
+    let runtime = TestRuntime::new("c5live");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    let admitted = client
+        .admit_mission(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: formed.id,
+            desired_outcome: "Ship one reviewed feature".to_owned(),
+            success_conditions: vec!["Relevant gates pass".to_owned()],
+            constraints: vec![],
+            prohibitions: vec![],
+            members: vec![MissionMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+
+    // Before any Policy: the observation is four fields, all proved absences except its own cursor.
+    let empty = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(empty.mission_id, admitted.id, "C5T.OBSERVE.ITS_OWN_MISSION");
+    assert_eq!(empty.latest, None, "C5T.OBSERVE.ABSENCE_IS_PROVED");
+    assert_eq!(
+        empty.published_policy, None,
+        "C5T.OBSERVE.NO_POLICY_IS_ITS_OWN_ANSWER"
+    );
+    assert!(
+        empty
+            .observed_at_event_seq
+            .chars()
+            .all(|character| character.is_ascii_digit()),
+        "C5T.OBSERVE.THE_CURSOR_IS_A_CANONICAL_DECIMAL_STRING: {:?}",
+        empty.observed_at_event_seq
+    );
+
+    // Publishing a Policy is the prerequisite the surface routes to, and the observation reports it.
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let with_policy = client.get_mission_classification(admitted.id).unwrap();
+    let cited = with_policy
+        .published_policy
+        .clone()
+        .expect("C5T.OBSERVE.A_PUBLISHED_POLICY_IS_REPORTED");
+    assert_eq!(
+        (
+            cited.project_id,
+            cited.policy_revision,
+            cited.charter_revision
+        ),
+        (project.id, policy.revision, policy.charter_revision),
+        "C5T.OBSERVE.THE_PUBLISHED_POLICY_IS_THE_STORES"
+    );
+
+    // The write: the Operator's five keys, and nothing else.
+    let recorded = client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C5T.CLASSIFY.THE_OWNER_ACCEPTS_THE_REQUEST: {error}"));
+    assert_eq!(recorded.version, 1, "C5T.CLASSIFY.THE_FIRST_VERSION_IS_ONE");
+    assert_eq!(
+        recorded.impact, "high",
+        "C5T.CLASSIFY.THE_JUDGMENT_IS_THE_OPERATORS"
+    );
+    assert_eq!(
+        recorded.reason, "Touches the operator credential path.",
+        "C5T.CLASSIFY.THE_REASON_CROSSES_VERBATIM"
+    );
+    assert_eq!(
+        recorded.basis, "operator_declared",
+        "C5T.CLASSIFY.A_NEW_WRITE_IS_OPERATOR_DECLARED"
+    );
+    assert_eq!(
+        recorded.rule_id, None,
+        "C5T.CLASSIFY.A_NEW_WRITE_NAMES_NO_RULE"
+    );
+    assert_eq!(
+        recorded.classified_by, "operator",
+        "C5T.CLASSIFY.THE_ACTOR_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            recorded.policy.policy_revision,
+            recorded.policy.charter_revision
+        ),
+        (policy.revision, policy.charter_revision),
+        "C5T.CLASSIFY.THE_CITATION_IS_THE_STORES"
+    );
+    assert_eq!(
+        recorded.supersedes,
+        SupersedesDto::None,
+        "C5T.CLASSIFY.IT_REPLACES_NOTHING"
+    );
+    assert_eq!(
+        recorded.digest.canonicalizer, "beacon.mission-impact.v1",
+        "C5T.CLASSIFY.THE_DIGEST_CARRIES_ITS_CANONICALIZER"
+    );
+
+    // The observation now reports it, whole, and the cursor has moved forward.
+    let after = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(
+        after.latest.as_ref(),
+        Some(&recorded),
+        "C5T.OBSERVE.THE_LATEST_IS_THE_RECORD_THAT_WAS_WRITTEN"
+    );
+    assert!(
+        after.observed_at_event_seq.parse::<u64>().unwrap()
+            > with_policy.observed_at_event_seq.parse::<u64>().unwrap(),
+        "C5T.OBSERVE.THE_CURSOR_MOVES_WITH_THE_CHAIN"
+    );
+
+    // A second `supersedes: none` is refused by name, and the reclassification names its predecessor.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "ordinary".to_owned(),
+            reason: "A second first classification.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        }),
+        LocalErrorCode::ClassificationAlreadyClassified,
+    );
+    let reclassified = client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "ordinary".to_owned(),
+            reason: "A later review found no operator-visible surface.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: recorded.digest.value.clone(),
+            },
+        })
+        .unwrap_or_else(|error| panic!("C5T.RECLASSIFY.THE_PREDECESSOR_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        reclassified.version, 2,
+        "C5T.RECLASSIFY.THE_LADDER_ADVANCES"
+    );
+    assert_eq!(
+        reclassified.supersedes,
+        SupersedesDto::Record {
+            predecessor_digest: recorded.digest.value.clone()
+        },
+        "C5T.RECLASSIFY.IT_NAMES_WHAT_IT_REPLACES"
+    );
+    // And naming the SUPERSEDED record again is refused by its own name.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Naming a predecessor that is no longer latest.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: recorded.digest.value.clone(),
+            },
+        }),
+        LocalErrorCode::ClassificationPredecessorNotLatest,
+    );
+
+    // Current versus historical Policy: revise the Charter, publish revision 2, and the observation
+    // reports the NEW published Policy beside a record that still cites the OLD one.
+    let revised = client
+        .revise_project_charter(
+            project.id,
+            project.charter.revision,
+            ProjectCharterDraft {
+                purpose: "Prove the classification transport.".to_owned(),
+                desired_outcomes: vec!["Classification crosses the socket".to_owned()],
+                constraints: vec![],
+                prohibitions: vec![],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        )
+        .unwrap();
+    let second_policy = client
+        .publish_project_policy(
+            project.id,
+            revised.charter.revision,
+            Some(policy.revision),
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 2,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let moved = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(
+        moved
+            .published_policy
+            .as_ref()
+            .map(|policy| policy.policy_revision),
+        Some(second_policy.revision),
+        "C5T.OBSERVE.THE_PUBLISHED_POLICY_IS_THE_CURRENT_ONE"
+    );
+    assert_eq!(
+        moved
+            .latest
+            .as_ref()
+            .map(|record| record.policy.policy_revision),
+        Some(policy.revision),
+        "C5T.OBSERVE.THE_RECORDS_CITATION_STAYS_HISTORICAL"
+    );
+    assert_ne!(
+        moved
+            .published_policy
+            .as_ref()
+            .map(|policy| policy.policy_revision),
+        moved
+            .latest
+            .as_ref()
+            .map(|record| record.policy.policy_revision),
+        "C5T.OBSERVE.THE_TWO_CITATIONS_ARE_DISTINCT"
+    );
+    // An echoed revision that is no longer current is refused by name, without writing.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Echoing a Policy revision that has moved.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: reclassified.digest.value.clone(),
+            },
+        }),
+        LocalErrorCode::ClassificationStalePolicyRevision,
+    );
+
+    // Scope opacity, byte for byte: a Mission this Workspace never admitted answers exactly as an
+    // unknown one does, and neither says whether it exists.
+    let unknown = client.get_mission_classification(Uuid::new_v4());
+    let foreign = client.get_mission_classification(Uuid::new_v4());
+    let line = |result: &Result<beacond::ClassificationObservation, LocalTransportError>| {
+        result.as_ref().err().map(std::string::ToString::to_string)
+    };
+    assert_eq!(
+        line(&unknown),
+        line(&foreign),
+        "C5T.SCOPE.ABSENCE_AND_FOREIGN_ARE_BYTE_IDENTICAL"
+    );
+    assert_remote_code(unknown, LocalErrorCode::MissionClassificationUnavailable);
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
 }
 
 fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {

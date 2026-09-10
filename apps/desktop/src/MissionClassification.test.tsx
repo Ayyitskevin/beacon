@@ -11,9 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 
-// MOCKED CONTRACT ONLY. `classify_mission_impact` and `get_mission_classification` have no owner
-// behind them yet (Opus is implementing classify+observe), so green here is FRONTEND behaviour and
-// never an integration claim.
+// THIS FILE MOCKS THE NATIVE BOUNDARY. `classify_mission_impact` and `get_mission_classification`
+// are wired to `MissionImpactCommandService::{classify, observe}`, but nothing here executes the real
+// owner: every `invoke` is a mock, so green here is FRONTEND behaviour and never an integration
+// claim. The owner's own real-store bars and the transport's socket bars are where that is proved.
 const MISSION = "99999999-9999-4999-8999-9999999c5000";
 const PROJECT = "22222222-2222-4222-8222-222222222222";
 const RESIDENT = "44444444-4444-4444-8444-444444444444";

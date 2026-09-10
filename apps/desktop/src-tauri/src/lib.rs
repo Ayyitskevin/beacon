@@ -8,8 +8,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CompletionIntentRequest,
-    CompletionPreview, CompletionView, ExportedOutcome, LiveDataEncryptionReport, LocalErrorCode,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ClassificationIntentRequest,
+    ClassificationObservation, ClassificationView, CompletionIntentRequest, CompletionPreview,
+    CompletionView, ExportedOutcome, LiveDataEncryptionReport, LocalErrorCode,
     LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
     LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
@@ -579,6 +580,80 @@ impl From<LocalTransportError> for CommandError {
                 "Some completion details are invalid. Review the completion again.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationStalePolicyRevision,
+                ..
+            } => (
+                "classification_stale_policy_revision",
+                "The Project Policy changed. Review the Policy and classify again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationNoPolicyPublished,
+                ..
+            } => (
+                "classification_no_policy_published",
+                "No Team Lead Policy is published for this Project.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationAlreadyClassified,
+                ..
+            } => (
+                "classification_already_classified",
+                "A classification is already recorded for this Mission. Reclassify it by naming the recorded one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationPredecessorNotLatest,
+                ..
+            } => (
+                "classification_predecessor_not_latest",
+                "That classification is no longer the latest. Read the classification and name the current one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationPredecessorUnproven,
+                ..
+            } => (
+                "classification_predecessor_unproven",
+                "The classification named as replaced could not be verified.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationVersionCeilingReached,
+                ..
+            } => (
+                "classification_version_ceiling_reached",
+                "This Mission cannot record another classification.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationTextOverLimit,
+                ..
+            } => (
+                "classification_text_over_limit",
+                "The reason exceeds the supported length.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationInvalidDetails,
+                ..
+            } => (
+                "classification_invalid_details",
+                "Some classification details are invalid. Review them and try again.",
+                None,
+            ),
+            // One operation-neutral unavailable answer for the classification read AND write, exactly
+            // as C3/C5 settled it.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionClassificationUnavailable,
+                ..
+            } => (
+                "mission_classification_unavailable",
+                "The Mission classification could not be verified.",
+                None,
+            ),
             // The one generic unavailable answer for a completion read OR write. Existing typed
             // session and authentication errors are matched earlier and keep their own semantics.
             LocalTransportError::Remote {
@@ -649,6 +724,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::Mission(_)
             | LocalTransportError::MissionCompletionRead(_)
             | LocalTransportError::MissionCompletionCommand(_)
+            | LocalTransportError::MissionImpactClassification(_)
             | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
@@ -1101,6 +1177,28 @@ fn get_mission_completion_intent_value(
     state
         .supervisor
         .get_mission_completion_intent(mission_id)
+        .map_err(Into::into)
+}
+
+/// Record one Mission impact classification. The Operator's judgment, unchanged.
+fn classify_mission_impact_value(
+    state: &DesktopState,
+    request: ClassificationIntentRequest,
+) -> Result<ClassificationView, CommandError> {
+    state
+        .supervisor
+        .classify_mission_impact(request)
+        .map_err(Into::into)
+}
+
+/// One bounded snapshot of this Mission's classification state.
+fn get_mission_classification_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<ClassificationObservation, CommandError> {
+    state
+        .supervisor
+        .get_mission_classification(mission_id)
         .map_err(Into::into)
 }
 
@@ -1594,6 +1692,22 @@ fn get_mission_completion_intent(
 }
 
 #[tauri::command]
+fn classify_mission_impact(
+    state: State<'_, DesktopState>,
+    request: ClassificationIntentRequest,
+) -> Result<ClassificationView, CommandError> {
+    classify_mission_impact_value(&state, request)
+}
+
+#[tauri::command]
+fn get_mission_classification(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<ClassificationObservation, CommandError> {
+    get_mission_classification_value(&state, mission_id)
+}
+
+#[tauri::command]
 fn mission(
     state: State<'_, DesktopState>,
     mission_id: uuid::Uuid,
@@ -1909,6 +2023,8 @@ pub fn run() {
             preview_mission_completion,
             record_mission_completion,
             get_mission_completion_intent,
+            classify_mission_impact,
+            get_mission_classification,
             mission,
             admit_mission,
             mission_publications,
@@ -2257,6 +2373,8 @@ mod tests {
                 "allow-preview-mission-completion",
                 "allow-record-mission-completion",
                 "allow-get-mission-completion-intent",
+                "allow-classify-mission-impact",
+                "allow-get-mission-classification",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -3200,6 +3318,15 @@ mod tests {
         "COMPLETION_TEXT_OVER_LIMIT" | CompletionTextOverLimit => ("completion_text_over_limit", "Some completion text exceeds the supported length.", None);
         "COMPLETION_SPEND_REASON_REQUIRED" | CompletionSpendReasonRequired => ("completion_spend_reason_required", "Explain why spend was not measured.", None);
         "COMPLETION_INVALID_DETAILS" | CompletionInvalidDetails => ("completion_invalid_details", "Some completion details are invalid. Review the completion again.", None);
+        "CLASSIFICATION_STALE_POLICY_REVISION" | ClassificationStalePolicyRevision => ("classification_stale_policy_revision", "The Project Policy changed. Review the Policy and classify again.", None);
+        "CLASSIFICATION_NO_POLICY_PUBLISHED" | ClassificationNoPolicyPublished => ("classification_no_policy_published", "No Team Lead Policy is published for this Project.", None);
+        "CLASSIFICATION_ALREADY_CLASSIFIED" | ClassificationAlreadyClassified => ("classification_already_classified", "A classification is already recorded for this Mission. Reclassify it by naming the recorded one.", None);
+        "CLASSIFICATION_PREDECESSOR_NOT_LATEST" | ClassificationPredecessorNotLatest => ("classification_predecessor_not_latest", "That classification is no longer the latest. Read the classification and name the current one.", None);
+        "CLASSIFICATION_PREDECESSOR_UNPROVEN" | ClassificationPredecessorUnproven => ("classification_predecessor_unproven", "The classification named as replaced could not be verified.", None);
+        "CLASSIFICATION_VERSION_CEILING_REACHED" | ClassificationVersionCeilingReached => ("classification_version_ceiling_reached", "This Mission cannot record another classification.", None);
+        "CLASSIFICATION_TEXT_OVER_LIMIT" | ClassificationTextOverLimit => ("classification_text_over_limit", "The reason exceeds the supported length.", None);
+        "CLASSIFICATION_INVALID_DETAILS" | ClassificationInvalidDetails => ("classification_invalid_details", "Some classification details are invalid. Review them and try again.", None);
+        "MISSION_CLASSIFICATION_UNAVAILABLE" | MissionClassificationUnavailable => ("mission_classification_unavailable", "The Mission classification could not be verified.", None);
         "SETUP_NOT_STARTED" | SetupNotStarted => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_ALREADY_EXISTS" | AccountAlreadyExists => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_MISSING" | AccountMissing => ("local_request_failed", "Beacon could not complete that local request.", None);
@@ -3242,6 +3369,10 @@ mod tests {
             LocalTransportError::Mission(beacond::MissionError::Store(driver_error!())), &[NEEDLE_A];
         "MISSION_COMPLETION_READ" | LocalTransportError::MissionCompletionRead(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::MissionCompletionRead(beacond::MissionCompletionReadError::Unavailable(beacond::CompletionUnavailable::Store(driver_error!()))), &[NEEDLE_A];
+        "MISSION_IMPACT_CLASSIFICATION" | LocalTransportError::MissionImpactClassification(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::MissionImpactClassification(
+                beacond::ClassificationCommandError::MalformedRequest(NEEDLE_A),
+            ), &[NEEDLE_A];
         "MISSION_COMPLETION_COMMAND" | LocalTransportError::MissionCompletionCommand(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::MissionCompletionCommand(
                 beacond::CompletionCommandError::MalformedRequest(NEEDLE_A),
@@ -3334,9 +3465,11 @@ mod tests {
 
         // Counted at THIS source, not carried forward: 63 + the eight completion codes, and 22 + the
         // one completion-command carrier.
-        assert_eq!(remote_rows().len(), 71, "R42S1.DESKTOP.CARDINALITY.REMOTE");
-        assert_eq!(local_rows().len(), 23, "R42S1.DESKTOP.CARDINALITY.LOCAL");
-        assert_eq!(cases.len(), 94, "R42S1.DESKTOP.CARDINALITY.CASES");
+        // Counted at THIS source: 71 + the nine classification codes, 23 + the one classification
+        // carrier, and their sum.
+        assert_eq!(remote_rows().len(), 80, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        assert_eq!(local_rows().len(), 24, "R42S1.DESKTOP.CARDINALITY.LOCAL");
+        assert_eq!(cases.len(), 104, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");
