@@ -2305,6 +2305,131 @@ fn the_preparation_command_is_known_to_the_wire_and_authenticated() {
     thread.join().unwrap().unwrap();
 }
 
+/// C7's candidate-document read is KNOWN to the wire, and answers with the account's own refusal.
+///
+/// The smallest real socket bar for this slice and the one that must be RED before any wiring exists:
+/// today `read_outcome_candidate_document` does not parse, so the supervisor answers `protocol_error`
+/// from its own `Json` refusal. "No such command" and "that command exists and refused you" are
+/// different answers, and making that difference is the whole of what the route adds.
+///
+/// Raw bytes rather than a client method, for the reason the C5 and C6 route bars used them: at the
+/// moment this is written there is no client method to call, and a test that cannot compile cannot be
+/// RED by a named behaviour.
+///
+/// The request carries exactly ONE field, and this bar pins that shape at the wire seam before any
+/// reader exists, because the shape is what a later guard can only narrow: a bare lower-case 64-hex
+/// manifest digest -- the value the accepted frontend loader already sends
+/// (`session.ts` `readOutcomeCandidateDocument`, which passes `held.manifestDigest.value`) -- with no
+/// Mission id, no appendix request and no evidence field. A route that tolerated those would accept a
+/// request the client never sends and give a future caller somewhere to put a fact this command must
+/// not take from it.
+///
+/// An ABSENT digest is used on purpose. The session is locked, so the account refuses before any
+/// store read, and this bar therefore says nothing about whether a candidate exists -- which is
+/// correct, because a locked caller must not be able to learn that either.
+#[test]
+fn the_candidate_document_read_is_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c7route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    // A syntactically legal digest this store does not hold. Written out rather than derived, so the
+    // bar does not depend on a helper that could change what it sends.
+    let absent_digest = "00000000000000000000000000000000000000000000000000000000000000ab";
+    assert_eq!(
+        absent_digest.len(),
+        64,
+        "C7T.ROUTE.THE_REQUEST_CARRIES_A_64_HEX_DIGEST"
+    );
+
+    let ask = |command: serde_json::Value| -> serde_json::Value {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": command,
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).unwrap()
+    };
+
+    let answered = ask(json!({
+        "name": "read_outcome_candidate_document",
+        "manifest_digest": absent_digest,
+    }));
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("not_authenticated"),
+        "C7T.ROUTE.IS_A_KNOWN_COMMAND"
+    );
+    assert_eq!(
+        answered.get("result"),
+        Some(&serde_json::Value::Null),
+        "C7T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT"
+    );
+
+    // The one field is REQUIRED: there is no default digest, and an omitted key is a malformed
+    // envelope rather than a read of something unnamed.
+    let without = ask(json!({ "name": "read_outcome_candidate_document" }));
+    assert_eq!(
+        without
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("protocol_error"),
+        "C7T.ROUTE.THE_DIGEST_IS_REQUIRED"
+    );
+
+    // And the request is CLOSED. Each of these three is a fact the command must read from the
+    // verified records instead, so each is refused at the envelope rather than ignored.
+    for extra in [
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "mission_id": Uuid::new_v4(),
+        }),
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "appendix_request": "policy_default",
+        }),
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "candidate_content_base64": "aGk=",
+        }),
+    ] {
+        let label = extra
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "name" && *key != "manifest_digest")
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
+        let widened = ask(extra);
+        assert_eq!(
+            widened
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("protocol_error"),
+            "C7T.ROUTE.THE_REQUEST_IS_CLOSED: {label}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
 /// C5's two commands are KNOWN to the wire, and answer with the account's own refusal.
 ///
 /// The smallest real socket bar for this slice, and the one that must be RED before any wiring
