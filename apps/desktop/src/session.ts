@@ -1500,7 +1500,8 @@ function isClassificationObservation(value: unknown): value is ClassificationObs
 /** Record one classification. The Operator's five keys go out unchanged; the owner derives identity,
  *  version, the Policy citation, the actor and the clock, and fixes `operator_declared` with no rule.
  *
- *  MOCKED CONTRACT: `classify_mission_impact` has no owner behind it yet. */
+ *  `classify_mission_impact` is wired to `MissionImpactCommandService::classify`. The COMPONENT tests
+ *  for this surface mock this boundary and do not execute the real owner. */
 export async function recordMissionClassification(
   request: ClassificationIntentRequest,
 ): Promise<ClassificationView> {
@@ -1518,7 +1519,9 @@ export async function recordMissionClassification(
 
 /** One snapshot of this Mission's classification. A read; it writes nothing.
  *
- *  MOCKED CONTRACT: `get_mission_classification` has no owner behind it yet. */
+ *  `get_mission_classification` is wired to `MissionImpactCommandService::observe`. The COMPONENT
+ *  tests for this surface mock this boundary and do not execute the real owner; the owner and the
+ *  transport have their own bars. */
 export async function loadMissionClassification(
   missionId: string,
 ): Promise<ClassificationObservation> {

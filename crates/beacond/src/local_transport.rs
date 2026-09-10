@@ -151,6 +151,15 @@ pub enum LocalErrorCode {
     CompletionTextOverLimit,
     CompletionSpendReasonRequired,
     CompletionInvalidDetails,
+    ClassificationStalePolicyRevision,
+    ClassificationNoPolicyPublished,
+    ClassificationAlreadyClassified,
+    ClassificationPredecessorNotLatest,
+    ClassificationPredecessorUnproven,
+    ClassificationVersionCeilingReached,
+    ClassificationTextOverLimit,
+    ClassificationInvalidDetails,
+    MissionClassificationUnavailable,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -191,6 +200,7 @@ pub enum LocalTransportError {
     Mission(MissionError),
     MissionCompletionRead(crate::MissionCompletionReadError),
     MissionCompletionCommand(crate::CompletionCommandError),
+    MissionImpactClassification(crate::ClassificationCommandError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -248,6 +258,21 @@ fn completion_read_tag(error: &crate::MissionCompletionReadError) -> String {
             format!("Account.{}", account_tag(cause))
         }
         crate::MissionCompletionReadError::Unavailable(_) => "Unavailable".to_owned(),
+    }
+}
+
+/// The classification command fault's NAME for a transport caller, account child included.
+///
+/// Same shape and same reason as `completion_command_tag`: the owner's `name()` answers a bare
+/// `"Account"`, which is right for its own closed vocabulary and too coarse for this line. The
+/// field inside `MalformedRequest` and every string inside `ClassificationCommandUnavailable` stay
+/// in `Debug` and `source`.
+fn classification_command_tag(error: &crate::ClassificationCommandError) -> String {
+    match error {
+        crate::ClassificationCommandError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        named => named.name().to_owned(),
     }
 }
 
@@ -587,6 +612,13 @@ impl fmt::Display for LocalTransportError {
                     completion_command_tag(error)
                 )
             }
+            Self::MissionImpactClassification(error) => {
+                write!(
+                    formatter,
+                    "Mission impact classification failed: {}",
+                    classification_command_tag(error)
+                )
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -712,6 +744,12 @@ impl From<crate::MissionCompletionReadError> for LocalTransportError {
 impl From<crate::CompletionCommandError> for LocalTransportError {
     fn from(error: crate::CompletionCommandError) -> Self {
         Self::MissionCompletionCommand(error)
+    }
+}
+
+impl From<crate::ClassificationCommandError> for LocalTransportError {
+    fn from(error: crate::ClassificationCommandError) -> Self {
+        Self::MissionImpactClassification(error)
     }
 }
 
@@ -1040,6 +1078,14 @@ enum LocalCommand {
     GetMissionCompletionIntent {
         mission_id: uuid::Uuid,
     },
+    /// Record one Mission impact classification. The Operator's five keys, and nothing derived.
+    ClassifyMissionImpact {
+        request: crate::ClassificationIntentRequest,
+    },
+    /// One bounded snapshot of a Mission's classification state: cursor, published Policy, latest.
+    GetMissionClassification {
+        mission_id: uuid::Uuid,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1160,6 +1206,12 @@ enum LocalResult {
     MissionCompletionIntent {
         intent: Option<crate::ReviewedIntent>,
     },
+    MissionClassification {
+        classification: crate::ClassificationView,
+    },
+    MissionClassificationObservation {
+        observation: crate::ClassificationObservation,
+    },
     Mission {
         mission: MissionView,
     },
@@ -1207,6 +1259,7 @@ pub struct LocalSupervisorServer {
     missions: MissionService,
     mission_completions: crate::MissionCompletionReadService,
     completion_commands: crate::MissionCompletionCommandService,
+    impact_classifications: crate::MissionImpactCommandService,
     outcomes: OutcomeService,
     resource_discovery: ResourceDiscoveryService,
     disk_encryption: DiskEncryptionService,
@@ -1257,6 +1310,8 @@ impl LocalSupervisorServer {
             crate::MissionCompletionReadService::new(Arc::clone(&accounts), report.workspace.id);
         let completion_commands =
             crate::MissionCompletionCommandService::new(Arc::clone(&accounts), report.workspace.id);
+        let impact_classifications =
+            crate::MissionImpactCommandService::new(Arc::clone(&accounts), report.workspace.id);
         let outcomes = OutcomeService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -1293,6 +1348,7 @@ impl LocalSupervisorServer {
             missions,
             mission_completions,
             completion_commands,
+            impact_classifications,
             outcomes,
             resource_discovery,
             disk_encryption,
@@ -1649,6 +1705,14 @@ impl LocalSupervisorServer {
             LocalCommand::GetMissionCompletionIntent { mission_id } => {
                 LocalResult::MissionCompletionIntent {
                     intent: self.completion_commands.get_intent(mission_id)?,
+                }
+            }
+            LocalCommand::ClassifyMissionImpact { request } => LocalResult::MissionClassification {
+                classification: self.impact_classifications.classify(request)?,
+            },
+            LocalCommand::GetMissionClassification { mission_id } => {
+                LocalResult::MissionClassificationObservation {
+                    observation: self.impact_classifications.observe(mission_id)?,
                 }
             }
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
@@ -2138,6 +2202,26 @@ impl LocalSupervisorClient {
         )
     }
 
+    /// Record one Mission impact classification. The Operator's five keys cross unchanged; the owner
+    /// derives identity, version, the Policy citation, the actor and the clock.
+    pub fn classify_mission_impact(
+        &self,
+        request: crate::ClassificationIntentRequest,
+    ) -> Result<crate::ClassificationView, LocalTransportError> {
+        expect_mission_classification(self.send(LocalCommand::ClassifyMissionImpact { request })?)
+    }
+
+    /// One bounded snapshot: the cursor it was taken at, the Policy a new classification would cite,
+    /// and the highest proven record. Never a history and never a "current impact" verdict.
+    pub fn get_mission_classification(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<crate::ClassificationObservation, LocalTransportError> {
+        expect_mission_classification_observation(
+            self.send(LocalCommand::GetMissionClassification { mission_id })?,
+        )
+    }
+
     pub fn mission(&self, mission_id: uuid::Uuid) -> Result<MissionView, LocalTransportError> {
         expect_mission(self.send(LocalCommand::Mission { mission_id })?)
     }
@@ -2248,7 +2332,12 @@ impl LocalSupervisorClient {
 fn response_max(command: &LocalCommand) -> u64 {
     match command {
         LocalCommand::PreviewMissionCompletion { .. } => MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
-        LocalCommand::Status
+        // Both C5 commands stay in the OLD domain: the widest classification view is ~8.7 KB and the
+        // widest observation ~9.0 KB (measured, tools/c5/opus2/transport/c5-wire-bytes.json), so
+        // neither needs a larger frame and neither widens one.
+        LocalCommand::ClassifyMissionImpact { .. }
+        | LocalCommand::GetMissionClassification { .. }
+        | LocalCommand::Status
         | LocalCommand::SessionPolicy
         | LocalCommand::SetSessionTimeout { .. }
         | LocalCommand::PlatformSessionMonitorStatus
@@ -2517,6 +2606,24 @@ fn expect_mission_completion(
     }
 }
 
+fn expect_mission_classification(
+    result: LocalResult,
+) -> Result<crate::ClassificationView, LocalTransportError> {
+    match result {
+        LocalResult::MissionClassification { classification } => Ok(classification),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_classification_observation(
+    result: LocalResult,
+) -> Result<crate::ClassificationObservation, LocalTransportError> {
+    match result {
+        LocalResult::MissionClassificationObservation { observation } => Ok(observation),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_mission_completion_preview(
     result: LocalResult,
 ) -> Result<crate::CompletionPreview, LocalTransportError> {
@@ -2625,6 +2732,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         }
         LocalTransportError::MissionCompletionCommand(error) => {
             wire_error_from_completion_command(error)
+        }
+        LocalTransportError::MissionImpactClassification(error) => {
+            wire_error_from_classification(error)
         }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -2951,6 +3061,48 @@ fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> W
         // completion is one condition, and the caller knows which operation it asked for.
         crate::CompletionCommandError::Unavailable(_) => {
             LocalErrorCode::MissionCompletionUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// The classification family's closed outward answer.
+///
+/// Nine codes plus the account recursion. `MalformedRequest` carries the refused FIELD and
+/// `Unavailable` carries the store's own words; neither reaches a caller, and an unreadable ladder is
+/// never projected as an absence.
+fn wire_error_from_classification(error: crate::ClassificationCommandError) -> WireError {
+    let code = match error {
+        crate::ClassificationCommandError::Account(error) => return wire_error_from_account(error),
+        crate::ClassificationCommandError::StalePolicyRevision => {
+            LocalErrorCode::ClassificationStalePolicyRevision
+        }
+        crate::ClassificationCommandError::NoPolicyPublished => {
+            LocalErrorCode::ClassificationNoPolicyPublished
+        }
+        crate::ClassificationCommandError::AlreadyClassified => {
+            LocalErrorCode::ClassificationAlreadyClassified
+        }
+        crate::ClassificationCommandError::PredecessorNotLatest => {
+            LocalErrorCode::ClassificationPredecessorNotLatest
+        }
+        crate::ClassificationCommandError::PredecessorUnproven => {
+            LocalErrorCode::ClassificationPredecessorUnproven
+        }
+        crate::ClassificationCommandError::VersionCeilingReached => {
+            LocalErrorCode::ClassificationVersionCeilingReached
+        }
+        crate::ClassificationCommandError::TextOverLimit => {
+            LocalErrorCode::ClassificationTextOverLimit
+        }
+        crate::ClassificationCommandError::MalformedRequest(_) => {
+            LocalErrorCode::ClassificationInvalidDetails
+        }
+        crate::ClassificationCommandError::Unavailable(_) => {
+            LocalErrorCode::MissionClassificationUnavailable
         }
     };
     WireError {
@@ -3763,6 +3915,33 @@ mod tests {
     }
 
     closed_table! {
+        expected_impact_classification / impact_classification_rows: crate::ClassificationCommandError,
+        "Account" | crate::ClassificationCommandError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::ClassificationCommandError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "StalePolicyRevision" | crate::ClassificationCommandError::StalePolicyRevision
+            => "StalePolicyRevision", crate::ClassificationCommandError::StalePolicyRevision, &[];
+        "NoPolicyPublished" | crate::ClassificationCommandError::NoPolicyPublished
+            => "NoPolicyPublished", crate::ClassificationCommandError::NoPolicyPublished, &[];
+        "AlreadyClassified" | crate::ClassificationCommandError::AlreadyClassified
+            => "AlreadyClassified", crate::ClassificationCommandError::AlreadyClassified, &[];
+        "PredecessorNotLatest" | crate::ClassificationCommandError::PredecessorNotLatest
+            => "PredecessorNotLatest", crate::ClassificationCommandError::PredecessorNotLatest, &[];
+        "PredecessorUnproven" | crate::ClassificationCommandError::PredecessorUnproven
+            => "PredecessorUnproven", crate::ClassificationCommandError::PredecessorUnproven, &[];
+        "VersionCeilingReached" | crate::ClassificationCommandError::VersionCeilingReached
+            => "VersionCeilingReached", crate::ClassificationCommandError::VersionCeilingReached, &[];
+        "TextOverLimit" | crate::ClassificationCommandError::TextOverLimit
+            => "TextOverLimit", crate::ClassificationCommandError::TextOverLimit, &[];
+        "MalformedRequest" | crate::ClassificationCommandError::MalformedRequest(_)
+            => "MalformedRequest",
+            crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "Unavailable" | crate::ClassificationCommandError::Unavailable(_)
+            => "Unavailable",
+            crate::ClassificationCommandError::Unavailable(crate::ClassificationCommandUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
         expected_completion_command / completion_command_rows: crate::CompletionCommandError,
         "Account" | crate::CompletionCommandError::Account(cause)
             => format!("Account.{}", expected_account(cause).1),
@@ -3954,6 +4133,15 @@ mod tests {
         "CompletionTextOverLimit" | LocalErrorCode::CompletionTextOverLimit => "CompletionTextOverLimit", LocalErrorCode::CompletionTextOverLimit, &[];
         "CompletionSpendReasonRequired" | LocalErrorCode::CompletionSpendReasonRequired => "CompletionSpendReasonRequired", LocalErrorCode::CompletionSpendReasonRequired, &[];
         "CompletionInvalidDetails" | LocalErrorCode::CompletionInvalidDetails => "CompletionInvalidDetails", LocalErrorCode::CompletionInvalidDetails, &[];
+        "ClassificationStalePolicyRevision" | LocalErrorCode::ClassificationStalePolicyRevision => "ClassificationStalePolicyRevision", LocalErrorCode::ClassificationStalePolicyRevision, &[];
+        "ClassificationNoPolicyPublished" | LocalErrorCode::ClassificationNoPolicyPublished => "ClassificationNoPolicyPublished", LocalErrorCode::ClassificationNoPolicyPublished, &[];
+        "ClassificationAlreadyClassified" | LocalErrorCode::ClassificationAlreadyClassified => "ClassificationAlreadyClassified", LocalErrorCode::ClassificationAlreadyClassified, &[];
+        "ClassificationPredecessorNotLatest" | LocalErrorCode::ClassificationPredecessorNotLatest => "ClassificationPredecessorNotLatest", LocalErrorCode::ClassificationPredecessorNotLatest, &[];
+        "ClassificationPredecessorUnproven" | LocalErrorCode::ClassificationPredecessorUnproven => "ClassificationPredecessorUnproven", LocalErrorCode::ClassificationPredecessorUnproven, &[];
+        "ClassificationVersionCeilingReached" | LocalErrorCode::ClassificationVersionCeilingReached => "ClassificationVersionCeilingReached", LocalErrorCode::ClassificationVersionCeilingReached, &[];
+        "ClassificationTextOverLimit" | LocalErrorCode::ClassificationTextOverLimit => "ClassificationTextOverLimit", LocalErrorCode::ClassificationTextOverLimit, &[];
+        "ClassificationInvalidDetails" | LocalErrorCode::ClassificationInvalidDetails => "ClassificationInvalidDetails", LocalErrorCode::ClassificationInvalidDetails, &[];
+        "MissionClassificationUnavailable" | LocalErrorCode::MissionClassificationUnavailable => "MissionClassificationUnavailable", LocalErrorCode::MissionClassificationUnavailable, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -4027,6 +4215,9 @@ mod tests {
         "R42S2.TRANSPORT.MissionCompletionRead" | LocalTransportError::MissionCompletionRead(error)
             => format!("Mission completion read failed: {}", expected_completion_read(error).1),
             LocalTransportError::MissionCompletionRead(crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::OrphanCompletedEvent)), &[];
+        "R42S2.TRANSPORT.MissionImpactClassification" | LocalTransportError::MissionImpactClassification(error)
+            => format!("Mission impact classification failed: {}", expected_impact_classification(error).1),
+            LocalTransportError::MissionImpactClassification(crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
         "R42S2.TRANSPORT.MissionCompletionCommand" | LocalTransportError::MissionCompletionCommand(error)
             => format!("Mission completion command failed: {}", expected_completion_command(error).1),
             LocalTransportError::MissionCompletionCommand(crate::CompletionCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
@@ -5107,6 +5298,13 @@ mod tests {
         TeamError::Account
     );
     domain_cases!(
+        impact_classification_cases,
+        LocalTransportError::MissionImpactClassification,
+        impact_classification_rows,
+        "R42S2.TRANSPORT.MissionImpactClassification",
+        crate::ClassificationCommandError::Account
+    );
+    domain_cases!(
         completion_command_cases,
         LocalTransportError::MissionCompletionCommand,
         completion_command_rows,
@@ -5424,6 +5622,9 @@ mod tests {
                 "R42S2.TRANSPORT.Team" => team_cases(&mut cases),
                 "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
                 "R42S2.TRANSPORT.MissionCompletionCommand" => completion_command_cases(&mut cases),
+                "R42S2.TRANSPORT.MissionImpactClassification" => {
+                    impact_classification_cases(&mut cases)
+                }
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -5584,13 +5785,13 @@ mod tests {
         // Counted at THIS source: 63 before this slice, plus the eight completion codes.
         assert_eq!(
             code_rows().len(),
-            71,
+            80,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
         // 23 before this slice, plus the `MissionCompletionCommand` carrier.
         assert_eq!(
             transport_rows().len(),
-            24,
+            25,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
@@ -5601,7 +5802,9 @@ mod tests {
         // wire codes -- the `Remote` branch expands `code_rows()`, so adding a code adds a case too.
         // 878 + 8 (new Remote codes) + 10 (the carrier's direct arms) + 18 (its `Account` arm over
         // every account row) = 914.
-        assert_eq!(cases.len(), 914, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 914 before C5: plus its nine Remote codes, its nine direct arms, and its `Account` arm
+        // over all eighteen account rows = 950.
+        assert_eq!(cases.len(), 950, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
@@ -5728,7 +5931,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 164] = [
+    const WIRE_MAP: [(&str, WireExpectation); 174] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -6313,15 +6516,57 @@ mod tests {
             "MissionCompletionCommand.Unavailable",
             WireExpectation::Code("mission_completion_unavailable"),
         ),
+        // The classification family, transcribed from C5-interface.md: nine codes and the account
+        // recursion, with malformed details never shown as a length problem.
+        (
+            "MissionImpactClassification.Account",
+            WireExpectation::Account,
+        ),
+        (
+            "MissionImpactClassification.StalePolicyRevision",
+            WireExpectation::Code("classification_stale_policy_revision"),
+        ),
+        (
+            "MissionImpactClassification.NoPolicyPublished",
+            WireExpectation::Code("classification_no_policy_published"),
+        ),
+        (
+            "MissionImpactClassification.AlreadyClassified",
+            WireExpectation::Code("classification_already_classified"),
+        ),
+        (
+            "MissionImpactClassification.PredecessorNotLatest",
+            WireExpectation::Code("classification_predecessor_not_latest"),
+        ),
+        (
+            "MissionImpactClassification.PredecessorUnproven",
+            WireExpectation::Code("classification_predecessor_unproven"),
+        ),
+        (
+            "MissionImpactClassification.VersionCeilingReached",
+            WireExpectation::Code("classification_version_ceiling_reached"),
+        ),
+        (
+            "MissionImpactClassification.TextOverLimit",
+            WireExpectation::Code("classification_text_over_limit"),
+        ),
+        (
+            "MissionImpactClassification.MalformedRequest",
+            WireExpectation::Code("classification_invalid_details"),
+        ),
+        (
+            "MissionImpactClassification.Unavailable",
+            WireExpectation::Code("mission_classification_unavailable"),
+        ),
     ];
 
-    /// The 70 code spellings: wire literal and reviewed Remote NAME, both independent.
+    /// The 79 code spellings: wire literal and reviewed Remote NAME, both independent.
     ///
     /// The eight completion rows are transcribed from `C4-interface.md`'s superseding section, not
     /// read off the enum: a spelling that agreed with the code because it was generated from it
     /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
     /// without a spelling; that gap is C3's to close, not this slice's to edit.)
-    const CODE_SPELLINGS: [(&str, &str, &str); 70] = [
+    const CODE_SPELLINGS: [(&str, &str, &str); 79] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -6604,6 +6849,51 @@ mod tests {
             "completion_invalid_details",
             "CompletionInvalidDetails",
         ),
+        (
+            "ClassificationStalePolicyRevision",
+            "classification_stale_policy_revision",
+            "ClassificationStalePolicyRevision",
+        ),
+        (
+            "ClassificationNoPolicyPublished",
+            "classification_no_policy_published",
+            "ClassificationNoPolicyPublished",
+        ),
+        (
+            "ClassificationAlreadyClassified",
+            "classification_already_classified",
+            "ClassificationAlreadyClassified",
+        ),
+        (
+            "ClassificationPredecessorNotLatest",
+            "classification_predecessor_not_latest",
+            "ClassificationPredecessorNotLatest",
+        ),
+        (
+            "ClassificationPredecessorUnproven",
+            "classification_predecessor_unproven",
+            "ClassificationPredecessorUnproven",
+        ),
+        (
+            "ClassificationVersionCeilingReached",
+            "classification_version_ceiling_reached",
+            "ClassificationVersionCeilingReached",
+        ),
+        (
+            "ClassificationTextOverLimit",
+            "classification_text_over_limit",
+            "ClassificationTextOverLimit",
+        ),
+        (
+            "ClassificationInvalidDetails",
+            "classification_invalid_details",
+            "ClassificationInvalidDetails",
+        ),
+        (
+            "MissionClassificationUnavailable",
+            "mission_classification_unavailable",
+            "MissionClassificationUnavailable",
+        ),
     ];
 
     // -------------------------------------------------------------------------------------
@@ -6666,8 +6956,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 164, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 70, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 174, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 79, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
@@ -6781,7 +7071,7 @@ mod tests {
             }
         }
         // 135 before this slice, plus the completion family's eleven owner arms.
-        assert_eq!(checked, 146, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+        assert_eq!(checked, 156, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
 
         // All 18 account faults at the root...
         for (variant, account, _) in account_rows() {
@@ -6886,7 +7176,7 @@ mod tests {
             );
         }
 
-        // All 70 Remote codes relay BOTH fields unchanged, including a retry on a code that does
+        // All 79 Remote codes relay BOTH fields unchanged, including a retry on a code that does
         // not otherwise carry one. Existing behaviour, pinned -- not a new promise.
         for (variant, literal, _) in CODE_SPELLINGS {
             let code = code_rows()
@@ -6904,7 +7194,7 @@ mod tests {
         }
     }
 
-    /// R42 slice 2: the wire schema and all 70 code spellings are closed.
+    /// R42 slice 2: the wire schema and all 79 code spellings are closed.
     #[test]
     fn r42_wire_schema_and_code_spellings_are_closed() {
         for (variant, literal, name) in CODE_SPELLINGS {
@@ -7025,6 +7315,11 @@ mod tests {
                 "MissionCompletionCommand",
                 LocalTransportError::MissionCompletionCommand,
                 completion_command_rows
+            ),
+            domain!(
+                "MissionImpactClassification",
+                LocalTransportError::MissionImpactClassification,
+                impact_classification_rows
             ),
             domain!(
                 "ResourceDiscovery",
@@ -7638,6 +7933,157 @@ mod tests {
             }))
             .is_err(),
             "C4.WIRE.A_RECORD_WITHOUT_THE_REVIEWED_TOKEN_IS_REFUSED"
+        );
+    }
+
+    /// The classification DTOs through the NATIVE serializer: twelve fields, a decimal-string cursor
+    /// that survives above 2^53, an authentic legacy rule identity, and strictness at every seam.
+    ///
+    /// `serde_json` is the thing that will actually carry these, so it is the thing asked. Every
+    /// literal here is written from `C5-interface.md` rather than from the types.
+    #[test]
+    fn the_classification_wire_shapes_are_exact_and_strict() {
+        let mission = "99999999-9999-4999-8999-9999999c5000";
+        let project = "22222222-2222-4222-8222-222222222222";
+        let hex = "a".repeat(64);
+        // 18_446_744_073_709_551_615 and 9_007_199_254_740_993 are both beyond `Number.MAX_SAFE_INTEGER`.
+        for cursor in ["0", "9007199254740993", "18446744073709551615"] {
+            let observation = serde_json::json!({
+                "missionId": mission,
+                "observedAtEventSeq": cursor,
+                "publishedPolicy": null,
+                "latest": null,
+            });
+            let decoded: crate::ClassificationObservation =
+                serde_json::from_value(observation.clone())
+                    .expect("a four-field observation decodes");
+            assert_eq!(
+                decoded.observed_at_event_seq, cursor,
+                "C5T.WIRE.THE_CURSOR_SURVIVES_ABOVE_MAX_SAFE_INTEGER"
+            );
+            // Re-serialized by the NATIVE serializer, the cursor is still the same DIGITS, still a
+            // JSON string, and never a number.
+            let again = serde_json::to_value(&decoded).expect("it re-serializes");
+            assert_eq!(
+                again.pointer("/observedAtEventSeq"),
+                Some(&serde_json::Value::from(cursor)),
+                "C5T.WIRE.THE_CURSOR_IS_A_STRING_IN_BOTH_DIRECTIONS"
+            );
+            assert_eq!(again, observation, "C5T.WIRE.THE_OBSERVATION_ROUND_TRIPS");
+        }
+
+        // The twelve-field view, including an authentic legacy `policy_rule` basis and its rule id.
+        let legacy = serde_json::json!({
+            "missionId": mission,
+            "classificationId": "66666666-6666-4666-8666-666666666666",
+            "version": 3,
+            "impact": "high",
+            "basis": "policy_rule",
+            "ruleId": "security.credential-path",
+            "reason": "A legacy record that names its rule.",
+            "policy": { "projectId": project, "policyRevision": 2, "charterRevision": 2 },
+            "classifiedBy": "operator",
+            "classifiedAtMs": 1_757_000_000_000_u64,
+            "supersedes": { "kind": "record", "predecessorDigest": hex },
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.mission-impact.v1",
+                "value": hex,
+            },
+        });
+        let view: crate::ClassificationView =
+            serde_json::from_value(legacy.clone()).expect("the twelve-field view decodes");
+        assert_eq!(
+            view.rule_id.as_deref(),
+            Some("security.credential-path"),
+            "C5T.WIRE.A_LEGACY_RULE_IDENTITY_CROSSES_UNCHANGED"
+        );
+        assert_eq!(
+            view.basis, "policy_rule",
+            "C5T.WIRE.A_LEGACY_BASIS_IS_NOT_RELABELLED"
+        );
+        assert_eq!(
+            serde_json::to_value(&view).expect("it re-serializes"),
+            legacy,
+            "C5T.WIRE.THE_VIEW_ROUND_TRIPS"
+        );
+
+        // `ruleId` is a required KEY: absent and null are different facts, and only null is legal for
+        // an Operator declaration.
+        let mut absent = legacy.clone();
+        absent
+            .as_object_mut()
+            .expect("an object")
+            .remove("ruleId")
+            .expect("the key was there");
+        assert!(
+            serde_json::from_value::<crate::ClassificationView>(absent).is_err(),
+            "C5T.WIRE.AN_ABSENT_RULE_ID_IS_REFUSED"
+        );
+        let mut extra = legacy.clone();
+        extra["unexpected"] = serde_json::Value::from(1);
+        assert!(
+            serde_json::from_value::<crate::ClassificationView>(extra).is_err(),
+            "C5T.WIRE.AN_UNKNOWN_VIEW_FIELD_IS_REFUSED"
+        );
+
+        // The request seam: five keys, `expectedPolicyRevision` PRESENT and nullable, nothing else.
+        let request = serde_json::json!({
+            "missionId": mission,
+            "impact": "ordinary",
+            "reason": "No operator-visible surface changed.",
+            "expectedPolicyRevision": null,
+            "supersedes": { "kind": "none" },
+        });
+        assert!(
+            serde_json::from_value::<crate::ClassificationIntentRequest>(request.clone()).is_ok(),
+            "C5T.WIRE.THE_FIVE_KEY_REQUEST_IS_ACCEPTED"
+        );
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .expect("an object")
+            .remove("expectedPolicyRevision");
+        assert!(
+            serde_json::from_value::<crate::ClassificationIntentRequest>(missing).is_err(),
+            "C5T.WIRE.AN_ABSENT_EXPECTED_REVISION_IS_REFUSED"
+        );
+        for forbidden in ["basis", "ruleId", "version", "classifiedAtMs"] {
+            let mut widened = request.clone();
+            widened[forbidden] = serde_json::Value::from("x");
+            assert!(
+                serde_json::from_value::<crate::ClassificationIntentRequest>(widened).is_err(),
+                "C5T.WIRE.THE_REQUEST_ADMITS_NO_DERIVED_FIELD: {forbidden}"
+            );
+        }
+
+        // And the two commands' own envelopes carry the names the contract fixes.
+        let classify = serde_json::to_value(LocalCommand::ClassifyMissionImpact {
+            request: serde_json::from_value(request).expect("the request decodes"),
+        })
+        .expect("the command serializes");
+        assert_eq!(
+            classify
+                .pointer("/name")
+                .and_then(serde_json::Value::as_str),
+            Some("classify_mission_impact"),
+            "C5T.WIRE.THE_WRITE_COMMAND_NAME"
+        );
+        let observe = serde_json::to_value(LocalCommand::GetMissionClassification {
+            mission_id: uuid::Uuid::nil(),
+        })
+        .expect("the command serializes");
+        assert_eq!(
+            observe.pointer("/name").and_then(serde_json::Value::as_str),
+            Some("get_mission_classification"),
+            "C5T.WIRE.THE_READ_COMMAND_NAME"
+        );
+        assert_eq!(
+            observe
+                .pointer("/mission_id")
+                .and_then(serde_json::Value::as_str),
+            Some("00000000-0000-0000-0000-000000000000"),
+            "C5T.WIRE.THE_READ_ARGUMENT_NAME"
         );
     }
 
