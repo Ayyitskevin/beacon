@@ -5,16 +5,38 @@
 //! build report's "narrowed or deferred" section, never silently dropped.
 
 use beacond::{
-    ActivationFacts, CRITERION_IDS, EntryBody, EntryKind, EvidenceEntry, FidelityPacketRefusal,
-    HeaderFacts, IncompleteCause, MalformedCode, MalformedFidelityPacket, OVER_LIMIT_WITNESS,
-    PROFILE, PacketCap, PacketGap, PacketInputs, RESPONSE_CEILING, RecipeFacts, RequestKey,
-    ResultConflicts, ResultOutcome, ResultVerdict, RubricFacts, SubjectFacts, TerminalObservation,
+    ActivationFacts, AutonomyProfile, BeaconCapability, CRITERION_IDS, CompletionActor,
+    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResultRecord,
+    EntryBody, EntryKind, EvidenceEntry, FidelityPacketRefusal, HeaderFacts, IncompleteCause,
+    LocalModelActivationService, LocalModelEndpoint, MalformedCode, MalformedFidelityPacket,
+    MissionCompletionV1, MissionDraft, MissionMemberDraft, MissionService, OVER_LIMIT_WITNESS,
+    OperatorAccountService, PROFILE, PacketCap, PacketGap, PacketInputs, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
+    RESPONSE_CEILING, RecipeFacts, RequestKey, ResidentConfigurationService,
+    ResidentLifecycleService, ResultConflicts, ResultOutcome, ResultVerdict, RubricFacts,
+    SecretString, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SubjectFacts, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TerminalObservation, TrackRecordEvidenceKind, TrackRecordRequirement,
     TransportObservation, VerifiedEvaluationPacket, WireDigest, admits_entry_count, classify,
-    encode_packet, min_entry_bytes,
+    declared_conditions_digest, encode_packet, min_entry_bytes, record_completion,
 };
 use uuid::Uuid;
 
 const RUBRIC_DIGEST: [u8; 32] = [3_u8; 32];
+
+/// R77 clause 5: `S4.F6.EXPECTED_S5_BYTES_ARE_A_LITERAL_ORACLE`.
+///
+/// Transcribed by hand from `crates/beacond/resources/evaluation/outcome-fidelity-v1.txt`, in file
+/// order (its lines 7, 10, 13 and 16), and deliberately NOT `beacond::CRITERION_IDS`: an oracle
+/// that imports the literal it checks agrees with the code by construction and can never disagree
+/// with it.
+const EXPECTED_S5_CRITERION_IDS: [&str; 4] = [
+    "completion_fidelity",
+    "evidence_fidelity",
+    "honesty_states",
+    "limitations_and_authority",
+];
 
 /// An INDEPENDENT hash, so the assertions below do not compare the implementation with itself.
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -44,7 +66,33 @@ fn fixture_frame(out: &mut Vec<u8>, tag: u8, body: Vec<u8>) {
 }
 
 /// Independently transcribed from frozen table §A; it calls no production encoder/decoder helper.
+/// The pinned tokens and the declared S4 count, so a witness can build a packet that differs from
+/// the valid one in exactly the bytes under test. Every default is the value the table pins.
+struct FixtureTweaks {
+    declared_entry_count: u32,
+    s2_record_canonicalizer: &'static str,
+    s3_renderer: &'static str,
+    ruling_canonicalizer: &'static str,
+    spend_canonicalizer: &'static str,
+}
+
+impl Default for FixtureTweaks {
+    fn default() -> Self {
+        Self {
+            declared_entry_count: 11,
+            s2_record_canonicalizer: "beacon.artifact.v1",
+            s3_renderer: "beacon.outcome.md.v1",
+            ruling_canonicalizer: "beacon.ruling.v2",
+            spend_canonicalizer: "beacon.spend.v2",
+        }
+    }
+}
+
 fn table_fixture_bytes() -> Vec<u8> {
+    table_fixture_bytes_tweaked(&FixtureTweaks::default())
+}
+
+fn table_fixture_bytes_tweaked(tweaks: &FixtureTweaks) -> Vec<u8> {
     let mut out = b"beacon.outcome-fidelity.input.v1\0".to_vec();
 
     let mut s1 = Vec::new();
@@ -71,7 +119,7 @@ fn table_fixture_bytes() -> Vec<u8> {
     fixture_frame(&mut out, 0x01, s1);
 
     let mut s2 = Vec::new();
-    fixture_digest(&mut s2, "beacon.artifact.v1", 4);
+    fixture_digest(&mut s2, tweaks.s2_record_canonicalizer, 4);
     fixture_blob(&mut s2, b"artifact-record");
     fixture_digest(&mut s2, "beacon.raw.v1", 5);
     fixture_blob(&mut s2, b"# outcome candidate");
@@ -81,11 +129,11 @@ fn table_fixture_bytes() -> Vec<u8> {
     let mut s3 = Vec::new();
     fixture_blob(&mut s3, b"manifest-bytes");
     fixture_digest(&mut s3, "beacon.outcome.manifest.v2", 6);
-    fixture_blob(&mut s3, b"beacon.outcome.md.v1");
+    fixture_blob(&mut s3, tweaks.s3_renderer.as_bytes());
     fixture_frame(&mut out, 0x03, s3);
 
     let mut s4 = Vec::new();
-    s4.extend_from_slice(&9_u32.to_be_bytes());
+    s4.extend_from_slice(&tweaks.declared_entry_count.to_be_bytes());
     let mut mission = Vec::new();
     mission.extend_from_slice(Uuid::from_u128(1).as_bytes());
     mission.extend_from_slice(Uuid::from_u128(99).as_bytes());
@@ -98,22 +146,30 @@ fn table_fixture_bytes() -> Vec<u8> {
     for (tag, canonicalizer, fill, size) in [
         (0x02, "beacon.mission_completion.v1", 2, 8),
         (0x04, "beacon.proposal.v1", 4, 8),
-        (0x05, "beacon.ruling.v2", 5, 24),
+        (0x05, tweaks.ruling_canonicalizer, 5, 24),
         (0x06, "beacon.evaluation.v1", 6, 8),
         (0x07, "beacon.mission_impact.v1", 7, 8),
-        (0x08, "beacon.spend.v2", 8, 8),
+        (0x08, tweaks.spend_canonicalizer, 8, 8),
     ] {
         let mut record = Vec::new();
         fixture_digest(&mut record, canonicalizer, fill);
         fixture_blob(&mut record, &vec![fill; size]);
         fixture_frame(&mut s4, tag, record);
         if tag == 0x02 {
-            let mut artifact = Vec::new();
-            fixture_digest(&mut artifact, "beacon.artifact.v1", 3);
-            fixture_blob(&mut artifact, &[3; 4]);
-            fixture_digest(&mut artifact, "beacon.raw.v1", 3);
-            fixture_blob(&mut artifact, &[3; 4]);
-            fixture_frame(&mut s4, 0x03, artifact);
+            // R77 clause 6: a SECOND Completion, so C1's oracle covers within-kind order too.
+            // Ascending by digest: fill 2 above, then fill 12.
+            let mut second = Vec::new();
+            fixture_digest(&mut second, canonicalizer, 12);
+            fixture_blob(&mut second, &vec![12_u8; size]);
+            fixture_frame(&mut s4, tag, second);
+            for artifact_fill in [3_u8, 9] {
+                let mut artifact = Vec::new();
+                fixture_digest(&mut artifact, "beacon.artifact.v1", artifact_fill);
+                fixture_blob(&mut artifact, &[artifact_fill; 4]);
+                fixture_digest(&mut artifact, "beacon.raw.v1", artifact_fill);
+                fixture_blob(&mut artifact, &[artifact_fill; 4]);
+                fixture_frame(&mut s4, 0x03, artifact);
+            }
         }
     }
     let mut receipt = Vec::new();
@@ -128,7 +184,7 @@ fn table_fixture_bytes() -> Vec<u8> {
     let mut s5 = Vec::new();
     fixture_blob(&mut s5, b"rubric bytes");
     s5.extend_from_slice(&4_u32.to_be_bytes());
-    for id in CRITERION_IDS {
+    for id in EXPECTED_S5_CRITERION_IDS {
         fixture_blob(&mut s5, id.as_bytes());
     }
     fixture_frame(&mut out, 0x05, s5);
@@ -260,7 +316,11 @@ fn one_of_each_reversed() -> Vec<EvidenceEntry> {
         record_entry(EntryKind::Evaluation, "beacon.evaluation.v1", 6),
         record_entry(EntryKind::Ruling, "beacon.ruling.v2", 5),
         record_entry(EntryKind::Proposal, "beacon.proposal.v1", 4),
+        // R77 clause 6: each pair is inserted DESCENDING by digest, so insertion order cannot
+        // coincide with the frozen within-kind sort.
+        artifact_entry(9),
         artifact_entry(3),
+        record_entry(EntryKind::Completion, "beacon.mission_completion.v1", 12),
         record_entry(EntryKind::Completion, "beacon.mission_completion.v1", 2),
         mission_entry(1),
     ]
@@ -367,6 +427,9 @@ fn packet_contains_exact_subject_and_independent_owner_bytes_in_canonical_order(
         vec![
             EntryKind::Mission,
             EntryKind::Completion,
+            // R77 clause 6: the second of each pair sits beside its sibling, digest-ascending.
+            EntryKind::Completion,
+            EntryKind::Artifact,
             EntryKind::Artifact,
             EntryKind::Proposal,
             EntryKind::Ruling,
@@ -493,6 +556,53 @@ fn packet_refuses_missing_or_oversized_owner_source_before_returning_partial_byt
             );
         }
         other => panic!("expected AggregateOverCap from the pre-dedup charge, got {other:?}"),
+    }
+}
+
+/// R77 clause 3: `S4.F4.OVERSIZED_SUBJECT_REFUSES_BEFORE_ENCODER_ALLOCATION`.
+///
+/// Consumer: `encode_packet`. The S2 subject and the S3 manifest are DECLARED lengths that reach
+/// the encoder, and until this bar they were bounded only by the framing codec -- which reports
+/// `Malformed(OverLimitLength)` from inside `Encoder`, after it has been constructed. The owner
+/// ceiling is a different fact from a framing limit, and R71's accepted structural form is that
+/// the charge precedes the encoder.
+#[test]
+fn s4_f4_oversized_subject_refuses_before_encoder_allocation() {
+    // S2 record bytes: MAX_ARTIFACT_RECORD_BYTES is 4 KiB, so 4,097 is one byte over.
+    let mut source = inputs(one_of_each_reversed());
+    source.subject.record_bytes = vec![0_u8; 4_097];
+    assert_eq!(
+        encode_packet(&source, cap()),
+        Err(FidelityPacketRefusal::SourceOverOwnerCeiling { kind: "artifact" }),
+        "an oversized S2 record is an owner-ceiling refusal, never a framing one"
+    );
+
+    // S2 content bytes: MAX_ARTIFACT_CONTENT_BYTES is 1 MiB.
+    let mut source = inputs(one_of_each_reversed());
+    source.subject.content_bytes = vec![0_u8; 1024 * 1024 + 1];
+    assert_eq!(
+        encode_packet(&source, cap()),
+        Err(FidelityPacketRefusal::SourceOverOwnerCeiling { kind: "artifact" })
+    );
+
+    // S3 manifest bytes: MAX_MANIFEST_BYTES is 16 MiB.
+    let mut source = inputs(one_of_each_reversed());
+    source.recipe.manifest_bytes = vec![0_u8; 16 * 1024 * 1024 + 1];
+    assert_eq!(
+        encode_packet(&source, cap()),
+        Err(FidelityPacketRefusal::SourceOverOwnerCeiling { kind: "recipe" })
+    );
+
+    // The structural half R71 accepted, extended to S2/S3: the refusal is the owner ceiling and
+    // not the codec's, so it cannot have come from inside the encoder.
+    let mut source = inputs(one_of_each_reversed());
+    source.subject.record_bytes = vec![0_u8; 4_097];
+    match encode_packet(&source, cap()) {
+        Err(FidelityPacketRefusal::Malformed(code)) => {
+            panic!("the refusal came from the framing codec, not the owner bound: {code:?}")
+        }
+        Err(FidelityPacketRefusal::SourceOverOwnerCeiling { .. }) => {}
+        other => panic!("expected SourceOverOwnerCeiling, got {other:?}"),
     }
 }
 
@@ -995,7 +1105,7 @@ fn the_decoder_round_trips_the_encoder_and_raises_every_framing_refusal() {
     let built = packet(one_of_each_reversed());
     let decoded =
         beacond::decode_packet(built.bytes()).expect("a packet this encoder wrote decodes");
-    assert_eq!(decoded.entries().len(), 9);
+    assert_eq!(decoded.entries().len(), 11);
     assert_eq!(
         encode_packet(decoded.inputs(), cap())
             .expect("re-encodes")
@@ -1065,6 +1175,141 @@ fn the_decoder_round_trips_the_encoder_and_raises_every_framing_refusal() {
     );
 }
 
+/// R77 clause 6: `S4.F6.WITHIN_KIND_ORDER_IS_DIGEST_ASCENDING`.
+///
+/// Consumer: `encode_packet`. One entry per kind cannot witness the within-kind tie-break, so this
+/// encodes TWO Artifacts and TWO Completions inserted descending and reads their positions out of
+/// the produced bytes. Fills 0x91/0x92 and 0x81/0x82 appear nowhere else in the packet.
+#[test]
+fn s4_f6_within_kind_order_is_digest_ascending() {
+    fn position_of(bytes: &[u8], fill: u8) -> usize {
+        let needle = [fill; 32];
+        bytes
+            .windows(32)
+            .position(|window| window == needle)
+            .unwrap_or_else(|| panic!("digest {fill:#04x} is not in the packet"))
+    }
+
+    let artifacts = packet(vec![artifact_entry(0x92), artifact_entry(0x91)]);
+    assert!(
+        position_of(artifacts.bytes(), 0x91) < position_of(artifacts.bytes(), 0x92),
+        "two Artifacts inserted descending encode ascending by digest"
+    );
+
+    let completions = packet(vec![
+        record_entry(EntryKind::Completion, "beacon.mission_completion.v1", 0x82),
+        record_entry(EntryKind::Completion, "beacon.mission_completion.v1", 0x81),
+    ]);
+    assert!(
+        position_of(completions.bytes(), 0x81) < position_of(completions.bytes(), 0x82),
+        "two records of one kind inserted descending encode ascending by digest"
+    );
+}
+
+/// R77 clause 1: `S4.F3.DECODER_REFUSES_HOSTILE_COUNT_BEFORE_RESERVE`, BOUNDED half.
+///
+/// Consumer: `beacond::decode_packet`. The previous bar called the helper `admits_entry_count`
+/// directly, so removing the guard's CALL site left it green. This feeds real packet bytes whose
+/// only difference from a decoding packet is the four-byte S4 declared count.
+///
+/// R77.1(ii): declared 256 against a section that cannot hold 256 * 61 bytes, so the worst reserve
+/// this test can provoke is `Vec::with_capacity(256)` twice. Safe to run with the guard removed.
+#[test]
+fn s4_f3_decoder_refuses_hostile_count_before_reserve() {
+    let valid = table_fixture_bytes();
+    assert!(
+        beacond::decode_packet(&valid).is_ok(),
+        "the control packet decodes, so the refusal below is the count and nothing else"
+    );
+
+    let patched = table_fixture_bytes_tweaked(&FixtureTweaks {
+        declared_entry_count: 256,
+        ..FixtureTweaks::default()
+    });
+    assert_eq!(
+        patched.len(),
+        valid.len(),
+        "a patch of the valid packet, not a different packet"
+    );
+    let differing: Vec<usize> = valid
+        .iter()
+        .zip(&patched)
+        .enumerate()
+        .filter(|(_, (left, right))| left != right)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(!differing.is_empty(), "the count really was patched");
+    assert!(
+        differing.iter().all(|index| index - differing[0] < 4),
+        "only the four-byte declared count differs, at {differing:?}"
+    );
+
+    assert_eq!(
+        beacond::decode_packet(&patched),
+        Err(MalformedFidelityPacket::EntryCount),
+        "the declared count is the fault; EntryCount is produced by the guard and by nothing else"
+    );
+}
+
+/// R77 clause 1, EXTREME half. **Intact and restored code ONLY** (R77.1(ii)): with the guard call
+/// removed, `u32::MAX` reaches `Vec::with_capacity` twice and that is an uncontrolled allocation
+/// attempt, not a measurement. Kept as its own test so a mutation run can select the bounded one.
+#[test]
+fn s4_f3_decoder_refuses_an_extreme_declared_count_intact_only() {
+    let patched = table_fixture_bytes_tweaked(&FixtureTweaks {
+        declared_entry_count: u32::MAX,
+        ..FixtureTweaks::default()
+    });
+    assert_eq!(
+        beacond::decode_packet(&patched),
+        Err(MalformedFidelityPacket::EntryCount)
+    );
+}
+
+/// R77 clause 2: `S4.F3.DECODER_REFUSES_UNPINNED_CANONICALIZERS`.
+///
+/// Consumer: `beacond::decode_packet`. The existing bar of this name submits its bad inputs to
+/// `encode_packet`, which has its own pins, so a dropped DECODER pin survives it. These are bytes.
+#[test]
+fn s4_f3_decoder_refuses_unpinned_canonicalizers() {
+    for (label, tweaks) in [
+        (
+            "S2 record canonicalizer",
+            FixtureTweaks {
+                s2_record_canonicalizer: "beacon.artifact.v2",
+                ..FixtureTweaks::default()
+            },
+        ),
+        (
+            "S3 renderer version",
+            FixtureTweaks {
+                s3_renderer: "beacon.outcome.md.v2",
+                ..FixtureTweaks::default()
+            },
+        ),
+        (
+            "Ruling canonicalizer",
+            FixtureTweaks {
+                ruling_canonicalizer: "beacon.ruling.v3",
+                ..FixtureTweaks::default()
+            },
+        ),
+        (
+            "Spend canonicalizer",
+            FixtureTweaks {
+                spend_canonicalizer: "beacon.spend.v3",
+                ..FixtureTweaks::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            beacond::decode_packet(&table_fixture_bytes_tweaked(&tweaks)),
+            Err(MalformedFidelityPacket::CanonicalizerNotAdmitted),
+            "{label}: the DECODER must refuse an unpinned token in the bytes"
+        );
+    }
+}
+
 #[test]
 fn the_decoder_pins_every_canonicalizer_the_table_pins() {
     let mut source = inputs(one_of_each_reversed());
@@ -1121,4 +1366,338 @@ fn the_decoder_pins_every_canonicalizer_the_table_pins() {
     let mut source = inputs(one_of_each_reversed());
     source.rubric.criterion_ids.reverse();
     assert!(encode_packet(&source, cap()).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// R77 clause 4: the collector against a REAL scoped store
+//
+// The public-owner minting recipe of `tests/outcome_prepare.rs`, transcribed rather than shared:
+// the two suites must be able to disagree about what a Mission is. Everything below goes through
+// `beacond`'s public exports; nothing outside the P/C/W fence is needed to build it.
+// ---------------------------------------------------------------------------------------------
+
+struct StoreFixture {
+    path: std::path::PathBuf,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+    project_id: Uuid,
+    accountable: (Uuid, Uuid),
+    #[allow(dead_code)]
+    accounts: std::sync::Arc<OperatorAccountService>,
+}
+
+impl Drop for StoreFixture {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
+        }
+    }
+}
+
+impl StoreFixture {
+    fn connect(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(&self.path).unwrap()
+    }
+}
+
+const FIXTURE_CONDITION: &str = "Relevant gates pass";
+
+fn tags_response() -> String {
+    "{\"models\":[{\"name\":\"qwen3.8:27b\",\"model\":\"qwen3.8:27b\",\
+     \"modified_at\":\"2026-08-14T14:38:20.13373148-04:00\",\"size\":17741872154,\
+     \"digest\":\"22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643\",\
+     \"details\":{\"format\":\"gguf\",\"family\":\"qwen35\",\"families\":[\"qwen35\"],\
+     \"parameter_size\":\"27.3B\",\"quantization_level\":\"Q4_K_M\"}}]}"
+        .to_owned()
+}
+
+fn read_http_request(stream: &mut impl std::io::Read) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let size = stream.read(&mut chunk).unwrap();
+        assert!(size > 0);
+        request.extend_from_slice(&chunk[..size]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            return String::from_utf8(request).unwrap();
+        }
+    }
+}
+
+fn serve_ollama_inspections(count: usize) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        for _ in 0..count {
+            for expected in ["GET /api/tags", "POST /api/show", "GET /api/tags"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(request.starts_with(expected), "unexpected: {request}");
+                let body = if expected.starts_with("POST") {
+                    "{\"capabilities\":[\"completion\",\"tools\"]}".to_owned()
+                } else {
+                    tags_response()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        }
+    });
+    (address, handle)
+}
+
+fn admitted_mission(label: &str) -> StoreFixture {
+    use std::sync::Arc;
+    let path = std::env::temp_dir().join(format!(
+        "beacond-r77-collector-{label}-{}.sqlite3",
+        Uuid::new_v4()
+    ));
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .unwrap();
+    let workspace_id = report.workspace.id;
+    let accounts = Arc::new(OperatorAccountService::open(&path).unwrap());
+    accounts
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    accounts.complete_operator_setup(true).unwrap();
+
+    let project = ProjectService::new(Arc::clone(&accounts), workspace_id)
+        .create(ProjectDraft {
+            name: "Beacon Alpha".to_owned(),
+            charter: ProjectCharterDraft {
+                purpose: "Prove the local agent office.".to_owned(),
+                desired_outcomes: vec!["Complete one attributable Mission".to_owned()],
+                constraints: vec!["Keep authority explicit".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        })
+        .unwrap();
+    ProjectPolicyService::new(Arc::clone(&accounts), workspace_id)
+        .publish(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+
+    let residents = StarterOrganizationService::new(Arc::clone(&accounts), workspace_id)
+        .accept(
+            1,
+            vec![
+                StarterResidentDraft {
+                    role: StarterRole::Lead,
+                    display_name: None,
+                },
+                StarterResidentDraft {
+                    role: StarterRole::Builder,
+                    display_name: None,
+                },
+            ],
+        )
+        .unwrap()
+        .residents;
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), workspace_id);
+    for resident in &residents {
+        lifecycle.activate(resident.id, None).unwrap();
+    }
+
+    let (address, ollama) = serve_ollama_inspections(2);
+    let models = LocalModelActivationService::new(
+        Arc::clone(&accounts),
+        workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = models
+        .inspect(
+            "qwen3.8:27b",
+            "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+        )
+        .unwrap();
+    let activation = models
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    ollama.join().unwrap();
+
+    let configurations = residents
+        .iter()
+        .map(|resident| {
+            ResidentConfigurationService::new(Arc::clone(&accounts), workspace_id)
+                .configure(
+                    resident.id,
+                    None,
+                    activation.id,
+                    vec![
+                        BeaconCapability::WorkCreateMission,
+                        BeaconCapability::WorkCoordinateMission,
+                    ],
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let team = TeamService::new(Arc::clone(&accounts), workspace_id)
+        .form(TeamDraft {
+            project_id: project.id,
+            name: "Mission Team".to_owned(),
+            members: configurations
+                .iter()
+                .map(|configuration| TeamMemberDraft {
+                    resident_id: configuration.resident_id,
+                    expected_configuration_id: configuration.id,
+                })
+                .collect(),
+        })
+        .unwrap();
+    let mission = MissionService::new(Arc::clone(&accounts), workspace_id)
+        .admit(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: team.id,
+            desired_outcome: "Ship one reviewed Beacon feature.".to_owned(),
+            success_conditions: vec![FIXTURE_CONDITION.to_owned()],
+            constraints: vec!["Keep the change reversible".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: configurations
+                .iter()
+                .map(|configuration| MissionMemberDraft {
+                    resident_id: configuration.resident_id,
+                    expected_configuration_id: configuration.id,
+                })
+                .collect(),
+        })
+        .unwrap();
+
+    StoreFixture {
+        path,
+        workspace_id,
+        mission_id: mission.id,
+        project_id: project.id,
+        accountable: (configurations[0].resident_id, configurations[0].id),
+        accounts,
+    }
+}
+
+/// One recorded completion for the fixture's Mission, through the public owner writer.
+fn record_a_completion(fixture: &StoreFixture) -> String {
+    let boundary: u64 = fixture
+        .connect()
+        .query_row(
+            "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+            rusqlite::params![fixture.workspace_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|sequence| u64::try_from(sequence).unwrap())
+        .unwrap();
+    let record = MissionCompletionV1 {
+        workspace_id: fixture.workspace_id,
+        project_id: fixture.project_id,
+        mission_id: fixture.mission_id,
+        completion_id: Uuid::new_v4(),
+        actor: CompletionActor::Operator,
+        accountable_resident_id: fixture.accountable.0,
+        accountable_resident_configuration_id: fixture.accountable.1,
+        boundary_event_seq: boundary,
+        disposition: CompletionDisposition::Concluded,
+        declared_conditions_sha256: declared_conditions_digest(&[FIXTURE_CONDITION.to_owned()]),
+        condition_results: vec![ConditionResultRecord {
+            ordinal: 0,
+            outcome: ConditionOutcome::Met,
+            support: vec![],
+            note: None,
+        }],
+        delivered_artifacts: vec![],
+        unfinished_work: vec![],
+        uncertainty: vec![],
+        spend: SpendReference::NotMeasured("No spend record exists for this Mission.".to_owned()),
+        supersedes: CompletionSupersedes::None,
+        summary: "One reviewed feature shipped.".to_owned(),
+        completed_at_ms: 1_788_400_000_000,
+    };
+    let mut connection = fixture.connect();
+    record_completion(&mut connection, &record).expect("the completion records")
+}
+
+/// R77 clause 4: `S4.F4.ESSENTIAL_SOURCE_ABSENT_REFUSES_THROUGH_THE_COLLECTOR`.
+///
+/// Consumer: `beacond::collect_within`, against a REAL scoped store transaction. Every previous
+/// absence assertion used `encode_packet`, so `EssentialSourceAbsent` was never constructed by the
+/// code that constructs it.
+#[test]
+fn s4_f4_essential_source_absent_refuses_through_the_collector() {
+    let fixture = admitted_mission("absent-completion");
+
+    // A Completion citation whose row is not in this store.
+    let mut connection = fixture.connect();
+    let transaction = connection.transaction().unwrap();
+    let absent = beacond::collect_within(
+        &transaction,
+        fixture.workspace_id,
+        inputs(vec![]),
+        &[beacond::Citation::Record {
+            kind: EntryKind::Completion,
+            digest: "11".repeat(32),
+        }],
+        cap(),
+    );
+    assert_eq!(
+        absent,
+        Err(FidelityPacketRefusal::EssentialSourceAbsent { kind: "completion" }),
+        "a missing owner row is an absence, and the collector says so before any packet byte"
+    );
+    drop(transaction);
+
+    // The same fixture with the row present encodes.
+    let digest = record_a_completion(&fixture);
+    let mut connection = fixture.connect();
+    let transaction = connection.transaction().unwrap();
+    let packet = beacond::collect_within(
+        &transaction,
+        fixture.workspace_id,
+        inputs(vec![]),
+        &[beacond::Citation::Record {
+            kind: EntryKind::Completion,
+            digest: digest.clone(),
+        }],
+        cap(),
+    )
+    .expect("the recorded completion collects and encodes");
+    assert_eq!(packet.entries().len(), 1);
+    assert_eq!(packet.entries()[0].kind, EntryKind::Completion);
 }
