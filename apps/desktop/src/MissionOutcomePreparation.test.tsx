@@ -10,11 +10,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 
-// MOCKED CONTRACT ONLY, and precisely: the OWNER exists -- `OutcomeService::prepare_for_mission`
-// already owns collection, assembly and the transactional write. What is missing is the ROUTE: no
-// `prepare_outcome_candidate` LocalCommand and no native command, which wait on C5's native release.
-// Every invoke here is answered by a double, so green is FRONTEND behaviour and never an end-to-end
-// claim about preparation.
+// MOCKED CONTRACT ONLY: the native route now reaches `OutcomeService::prepare_for_mission`,
+// which owns collection, assembly and the transactional write. Every invoke here is answered by a
+// double, so green is FRONTEND behaviour and never an end-to-end claim about preparation.
 const MISSION = "99999999-9999-4999-8999-9999999c6000";
 
 function receipt(overrides: Partial<Record<string, unknown>> = {}) {
