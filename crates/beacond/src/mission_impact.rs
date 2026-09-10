@@ -30,7 +30,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use data_encoding::{BASE64, HEXLOWER};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
@@ -1142,29 +1142,9 @@ impl MissionImpactService {
         canonical_bytes: &[u8],
     ) -> Result<MissionImpactClassification, ClassificationRecordError> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            let payload = decode(canonical_bytes).map_err(ClassificationRecordError::Malformed)?;
-            if encode(&payload).map_err(ClassificationRecordError::Malformed)? != canonical_bytes {
-                return Err(ClassificationRecordError::NotCanonical);
-            }
-            if payload.workspace_id != self.workspace_id {
-                return Err(ClassificationRecordError::CrossWorkspace);
-            }
-            let digest_value = HEXLOWER.encode(&sha256(canonical_bytes));
-            // The Command says it first, so a caller gets the reason rather than a read-back
-            // refusal after a row that the reader would never return.
-            let owner = mission_project_of(connection, self.workspace_id, payload.mission_id)?;
-            if owner != Some(payload.policy.project_id) {
-                return Err(ClassificationRecordError::PolicyProjectIsNotTheMissions);
-            }
-
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            insert_classification(&transaction, &digest_value, canonical_bytes, &payload)?;
-            let recorded =
-                verified_classification_within(&transaction, self.workspace_id, &digest_value)?
-                    .ok_or_else(|| {
-                        ClassificationRecordError::Store("record vanished".to_owned())
-                    })?;
+            let recorded = classify_within(&transaction, self.workspace_id, canonical_bytes)?;
             transaction.commit()?;
             Ok(recorded)
         })
@@ -1217,6 +1197,39 @@ impl MissionImpactService {
             Ok(records)
         })
     }
+}
+
+/// The whole submit contract, in a transaction the CALLER owns.
+///
+/// Extracted from `MissionImpactService::classify` so an owner that has already opened its own
+/// Immediate transaction -- to read the Mission, the Policy and the existing ladder in the same
+/// snapshot it writes into -- can record through this one writer instead of a second one.
+///
+/// **Wrapper semantics are preserved.** The same checks refuse in the same order with the same
+/// values; the only difference is that the (still unwritten) transaction is already open while they
+/// run, and a refusal drops it. `classify` is unchanged from a caller's side.
+pub(crate) fn classify_within(
+    transaction: &Transaction<'_>,
+    workspace_id: Uuid,
+    canonical_bytes: &[u8],
+) -> Result<MissionImpactClassification, ClassificationRecordError> {
+    let payload = decode(canonical_bytes).map_err(ClassificationRecordError::Malformed)?;
+    if encode(&payload).map_err(ClassificationRecordError::Malformed)? != canonical_bytes {
+        return Err(ClassificationRecordError::NotCanonical);
+    }
+    if payload.workspace_id != workspace_id {
+        return Err(ClassificationRecordError::CrossWorkspace);
+    }
+    let digest_value = HEXLOWER.encode(&sha256(canonical_bytes));
+    // The Command says it first, so a caller gets the reason rather than a read-back refusal after
+    // a row that the reader would never return.
+    let owner = mission_project_of(transaction, workspace_id, payload.mission_id)?;
+    if owner != Some(payload.policy.project_id) {
+        return Err(ClassificationRecordError::PolicyProjectIsNotTheMissions);
+    }
+    insert_classification(transaction, &digest_value, canonical_bytes, &payload)?;
+    verified_classification_within(transaction, workspace_id, &digest_value)?
+        .ok_or_else(|| ClassificationRecordError::Store("record vanished".to_owned()))
 }
 
 /// The row and its Event, written together in one transaction, every projection column derived
