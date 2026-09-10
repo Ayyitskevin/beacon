@@ -153,8 +153,8 @@ pub use mission_impact::{
 };
 pub use mission_impact_command::{
     ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
-    ClassificationIntentRequest, ClassificationView, MissionImpactCommandService,
-    PolicyCitationDto, SupersedesDto,
+    ClassificationIntentRequest, ClassificationObservation, ClassificationView,
+    MissionImpactCommandService, PolicyCitationDto, SupersedesDto,
 };
 pub use model_invocation::{
     ADMISSION_CANONICALIZER, AppendRefusal, Appended, ByteCoherenceFault,
