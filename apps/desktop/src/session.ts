@@ -1343,6 +1343,197 @@ export async function loadMissionCompletion(missionId: string): Promise<Completi
   return value;
 }
 
+// ---------------------------------------------------------------------------------------------
+// C5: the Mission impact classification surface (local candidate; no owner behind it yet)
+// ---------------------------------------------------------------------------------------------
+
+/** The Policy revision a classification cites, with that Policy revision's OWN Charter revision --
+ *  never the Project's current one (`mission_impact.rs`'s `PolicyRevisionRef`). */
+export type PolicyCitation = {
+  projectId: string;
+  policyRevision: number;
+  charterRevision: number;
+};
+
+export type ClassificationDigestValue = {
+  algorithm: string;
+  canonicalizer: string;
+  value: string;
+};
+
+/** Which record a classification replaces. Tagged, because "replacing nothing" and "replacing this"
+ *  are two statements rather than one absence. */
+export type ClassificationSupersedes =
+  | { kind: "none" }
+  | { kind: "record"; predecessorDigest: string };
+
+/** The twelve fields of the owner's `ClassificationView` (C5-interface.md). `basis` and `ruleId` are
+ *  PROJECTED from the stored record: the old public store admits a `policy_rule` row with a rule id
+ *  (`mission_impact.rs:332-343`), and a verified legacy row must keep its own basis and rule
+ *  identity rather than being relabelled. No new write ever sends either. */
+export type ClassificationView = {
+  missionId: string;
+  classificationId: string;
+  version: number;
+  impact: "high" | "ordinary";
+  basis: "operator_declared" | "policy_rule";
+  ruleId: string | null;
+  reason: string;
+  policy: PolicyCitation;
+  classifiedBy: "operator";
+  classifiedAtMs: number;
+  supersedes: ClassificationSupersedes;
+  digest: ClassificationDigestValue;
+};
+
+/** One snapshot: where it was taken, the Policy a NEW classification would cite, and the highest
+ *  proven record at that cursor. No count, no history, no "current impact" verdict. */
+export type ClassificationObservation = {
+  missionId: string;
+  /** A canonical nonnegative decimal STRING in the u64 domain. NEVER converted to a JS number: a
+   *  sequence above 2**53 would round, and a cursor that rounds is a cursor that lies. */
+  observedAtEventSeq: string;
+  publishedPolicy: PolicyCitation | null;
+  latest: ClassificationView | null;
+};
+
+/** What the Operator decides, and nothing else: five keys, `expectedPolicyRevision` present-nullable,
+ *  no basis, no ruleId, no identity, no clock, no Policy provenance. */
+export type ClassificationIntentRequest = {
+  missionId: string;
+  impact: "high" | "ordinary";
+  reason: string;
+  expectedPolicyRevision: number | null;
+  supersedes: ClassificationSupersedes;
+};
+
+const CLASSIFICATION_REASON_SCALARS = 2_000;
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+/** The cursor's canonical form: digits only, no sign, no space, no leading zero unless the value IS
+ *  zero, and inside the u64 domain. Compared with `BigInt` because the whole point is that the value
+ *  does not fit a JS number. */
+function isCanonicalEventSequence(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/.test(value)) return false;
+  return BigInt(value) <= U64_MAX;
+}
+
+/** Classification counts and revisions are lossless `u32` in the owner's codec. Deliberately not a
+ *  narrowing of the shared `isNonnegativeInteger`, which also guards millisecond instants. */
+function isClassificationU32(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32_COUNT;
+}
+
+function isPolicyCitation(value: unknown): value is PolicyCitation {
+  return (
+    hasExactKeys(value, ["charterRevision", "policyRevision", "projectId"]) &&
+    isUuid(value.projectId) &&
+    isClassificationU32(value.policyRevision) &&
+    isClassificationU32(value.charterRevision)
+  );
+}
+
+function isClassificationSupersedes(value: unknown): value is ClassificationSupersedes {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.kind === "none") return hasExactKeys(value, ["kind"]);
+  if (record.kind !== "record") return false;
+  return (
+    hasExactKeys(value, ["kind", "predecessorDigest"]) && isHex64(record.predecessorDigest)
+  );
+}
+
+function isClassificationView(value: unknown): value is ClassificationView {
+  if (
+    !hasExactKeys(value, [
+      "basis",
+      "classificationId",
+      "classifiedAtMs",
+      "classifiedBy",
+      "digest",
+      "impact",
+      "missionId",
+      "policy",
+      "reason",
+      "ruleId",
+      "supersedes",
+      "version",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.classificationId)) return false;
+  if (!isClassificationU32(value.version) || value.version < 1) return false;
+  if (value.impact !== "high" && value.impact !== "ordinary") return false;
+  // A legacy `policy_rule` row carries its rule id; an operator-declared one must not.
+  if (value.basis === "operator_declared") {
+    if (value.ruleId !== null) return false;
+  } else if (value.basis === "policy_rule") {
+    if (typeof value.ruleId !== "string" || value.ruleId === "") return false;
+  } else {
+    return false;
+  }
+  if (!isTrimmedText(value.reason, CLASSIFICATION_REASON_SCALARS)) return false;
+  if (!isPolicyCitation(value.policy)) return false;
+  if (value.classifiedBy !== "operator") return false;
+  if (!isNonnegativeInteger(value.classifiedAtMs)) return false;
+  if (!isClassificationSupersedes(value.supersedes)) return false;
+  const digest = value.digest;
+  return (
+    hasExactKeys(digest, ["algorithm", "canonicalizer", "value"]) &&
+    digest.algorithm === "sha256" &&
+    digest.canonicalizer === "beacon.mission-impact.v1" &&
+    isHex64(digest.value)
+  );
+}
+
+function isClassificationObservation(value: unknown): value is ClassificationObservation {
+  return (
+    hasExactKeys(value, ["latest", "missionId", "observedAtEventSeq", "publishedPolicy"]) &&
+    isUuid(value.missionId) &&
+    isCanonicalEventSequence(value.observedAtEventSeq) &&
+    (value.publishedPolicy === null || isPolicyCitation(value.publishedPolicy)) &&
+    (value.latest === null || isClassificationView(value.latest))
+  );
+}
+
+/** Record one classification. The Operator's five keys go out unchanged; the owner derives identity,
+ *  version, the Policy citation, the actor and the clock, and fixes `operator_declared` with no rule.
+ *
+ *  MOCKED CONTRACT: `classify_mission_impact` has no owner behind it yet. */
+export async function recordMissionClassification(
+  request: ClassificationIntentRequest,
+): Promise<ClassificationView> {
+  const value = await invokeAndValidate(
+    "classify_mission_impact",
+    { request },
+    isClassificationView,
+    "Mission classification",
+  );
+  if (value.missionId !== request.missionId) {
+    throw new Error("Beacon received an invalid Mission classification.");
+  }
+  return value;
+}
+
+/** One snapshot of this Mission's classification. A read; it writes nothing.
+ *
+ *  MOCKED CONTRACT: `get_mission_classification` has no owner behind it yet. */
+export async function loadMissionClassification(
+  missionId: string,
+): Promise<ClassificationObservation> {
+  const value = await invokeAndValidate(
+    "get_mission_classification",
+    { missionId },
+    isClassificationObservation,
+    "Mission classification",
+  );
+  if (value.missionId !== missionId) {
+    throw new Error("Beacon received an invalid Mission classification.");
+  }
+  return value;
+}
+
 // The OWNER's bounds, not this client's. `mission_completion.rs:128-133` fixes short text at 500
 // Unicode scalar values and applies it to a condition note; `isTrimmedText` counts with
 // `Array.from`, so astral text is one scalar per character rather than two UTF-16 units. A larger

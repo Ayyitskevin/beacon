@@ -4159,6 +4159,17 @@ describe("Beacon desktop shell", () => {
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([mission]);
       if (command === "mission_publications") return Promise.resolve([]);
+      // The Mission card now mounts the impact classification panel too, so this fixture has to
+      // answer its read. `publishedPolicy: null` is the quietest truthful answer: the panel shows the
+      // Policy prerequisite and renders no form, no alert and no status.
+      if (command === "get_mission_classification") {
+        return Promise.resolve({
+          missionId: (args as { missionId: string }).missionId,
+          observedAtEventSeq: "128",
+          publishedPolicy: null,
+          latest: null,
+        });
+      }
       if (command === "get_mission_completion") {
         asked.push(args);
         return completion(args);
@@ -4307,6 +4318,17 @@ describe("Beacon desktop shell", () => {
           members: [{ residentId: "66666666-6666-4666-8666-666666666666",
             admissionConfigurationId: "77777777-7777-4777-8777-777777777777" }],
         }]);
+      }
+      // The Mission card now mounts the impact classification panel too, so this fixture has to
+      // answer its read. `publishedPolicy: null` is the quietest truthful answer: the panel shows the
+      // Policy prerequisite and renders no form, no alert and no status.
+      if (command === "get_mission_classification") {
+        return Promise.resolve({
+          missionId: (args as { missionId: string }).missionId,
+          observedAtEventSeq: "128",
+          publishedPolicy: null,
+          latest: null,
+        });
       }
       if (command === "get_mission_completion") {
         return missionId === C3_MISSION ? firstCompletion : heldSecond;
