@@ -15,15 +15,58 @@ Projected identifiers used by size preflight are only lookup keys; they are subs
 against the owning records before any result is returned. No account lock is nested and no separate
 store connection is opened by this service.
 
+## Current recorded evaluator evidence
+
+`current_evaluator_evidence()` returns one `CurrentEvaluatorEvidence` for each historically
+admitted non-author, in the same order. It holds that admitted `Evaluator`, the exact verified
+current `ResidentAgentView`, latest `ResidentConfiguration`, and, when configured, a
+`CurrentActivationEvidence` containing the configured and latest `LocalModelActivation` values.
+A later configuration cannot add another Resident or the author to this historical set.
+
+These are recorded facts in the same authenticated transaction. Lifecycle proof reuses the full
+ordered transition/predecessor/time chain, exact Event match and current projection reconciliation.
+Configuration proof reuses every ordered decision's existing owner verification and predecessor
+chain. Activation proof reuses the complete per-decision proof from startup across the configured
+resource's history. Nonpositive sequence keys refuse before typed history enumeration. The global
+startup passes keep their existing order, key checks, totals and fault classifications; no whole-store
+pass or provider inspection is invoked by this read.
+
+The activation proof's resource key is `(Workspace, endpoint, model_name)`. The stored decoder
+accepts only Ollama; provider is a closed constant, not another proof-map component. Model and
+inspection digests remain exact record facts and do not split a resource history. Scope enumeration
+includes every row for that three-field key, so an invalid provider row cannot disappear behind a
+provider filter. The existing configuration verifier's historical activation-row dependencies
+retain their original proof behavior; the returned current activation resource receives its own
+complete chain proof before the public context returns.
+
+`gaps()` preserves every applicable factual mismatch, in this fixed order:
+
+| Gap | Recorded fact |
+|---|---|
+| `ResidentNotActive` | Current proved lifecycle is not `Active`. |
+| `ConfigurationCleared` | Latest configuration state is `Cleared`. |
+| `ConfigurationChanged` | Latest configuration ID differs from the admitted ID, including a later cleared decision. |
+| `MissingArtifactEvaluate` | Current configuration has no `ArtifactEvaluate`, including no binding after a clear. |
+| `ActivationSuperseded` | Configured activation ID differs from the latest decision for its resource key. |
+| `ActivationInactive` | The latest activation state is `Inactive`. |
+
+A cleared configuration carries no activation evidence and no activation gaps. A deactivation can
+produce both activation gaps. Empty gaps means only that these enumerated recorded facts match;
+it establishes no live availability or authority. The existing `ResidentConfiguration` value
+includes `eligible_for_team` and its owning Team-specific reasons. They are preserved as owner
+fields and never interpreted as Evaluation readiness. Missing or broken Resident, configuration
+or activation owner data is a typed owner refusal, never a normal gap or empty evidence list.
+
 ## What this read does not establish
 
 `current_eligibility()` is explicitly `NotMeasured`: historical admission does not establish current
-Resident lifecycle, configuration, capability, activation or request authority. Reconfiguring an
+Resident lifecycle, configuration, capability, activation or request authority. The added current
+recorded facts still do not establish live resources, request eligibility or authority. Reconfiguring an
 author preserves the historical pair. Forming a later Team cannot repair an old one-member Mission.
 The author exclusion is keyed on Resident identity in the implementation. Valid public-owner
 history still binds that author to its original admitted configuration, so the reconfiguration
 case proves historical preservation, not discrimination against a configuration-keyed filter in
-this narrowed tracer. That latter challenge belongs to a future current-eligibility read.
+this narrowed tracer. That latter challenge belongs to evaluator selection and request eligibility, which this read does not implement.
 
 `source_packet()` is explicitly `NotCollected`: the exact candidate and manifest are not the full
 frozen owner-verified evidence packet needed to apply a fidelity rubric. This context is never
@@ -64,6 +107,28 @@ existing reader, such as Artifact digest-algorithm or canonicalizer columns; onl
 fields listed above are covered. The new helpers do not claim to retrofit allocation bounds into those
 owners or to bound the aggregate closure. Expanding that guarantee requires a separately scoped
 owner-reader change; a cap checked after an unbounded load would not prove it.
+
+## Bounds for the added current facts
+
+Before the new owner reads transfer their protected values, scoped SQL preflights enforce:
+
+- At most 256 lifecycle decisions per selected Resident, 256 configuration decisions and bindings
+  per selected Resident, and 256 activation decisions per referenced resource history; no truncation.
+- At most seven Capability rows per configuration, checked before the existing owner collects them.
+- Resident/decision UUID columns and optional predecessor UUIDs at most 36 UTF-8 bytes; protected
+  Resident display/role/lifecycle fields and decision/configuration token fields at most 64 KiB.
+- Configuration binding activation/configuration IDs at most 36 bytes and budget tokens at most
+  64 KiB. Referenced activation rows are preflighted before the old configuration proof/render reads
+  them, including their current resource tails.
+- Activation endpoint at most 128 bytes, model name at most 1,024 UTF-8 bytes, digest fields at most
+  64 bytes, and each selected feature JSON/provider/state field at most 64 KiB. Both the initial
+  bounded lookup and the complete selected resource history receive these checks.
+
+These are engineering limits owned by the read, not resource or request budgets. Matching Event
+proofs compare owner-constructed bounded payloads through SQL counts; they do not load stored Event
+payload strings into Rust. SQLite evaluation and the older historical candidate/manifest proof
+retain the allocation limitations described above. Per-history limits do not establish an aggregate
+or total-transitive bound, and unrelated old public row readers keep their original contracts.
 
 ## Refusal surface and verification
 

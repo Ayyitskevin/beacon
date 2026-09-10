@@ -609,6 +609,105 @@ fn latest_configuration(
     )
 }
 
+/// Preflight the selected configuration history, binding identities and Capability collection.
+/// Its existing proof reads historical activations and renders the current resource tail; bound
+/// those referenced resource rows first too. This does not change old readers' allocation contract.
+pub(crate) fn configuration_within_context_read_limits(
+    connection: &Connection,
+    workspace_id: Uuid,
+    resident_id: Uuid,
+) -> Result<bool, ResidentConfigurationError> {
+    let (count, oversized): (i64, bool) = connection.query_row(
+        "SELECT count(*), coalesce(max(
+         length(CAST(id AS BLOB)) > 36 OR length(CAST(workspace_id AS BLOB)) > 36
+         OR length(CAST(resident_id AS BLOB)) > 36 OR length(CAST(state AS BLOB)) > 65536
+         OR coalesce(length(CAST(predecessor_id AS BLOB)), 0) > 36), 0)
+         FROM resident_configuration_decisions WHERE workspace_id = ?1 AND resident_id = ?2",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if count > 256 || oversized {
+        return Ok(false);
+    }
+    let (bindings, oversized): (i64, bool) = connection.query_row(
+        "SELECT count(*), coalesce(max(
+         length(CAST(configuration_id AS BLOB)) > 36 OR length(CAST(activation_id AS BLOB)) > 36
+         OR length(CAST(budget_boundary AS BLOB)) > 65536), 0)
+         FROM resident_configuration_bindings WHERE workspace_id = ?1 AND resident_id = ?2",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if bindings > 256 || oversized {
+        return Ok(false);
+    }
+    let capabilities_oversized: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM resident_configuration_capabilities
+         WHERE workspace_id = ?1 AND resident_id = ?2 GROUP BY configuration_id
+         HAVING count(*) > 7 OR max(length(CAST(capability AS BLOB))) > 65536)",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if capabilities_oversized {
+        return Ok(false);
+    }
+    let mut statement = connection.prepare(
+        "SELECT activation_id FROM resident_configuration_bindings
+         WHERE workspace_id = ?1 AND resident_id = ?2",
+    )?;
+    let mut rows = statement.query(params![workspace_id.to_string(), resident_id.to_string()])?;
+    while let Some(row) = rows.next()? {
+        let activation_id = parse_uuid(row.get(0)?)?;
+        if !crate::local_model_activation::activation_within_context_read_limits(
+            connection,
+            workspace_id,
+            activation_id,
+        )
+        .map_err(map_activation_error)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Prove this Resident's complete ordered configuration history using startup's owner proof.
+/// Current Team eligibility is the existing owner's field, never Evaluation request authority.
+pub(crate) fn verified_current_configuration_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    resident_id: Uuid,
+) -> Result<ResidentConfiguration, ResidentConfigurationError> {
+    let invalid_sequence: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM resident_configuration_decisions
+         WHERE workspace_id = ?1 AND resident_id = ?2 AND sequence < 1)",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if invalid_sequence {
+        return Err(ResidentConfigurationError::InvalidStore);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, workspace_id, resident_id, state, predecessor_id, decided_at_ms
+         FROM resident_configuration_decisions
+         WHERE workspace_id = ?1 AND resident_id = ?2 ORDER BY sequence",
+    )?;
+    let mut rows = statement.query(params![workspace_id.to_string(), resident_id.to_string()])?;
+    let mut latest = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let base = (
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        );
+        verify_one_configuration_decision(connection, base, &mut latest)?;
+    }
+    current_configuration(connection, workspace_id, resident_id)?
+        .ok_or(ResidentConfigurationError::InvalidStore)
+}
+
 pub(crate) fn current_configuration(
     connection: &Connection,
     workspace_id: Uuid,
