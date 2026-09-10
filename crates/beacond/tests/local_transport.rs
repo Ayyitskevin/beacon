@@ -2469,6 +2469,228 @@ fn the_candidate_document_crosses_the_socket_as_the_owners_exact_bytes() {
     thread.join().unwrap().unwrap();
 }
 
+/// The Command journey retains its completion and candidate across a real stop, reopen and sign-in.
+/// C6/C7 own the individual command and encoding cases; this bar owns their restart seam. All domain
+/// setup uses their public-Command fixture, including classification BEFORE completion. The local
+/// HTTP stub supplies model metadata only; there is no model invocation or live provider activation.
+#[test]
+fn the_command_journey_retains_completion_and_candidate_bytes_across_server_restart() {
+    // Keep both servers joined even when a retention assertion panics. serve_until polls a
+    // nonblocking listener, so setting its flag is sufficient; this guard adds no sleep or wake peer.
+    struct ServerSession {
+        running: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<Result<(), LocalTransportError>>>,
+    }
+
+    impl ServerSession {
+        fn start(server: LocalSupervisorServer) -> Self {
+            let running = Arc::new(AtomicBool::new(true));
+            let server_running = Arc::clone(&running);
+            Self {
+                running,
+                thread: Some(thread::spawn(move || server.serve_until(server_running))),
+            }
+        }
+
+        fn stop(&mut self) {
+            self.running.store(false, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread
+                    .join()
+                    .expect("B14.JOURNEY.SERVER_THREAD_JOINS")
+                    .expect("B14.JOURNEY.SERVER_STOPS_CLEANLY");
+            }
+        }
+    }
+
+    impl Drop for ServerSession {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                // Cleanup must not replace the first assertion failure with a second panic.
+                let _ = thread.join();
+            }
+        }
+    }
+
+    let runtime = TestRuntime::new("b14journey");
+    let address = serve_ollama_inspections(2);
+    let bind_server = |phase| {
+        LocalSupervisorServer::bind(LocalServerConfig {
+            store_path: runtime.store.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: runtime.socket.clone(),
+            auth_token_path: runtime.token.clone(),
+            lock_path: runtime.lock.clone(),
+            local_model_endpoint: LocalModelEndpoint::new(address)
+                .expect("B14.JOURNEY.METADATA_ENDPOINT_IS_LOCAL"),
+        })
+        .unwrap_or_else(|error| panic!("B14.JOURNEY.SERVER_BINDS: {phase}: {error}"))
+    };
+    let mut original_server = ServerSession::start(bind_server("original"));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
+        .expect("B14.JOURNEY.ORIGINAL_CLIENT_CONNECTS");
+    let fixture = prepare_c6_fixture(&client);
+    let completion_before = client
+        .mission_completion(fixture.mission_id)
+        .expect("B14.JOURNEY.COMPLETION_READS_BEFORE_RESTART")
+        .expect("B14.JOURNEY.COMPLETION_EXISTS_BEFORE_RESTART");
+    let intent_before = client
+        .get_mission_completion_intent(fixture.mission_id)
+        .expect("B14.JOURNEY.INTENT_READS_BEFORE_RESTART")
+        .expect("B14.JOURNEY.INTENT_EXISTS_BEFORE_RESTART");
+    let receipt_before = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .expect("B14.JOURNEY.CANDIDATE_PREPARES_BEFORE_RESTART");
+    let document_before = client
+        .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+        .expect("B14.JOURNEY.DOCUMENT_READS_BEFORE_RESTART");
+
+    // Independent immutable records, not expectations reconstructed from transport fields. The
+    // public completion view is deliberately partial, so its owner's verified reader supplies the
+    // whole completion. This read-only connection executes no test SQL and plants no domain state.
+    // Each call drops its services/connections, leaving only owned values across the server stop.
+    let read_owner_records = |phase| {
+        let accounts = Arc::new(
+            OperatorAccountService::open(&runtime.store)
+                .expect("B14.JOURNEY.OWNER_STORE_OPENS"),
+        );
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("B14.JOURNEY.OWNER_AUTHENTICATES");
+        let outcomes = OutcomeService::new(accounts, fixture.workspace_id);
+        let manifest = outcomes
+            .manifest(&receipt_before.manifest_digest.value)
+            .unwrap_or_else(|error| {
+                panic!("B14.JOURNEY.OWNER_MANIFEST_READS: {phase}: {error}")
+            });
+        let candidate = outcomes
+            .candidate(&receipt_before.manifest_digest.value)
+            .unwrap_or_else(|error| {
+                panic!("B14.JOURNEY.OWNER_CANDIDATE_READS: {phase}: {error}")
+            });
+        let connection = rusqlite::Connection::open_with_flags(
+            &runtime.store,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("B14.JOURNEY.COMPLETION_READER_OPENS_READ_ONLY");
+        let completion = beacond::verified_completion_within(
+            &connection,
+            fixture.workspace_id,
+            &manifest.manifest().completion.digest.value,
+        )
+        .unwrap_or_else(|error| {
+            panic!("B14.JOURNEY.OWNER_COMPLETION_READS: {phase}: {error}")
+        });
+        (manifest, candidate, completion)
+    };
+    let (manifest_before, candidate_before, full_completion_before) =
+        read_owner_records("before restart");
+    let bytes_before = data_encoding::BASE64
+        .decode(document_before.candidate_content_base64.as_bytes())
+        .expect("B14.JOURNEY.DOCUMENT_DECODES_BEFORE_RESTART");
+    assert_eq!(
+        bytes_before.as_slice(),
+        candidate_before.content(),
+        "B14.JOURNEY.INITIAL_DOCUMENT_IS_THE_OWNERS_BYTES"
+    );
+
+    drop(client);
+    original_server.stop();
+    assert!(
+        !runtime.socket.exists(),
+        "B14.JOURNEY.ORIGINAL_SERVER_RELEASES_ITS_SOCKET"
+    );
+    let mut reopened_server = ServerSession::start(bind_server("reopened same store"));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
+        .expect("B14.JOURNEY.REOPENED_CLIENT_CONNECTS");
+    assert_eq!(
+        client.status().expect("B14.JOURNEY.REOPENED_STATUS_READS").phase,
+        OperatorSessionPhase::Locked,
+        "B14.JOURNEY.REOPENED_SESSION_REQUIRES_SIGN_IN"
+    );
+    let locked_read = client.mission_completion(fixture.mission_id);
+    assert!(
+        matches!(
+            locked_read,
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            })
+        ),
+        "B14.JOURNEY.REOPENED_COMPLETION_REQUIRES_SIGN_IN: {locked_read:?}"
+    );
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("B14.JOURNEY.REOPENED_SESSION_AUTHENTICATES");
+
+    // Read the held records BEFORE repeating prepare; a repeat must not repair lost retention.
+    assert_eq!(
+        client
+            .mission_completion(fixture.mission_id)
+            .expect("B14.JOURNEY.COMPLETION_READS_AFTER_RESTART"),
+        Some(completion_before),
+        "B14.JOURNEY.COMPLETION_VIEW_SURVIVES_RESTART"
+    );
+    assert_eq!(
+        client
+            .get_mission_completion_intent(fixture.mission_id)
+            .expect("B14.JOURNEY.INTENT_READS_AFTER_RESTART"),
+        Some(intent_before),
+        "B14.JOURNEY.REVIEWED_INTENT_SURVIVES_RESTART"
+    );
+    let document_after = client
+        .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+        .expect("B14.JOURNEY.HELD_DOCUMENT_READS_BEFORE_REPEAT");
+    assert_eq!(
+        document_after, document_before,
+        "B14.JOURNEY.FULL_DOCUMENT_AND_BYTES_SURVIVE_RESTART"
+    );
+    let (manifest_after, candidate_after, full_completion_after) =
+        read_owner_records("after restart before repeat");
+    assert_eq!(
+        full_completion_after, full_completion_before,
+        "B14.JOURNEY.FULL_COMPLETION_RECORD_SURVIVES_RESTART"
+    );
+    assert_eq!(
+        manifest_after, manifest_before,
+        "B14.JOURNEY.FULL_MANIFEST_AND_CANONICAL_BYTES_SURVIVE_RESTART"
+    );
+    assert_eq!(
+        candidate_after, candidate_before,
+        "B14.JOURNEY.FULL_CANDIDATE_AND_CREATION_EVENT_SURVIVE_RESTART"
+    );
+
+    let receipt_after = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .expect("B14.JOURNEY.REPEAT_PREPARE_ACCEPTED_AFTER_RESTART");
+    assert_eq!(
+        receipt_after, receipt_before,
+        "B14.JOURNEY.REPEAT_PREPARE_RETURNS_THE_SAME_IDENTITY"
+    );
+    assert_eq!(
+        client
+            .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+            .expect("B14.JOURNEY.HELD_DOCUMENT_READS_AFTER_REPEAT"),
+        document_before,
+        "B14.JOURNEY.REPEAT_PREPARE_PRESERVES_FULL_DOCUMENT_AND_BYTES"
+    );
+    assert_eq!(
+        read_owner_records("after repeat"),
+        (manifest_before, candidate_before, full_completion_before),
+        "B14.JOURNEY.REPEAT_PREPARE_PRESERVES_FULL_OWNER_RECORDS"
+    );
+    // The same receipt/document is public observational idempotence. The owner equality also
+    // retains the Artifact creation event; neither proves that no unrelated row or Event was written.
+    reopened_server.stop();
+}
+
 /// A foreign Workspace's REAL manifest and a digest that never existed answer with the same bytes.
 ///
 /// Compared as whole serialized replies, not as enum arms, because the disclosure this bar exists to
