@@ -29,6 +29,7 @@ mod mission_completion;
 mod mission_completion_command;
 mod mission_completion_store;
 mod mission_impact;
+mod mission_impact_command;
 mod model_invocation;
 mod operator_account;
 mod outcome;
@@ -140,6 +141,11 @@ pub use mission_completion_store::{
     CompletionReadRefusal, CompletionUnavailable, CompletionView, ConditionResultView,
     MissionCompletionReadError, MissionCompletionReadService, declared_conditions_digest,
     enumerate_completions, record_completion, verified_completion_within,
+};
+pub use mission_impact_command::{
+    ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
+    ClassificationIntentRequest, ClassificationView, MissionImpactCommandService,
+    PolicyCitationDto, SupersedesDto,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
