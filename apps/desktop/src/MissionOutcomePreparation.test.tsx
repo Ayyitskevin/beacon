@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { MissionOutcomePreparation } from "./MissionOutcomePreparation";
-import type { MissionView } from "./session";
 import { expectNoWcag22Violations } from "./test/axe";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -15,24 +14,6 @@ const invokeMock = vi.mocked(invoke);
 // native wait on C5's native release. Green here is FRONTEND behaviour and never an end-to-end
 // claim about preparation.
 const MISSION = "99999999-9999-4999-8999-9999999c6000";
-
-function mission(id = MISSION): MissionView {
-  return {
-    id,
-    workspaceId: "11111111-1111-4111-8111-111111111111",
-    projectId: "22222222-2222-4222-8222-222222222222",
-    charterRevision: 3,
-    teamId: "33333333-3333-4333-8333-333333333333",
-    desiredOutcome: "Ship one reviewed feature",
-    successConditions: ["Gates pass"],
-    constraints: [],
-    prohibitions: [],
-    lifecycle: "admitted",
-    admittedBy: "operator",
-    admittedAtMs: 126,
-    members: [],
-  } as unknown as MissionView;
-}
 
 function receipt(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -57,7 +38,7 @@ beforeEach(() => {
 it("C6.PREPARE.THE_HUMAN_CHOICE_IS_SENT: an explicit appendix choice reaches the command once", async () => {
   const user = userEvent.setup();
   invokeMock.mockResolvedValue(receipt());
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
 
   // Nothing is preselected, and nothing runs before a click.
   expect(invokeMock, "C6.PREPARE.NO_INVOCATION_BEFORE_CLICK").not.toHaveBeenCalled();
@@ -88,7 +69,7 @@ async function chooseAndPrepare(user: ReturnType<typeof userEvent.setup>, label:
 }
 
 it("C6.PREPARE.NOTHING_RUNS_ON_MOUNT: the neutral state is not a claim of absence", () => {
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   expect(invokeMock, "C6.PREPARE.NOTHING_RUNS_ON_MOUNT").not.toHaveBeenCalled();
   expect(screen.getByText("Preparation status is not loaded."), "C6.PREPARE.NOTHING_RUNS_ON_MOUNT")
     .toBeInTheDocument();
@@ -99,7 +80,7 @@ it("C6.PREPARE.NOTHING_RUNS_ON_MOUNT: the neutral state is not a claim of absenc
 it("C6.PREPARE.THE_RECEIPT_IS_HELD_IDENTITIES: nine fields, shown as identities and nothing more", async () => {
   const user = userEvent.setup();
   invokeMock.mockResolvedValue(receipt());
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
 
   expect(await screen.findByText(LIMIT_COPY), "C6.PREPARE.THE_RECEIPT_IS_HELD_IDENTITIES").toBeInTheDocument();
@@ -117,7 +98,7 @@ it("C6.PREPARE.THE_RECEIPT_IS_HELD_IDENTITIES: nine fields, shown as identities 
 it("C6.PREPARE.THE_MODE_IS_THE_OWNERS: a policy-default request may still resolve to included", async () => {
   const user = userEvent.setup();
   invokeMock.mockResolvedValue(receipt({ appendixRequest: "policy_default", appendixMode: "included" }));
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Use Policy default/);
 
   expect(
@@ -143,7 +124,7 @@ it("C6.PREPARE.AN_INCOHERENT_REPLY_IS_UNCONFIRMED: mismatch and shape faults nev
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(reply);
     const user = userEvent.setup();
-    render(<MissionOutcomePreparation mission={mission()} />);
+    render(<MissionOutcomePreparation missionId={MISSION} />);
     await chooseAndPrepare(user, /Include verification appendix/);
 
     expect(await screen.findByText(UNKNOWN_COPY), `C6.PREPARE.AN_INCOHERENT_REPLY_IS_UNCONFIRMED: ${label}`)
@@ -171,7 +152,7 @@ it("C6.PREPARE.THE_THREE_SEQUENCING_REFUSALS_ARE_DEFINITE: each says its own fix
     invokeMock.mockReset();
     invokeMock.mockRejectedValue({ code });
     const user = userEvent.setup();
-    render(<MissionOutcomePreparation mission={mission()} />);
+    render(<MissionOutcomePreparation missionId={MISSION} />);
     await chooseAndPrepare(user, /Include verification appendix/);
 
     expect(await screen.findByText(sentence), `C6.PREPARE.THE_THREE_SEQUENCING_REFUSALS_ARE_DEFINITE: ${code}`)
@@ -188,7 +169,7 @@ it("C6.PREPARE.THE_THREE_SEQUENCING_REFUSALS_ARE_DEFINITE: each says its own fix
 it("C6.PREPARE.UNAVAILABLE_STAYS_UNKNOWN: an explicit repeat sends the same intent, once per click", async () => {
   const user = userEvent.setup();
   invokeMock.mockRejectedValue({ code: "outcome_preparation_unavailable" });
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
 
   expect(
@@ -206,7 +187,7 @@ it("C6.PREPARE.UNAVAILABLE_STAYS_UNKNOWN: an explicit repeat sends the same inte
 it("C6.PREPARE.A_CHANGED_CHOICE_IS_A_NEW_INTENT: old feedback does not survive it", async () => {
   const user = userEvent.setup();
   invokeMock.mockRejectedValue({ code: "outcome_preparation_unavailable" });
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
   expect(await screen.findByText(UNKNOWN_COPY), "C6.PREPARE.A_CHANGED_CHOICE_IS_A_NEW_INTENT control").toBeInTheDocument();
 
@@ -223,7 +204,7 @@ it("C6.PREPARE.PENDING_BLOCKS_A_SECOND_CLICK: one attempt per press", async () =
   const user = userEvent.setup();
   let release: ((value: unknown) => void) | undefined;
   invokeMock.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
 
   const button = screen.getByRole("button", { name: "Prepare candidate" });
@@ -244,11 +225,11 @@ it("C6.PREPARE.A_STALE_REPLY_NEVER_LANDS: Mission A to B to A retires the first 
   const other = "77777777-7777-4777-8777-777777777777";
   let release: ((value: unknown) => void) | undefined;
   invokeMock.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
-  const view = render(<MissionOutcomePreparation mission={mission()} />);
+  const view = render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
 
-  view.rerender(<MissionOutcomePreparation mission={mission(other)} />);
-  view.rerender(<MissionOutcomePreparation mission={mission()} />);
+  view.rerender(<MissionOutcomePreparation missionId={other} />);
+  view.rerender(<MissionOutcomePreparation missionId={MISSION} />);
 
   await act(async () => {
     release?.(receipt());
@@ -266,7 +247,7 @@ it("C6.PREPARE.UNMOUNT_RETIRES_THE_ATTEMPT: a reply after unmount changes nothin
   const user = userEvent.setup();
   let release: ((value: unknown) => void) | undefined;
   invokeMock.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
-  const view = render(<MissionOutcomePreparation mission={mission()} />);
+  const view = render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
   view.unmount();
 
@@ -280,7 +261,7 @@ it("C6.PREPARE.UNMOUNT_RETIRES_THE_ATTEMPT: a reply after unmount changes nothin
 it("C6.PREPARE.KEYBOARD_REACHES_THE_CHOICE_AND_THE_ACTION", async () => {
   const user = userEvent.setup();
   invokeMock.mockResolvedValue(receipt());
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
 
   await user.tab();
   const first = screen.getByRole("radio", { name: /Use Policy default/ });
@@ -300,7 +281,7 @@ it("C6.PREPARE.KEYBOARD_REACHES_THE_CHOICE_AND_THE_ACTION", async () => {
 it("C6.PREPARE.THE_SURFACE_MEETS_WCAG_2_2", async () => {
   invokeMock.mockResolvedValue(receipt());
   const user = userEvent.setup();
-  render(<MissionOutcomePreparation mission={mission()} />);
+  render(<MissionOutcomePreparation missionId={MISSION} />);
   await chooseAndPrepare(user, /Include verification appendix/);
   await screen.findByText(LIMIT_COPY);
   await expectNoWcag22Violations(document.body);

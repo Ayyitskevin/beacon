@@ -3,7 +3,6 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import {
   type AppendixRequest,
-  type MissionView,
   type PreparedOutcomeCandidate,
   describeLocalAccountError,
   prepareOutcomeCandidate,
@@ -90,7 +89,7 @@ function describePreparationError(error: unknown): string {
  *  as evidence that it was recorded. */
 type Intent = { missionId: string; appendixRequest: AppendixRequest };
 
-export function MissionOutcomePreparation({ mission }: { mission: MissionView }): React.JSX.Element {
+export function MissionOutcomePreparation({ missionId }: { missionId: string }): React.JSX.Element {
   const styles = useStyles();
   const headingId = useId();
   const [choice, setChoice] = useState<"" | AppendixRequest>("");
@@ -106,7 +105,7 @@ export function MissionOutcomePreparation({ mission }: { mission: MissionView })
    *  same render, so they move together and can never disagree. A generation is bumped by a Mission
    *  change, a changed choice, a newer attempt and unmount; a leg whose generation is no longer
    *  current writes nothing. */
-  const live = useRef({ generation: 0, missionId: mission.id });
+  const live = useRef({ generation: 0, missionId });
 
   function fresh(): number {
     live.current.generation += 1;
@@ -128,12 +127,12 @@ export function MissionOutcomePreparation({ mission }: { mission: MissionView })
   // A different Mission inherits NOTHING: not a choice, not a receipt, not a pending outcome. A
   // Mission that comes BACK inherits nothing either -- the generation moved on both times.
   useEffect(() => {
-    if (live.current.missionId === mission.id) return;
-    live.current.missionId = mission.id;
+    if (live.current.missionId === missionId) return;
+    live.current.missionId = missionId;
     live.current.generation += 1;
     setChoice("");
     forget();
-  }, [mission.id]);
+  }, [missionId]);
 
   // Unmount retires the current generation. `setState` after unmount is a silent no-op, but a reply
   // that arrives later must not be treated as this screen's answer by anything else either.
@@ -205,7 +204,7 @@ export function MissionOutcomePreparation({ mission }: { mission: MissionView })
           disabled={choice === "" || pending}
           onClick={() => {
             if (choice === "") return;
-            send({ missionId: mission.id, appendixRequest: choice });
+            send({ missionId, appendixRequest: choice });
           }}
         >
           Prepare candidate
