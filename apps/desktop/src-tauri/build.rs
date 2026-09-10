@@ -49,6 +49,7 @@ const COMMANDS: &[&str] = &[
     "classify_mission_impact",
     "get_mission_classification",
     "prepare_outcome_candidate",
+    "read_outcome_candidate_document",
     "admit_mission",
     "mission_publications",
     "outcome_document",

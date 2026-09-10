@@ -51,6 +51,7 @@
     "allow-classify-mission-impact",
     "allow-get-mission-classification",
     "allow-prepare-outcome-candidate",
+    "allow-read-outcome-candidate-document",
         "allow-missions",
     "allow-mission",
     "allow-admit-mission",

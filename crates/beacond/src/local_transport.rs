@@ -58,6 +58,18 @@ const MAX_COMPLETION_PREVIEW_RESPONSE_BYTES: u64 = 192 * 1024;
 /// completion request may exceed it, and only a preview response may exceed that.
 const _: () = assert!(MAX_MESSAGE_BYTES < MAX_COMPLETION_REQUEST_BYTES);
 const _: () = assert!(MAX_COMPLETION_REQUEST_BYTES < MAX_COMPLETION_PREVIEW_RESPONSE_BYTES);
+
+/// C7's candidate DOCUMENT response -- the one family that carries stored BYTES.
+///
+/// `4 * ceil(MAX_CONTENT_BYTES / 3)` is 1,398,104 bytes of base64 body for a maximal 1 MiB content,
+/// plus the envelope and the eight keys' own identities, rounded up to a whole KiB. base64 is chosen
+/// because its size is a pure function of the byte count with NO data dependence, so this ceiling is
+/// arithmetic rather than a worst case an adversarial document could approach.
+///
+/// A RESPONSE ceiling only. The request stays in the default domain -- it is one digest -- and no
+/// other family's limit, refusal order or deadline moves.
+const MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES: u64 = 1_403_904;
+const _: () = assert!(MAX_COMPLETION_PREVIEW_RESPONSE_BYTES < MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES);
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -164,6 +176,8 @@ pub enum LocalErrorCode {
     OutcomeNotClassified,
     OutcomeNoClassificationAtCompletion,
     OutcomePreparationUnavailable,
+    OutcomeCandidateNotFound,
+    OutcomeCandidateUnavailable,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -211,6 +225,10 @@ pub enum LocalTransportError {
     /// A failure from AFTER `prepare_for_mission` returned. The candidate may already exist, so every
     /// arm here -- `Account` included -- is `outcome_preparation_unavailable`.
     OutcomePreparationAfterCommit(PostPreparationFault),
+    /// A refusal from the READ-ONLY candidate document read. Two stages, named rather than merged:
+    /// see `CandidateDocumentFault`. A read has no post-write uncertainty phase, so account refusals
+    /// keep their own codes at either stage.
+    OutcomeCandidateDocument(CandidateDocumentFault),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -699,6 +717,13 @@ impl fmt::Display for LocalTransportError {
                     post_preparation_tag(fault)
                 )
             }
+            Self::OutcomeCandidateDocument(fault) => {
+                write!(
+                    formatter,
+                    "Outcome candidate document read failed: {}",
+                    candidate_document_tag(fault)
+                )
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -1099,6 +1124,92 @@ pub enum PostPreparationFault {
 /// `PostPreparationFault::Read` reads as what it is.
 pub type PublishOrPrepare = crate::PrepareRefusal;
 
+/// Why reading one candidate's document failed, WITH the stage it failed at.
+///
+/// The stage is the fact that decides what the caller may conclude, because the two owner calls are
+/// independent: `OutcomeService::manifest` verifies the manifest once (`outcome_store.rs:1078-1086`),
+/// and `OutcomeService::candidate` verifies it AGAIN before following its Artifact
+/// (`:1089-1101`). They do not share a transaction or a snapshot, and nothing here claims they do.
+///
+/// So "this Workspace holds no such manifest" is answerable ONLY at the first read. Once a manifest
+/// has been held, a later absence -- of the manifest or of the Artifact behind it -- means the store
+/// disagreed with itself between two reads, which is not an absence a caller may act on.
+#[derive(Debug)]
+pub enum CandidateDocumentFault {
+    /// The INITIAL manifest read. `Absent` and `CrossWorkspace` here are the only absence this
+    /// command reports, and they report it as the SAME answer.
+    Manifest(crate::PrepareRefusal),
+    /// `candidate()`, including its own repeated manifest verification and the Artifact behind it.
+    /// Every non-account refusal here is unavailable, absence-shaped ones included.
+    Candidate(crate::PrepareRefusal),
+    /// Both reads succeeded and disagreed about the binding between them. Not an owner refusal at
+    /// all, so it gets its own value rather than borrowing one that never happened.
+    Identity {
+        field: &'static str,
+        expected: String,
+        observed: String,
+    },
+    /// The verified content bytes are not UTF-8. The write path can only store a rendered `String`,
+    /// so reaching this is a corruption signal -- and it must never be silently repaired.
+    Content {
+        bytes: u64,
+        error: std::str::Utf8Error,
+    },
+}
+
+/// The identity labels this command's binding comparison supplies, and the whole outward vocabulary
+/// of `CandidateDocumentFault::Identity`.
+///
+/// Closed from the start, for the reason C6 learned the hard way: `field` is a public `&'static str`,
+/// so the type permits any static text at all, and an outward line must never interpolate what it has
+/// not named.
+const CANDIDATE_DOCUMENT_FIELD_LABELS: [&str; 3] = [
+    "manifestDigest",
+    "candidateArtifactDigest",
+    "candidateContentBytes",
+];
+
+/// The candidate-read fault's NAME, stage first. The stage is part of the name because it is the
+/// fact that decides what a caller may conclude.
+fn candidate_document_tag(fault: &CandidateDocumentFault) -> String {
+    match fault {
+        CandidateDocumentFault::Manifest(refusal) => {
+            format!("Manifest.{}", prepare_refusal_tag(refusal))
+        }
+        CandidateDocumentFault::Candidate(refusal) => {
+            format!("Candidate.{}", prepare_refusal_tag(refusal))
+        }
+        CandidateDocumentFault::Identity { field, .. } => {
+            match CANDIDATE_DOCUMENT_FIELD_LABELS
+                .iter()
+                .find(|named| *named == field)
+            {
+                Some(named) => format!("Identity.{named}"),
+                None => "Identity".to_owned(),
+            }
+        }
+        CandidateDocumentFault::Content { .. } => "Content".to_owned(),
+    }
+}
+
+/// One candidate's stored document, read back through the owner's own verified readers.
+///
+/// Eight fields and nothing else: no evaluation, no publication, no "current" flag, no summary and no
+/// status. The bytes travel as base64 of the EXACT retained content -- never a re-rendered string --
+/// because the document's identity is its byte sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutcomeCandidateDocumentDto {
+    pub mission_id: uuid::Uuid,
+    pub manifest_id: uuid::Uuid,
+    pub manifest_digest: DigestEnvelopeDto,
+    pub candidate_artifact_digest: DigestEnvelopeDto,
+    pub candidate_content_digest: DigestEnvelopeDto,
+    pub candidate_content_bytes: u64,
+    pub media_type: String,
+    pub candidate_content_base64: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope {
@@ -1271,6 +1382,12 @@ enum LocalCommand {
         mission_id: uuid::Uuid,
         appendix_request: AppendixRequestDto,
     },
+    /// Read one prepared candidate's stored document. READ-ONLY: it writes nothing, prepares nothing
+    /// and evaluates nothing. Keyed by the manifest digest the caller already holds -- there is no
+    /// Mission-to-candidate reader to key it by.
+    ReadOutcomeCandidateDocument {
+        manifest_digest: String,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1399,6 +1516,9 @@ enum LocalResult {
     },
     PreparedOutcomeCandidate {
         candidate: PreparedOutcomeCandidateDto,
+    },
+    OutcomeCandidateDocument {
+        document: OutcomeCandidateDocumentDto,
     },
     Mission {
         mission: MissionView,
@@ -1627,6 +1747,121 @@ impl LocalSupervisorServer {
             });
         }
         Ok(request.command)
+    }
+
+    /// Read one prepared candidate's document through the owner's two verified readers.
+    ///
+    /// READ-ONLY, and literally so: neither `prepare_for_mission` nor `prepare_outcome_candidate` is
+    /// called here, not even through a shared helper. A write command used as a lookup would make
+    /// "show me what was prepared" capable of preparing.
+    ///
+    /// The two owner calls authenticate and verify INDEPENDENTLY -- `candidate` repeats the manifest
+    /// verification internally (`outcome_store.rs:1089-1101`) -- so there is no shared transaction to
+    /// claim. What makes the pair coherent is not a snapshot but immutable content addressing plus one
+    /// explicit comparison: the record this manifest binds is identified by a digest, and a digest
+    /// names the same bytes in both reads or the comparison fails.
+    ///
+    /// Every field comes from the verified records. Nothing comes from the request except the digest
+    /// that selects them, and on any failure the answer is a refusal rather than a partial document.
+    fn read_outcome_candidate_document(
+        &self,
+        manifest_digest: &str,
+    ) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+        let fault =
+            |fault: CandidateDocumentFault| LocalTransportError::OutcomeCandidateDocument(fault);
+        // STAGE 1. The only stage at which "this Workspace holds no such manifest" is answerable.
+        let stored = self
+            .outcomes
+            .manifest(manifest_digest)
+            .map_err(|refusal| fault(CandidateDocumentFault::Manifest(refusal)))?;
+        // STAGE 2. A separate authenticated read, with its own repeated manifest verification. `?` is
+        // deliberately not shared with stage 1: the same refusal means different things here.
+        let record = self
+            .outcomes
+            .candidate(manifest_digest)
+            .map_err(|refusal| fault(CandidateDocumentFault::Candidate(refusal)))?;
+
+        let mismatch = |field: &'static str, expected: String, observed: String| {
+            fault(CandidateDocumentFault::Identity {
+                field,
+                expected,
+                observed,
+            })
+        };
+        // The manifest answered for the digest that was asked for.
+        if stored.digest().value != manifest_digest {
+            return Err(mismatch(
+                "manifestDigest",
+                manifest_digest.to_owned(),
+                stored.digest().value.clone(),
+            ));
+        }
+        // And the record returned is the one THIS manifest binds. Immutable content addressing makes
+        // this comparison sufficient; it is not a substitute for a transaction, it is a different
+        // guarantee.
+        if record.digest().value != stored.candidate_artifact_digest() {
+            return Err(mismatch(
+                "candidateArtifactDigest",
+                stored.candidate_artifact_digest().to_owned(),
+                record.digest().value.clone(),
+            ));
+        }
+
+        let payload = record.payload();
+        let content = record.content();
+        // The declared count and the bytes actually returned. The owner proves the stored blob's
+        // length against its record; this compares what crossed into this function.
+        let observed_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+        if payload.content_bytes != observed_bytes {
+            return Err(mismatch(
+                "candidateContentBytes",
+                payload.content_bytes.to_string(),
+                observed_bytes.to_string(),
+            ));
+        }
+        // UTF-8 is guaranteed at WRITE time -- the renderer stores a `String` -- but no reader proves
+        // it, and a content digest is equally happy with bytes that are not UTF-8. So the check is
+        // here, as a refusal, and it is never repaired: a replacement character would be a byte this
+        // transport invented.
+        if let Err(error) = std::str::from_utf8(content) {
+            return Err(fault(CandidateDocumentFault::Content {
+                bytes: observed_bytes,
+                error,
+            }));
+        }
+
+        let envelope = |algorithm: &str, canonicalizer: &str, value: &str| DigestEnvelopeDto {
+            algorithm: algorithm.to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: value.to_owned(),
+        };
+        Ok(OutcomeCandidateDocumentDto {
+            mission_id: stored.manifest().mission_id,
+            manifest_id: stored.manifest_id(),
+            manifest_digest: envelope(
+                &stored.digest().algorithm,
+                &stored.digest().canonicalizer,
+                &stored.digest().value,
+            ),
+            // The RECORD's identity, under the record canonicalizer.
+            candidate_artifact_digest: envelope(
+                &record.digest().algorithm,
+                &record.digest().canonicalizer,
+                &record.digest().value,
+            ),
+            // And the CONTENT's digest, under the raw canonicalizer. Two envelopes over two different
+            // things; confusing them would make a caller verify the wrong bytes.
+            candidate_content_digest: envelope(
+                &payload.content_digest.algorithm,
+                &payload.content_digest.canonicalizer,
+                &payload.content_digest.value,
+            ),
+            candidate_content_bytes: payload.content_bytes,
+            media_type: payload.media_type.clone(),
+            // base64 of the ORIGINAL byte slice -- not of the decoded string, and with no
+            // normalisation, newline translation or BOM handling of any kind.
+            candidate_content_base64: data_encoding::BASE64.encode(content),
+        })
     }
 
     /// Prepare one candidate, then PROVE the receipt against the owner's own verified readers.
@@ -2024,6 +2259,11 @@ impl LocalSupervisorServer {
             } => LocalResult::PreparedOutcomeCandidate {
                 candidate: self.prepare_outcome_candidate(mission_id, appendix_request)?,
             },
+            LocalCommand::ReadOutcomeCandidateDocument { manifest_digest } => {
+                LocalResult::OutcomeCandidateDocument {
+                    document: self.read_outcome_candidate_document(&manifest_digest)?,
+                }
+            }
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
                 mission: self.missions.admit(draft)?,
             },
@@ -2524,6 +2764,19 @@ impl LocalSupervisorClient {
         })?)
     }
 
+    /// Read one prepared candidate's stored document. A READ: it writes nothing and evaluates
+    /// nothing, and the bytes it returns are the exact stored content, base64-encoded.
+    pub fn read_outcome_candidate_document(
+        &self,
+        manifest_digest: &str,
+    ) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+        expect_outcome_candidate_document(self.send(
+            LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: manifest_digest.to_owned(),
+            },
+        )?)
+    }
+
     /// Record one Mission impact classification. The Operator's five keys cross unchanged; the owner
     /// derives identity, version, the Policy citation, the actor and the clock.
     pub fn classify_mission_impact(
@@ -2654,6 +2907,8 @@ impl LocalSupervisorClient {
 fn response_max(command: &LocalCommand) -> u64 {
     match command {
         LocalCommand::PreviewMissionCompletion { .. } => MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        // The ONE family that carries stored bytes, and the only reason this ceiling exists.
+        LocalCommand::ReadOutcomeCandidateDocument { .. } => MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
         // Both C5 commands stay in the OLD domain: the widest classification view is ~8.7 KB and the
         // widest observation ~9.0 KB (measured, tools/c5/opus2/transport/c5-wire-bytes.json), so
         // neither needs a larger frame and neither widens one.
@@ -2940,6 +3195,15 @@ fn expect_prepared_outcome_candidate(
     }
 }
 
+fn expect_outcome_candidate_document(
+    result: LocalResult,
+) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+    match result {
+        LocalResult::OutcomeCandidateDocument { document } => Ok(document),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_mission_classification(
     result: LocalResult,
 ) -> Result<crate::ClassificationView, LocalTransportError> {
@@ -3073,6 +3337,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::OutcomePreparation(error) => wire_error_from_preparation(error),
         LocalTransportError::OutcomePreparationAfterCommit(fault) => {
             wire_error_from_post_preparation(fault)
+        }
+        LocalTransportError::OutcomeCandidateDocument(fault) => {
+            wire_error_from_candidate_document(fault)
         }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -3495,6 +3762,42 @@ fn wire_error_from_post_preparation(_fault: PostPreparationFault) -> WireError {
     }
 }
 
+/// The candidate document read: absence is answerable at the FIRST manifest read and nowhere else.
+///
+/// `Absent` and `CrossWorkspace` at that first read are ONE answer, deliberately. The owner's
+/// `verified_manifest_within` selects on the digest alone and only then compares the stored Workspace
+/// (`outcome_store.rs:549-584`), so it returns two DISTINCT refusals -- opacity here is NOT a property
+/// of the SQL, and an implementation that let `CrossWorkspace` fall through to `unavailable` would
+/// answer a different code for a foreign Workspace's real manifest than for a digest that never
+/// existed. That difference is a probeable disclosure that a manifest exists somewhere in this
+/// installation, so this transport collapses it. Which one actually happened survives in `Debug`.
+///
+/// Everything at the `candidate()` stage is unavailable, absence-shaped refusals included: a manifest
+/// that vanished between two independent reads, or an Artifact missing behind a verified manifest, is
+/// a store disagreeing with itself rather than an absence a caller may act on.
+///
+/// Account refusals keep their own codes at EITHER stage. This is a read: nothing was written, so
+/// there is no post-write uncertainty to collapse them into.
+fn wire_error_from_candidate_document(fault: CandidateDocumentFault) -> WireError {
+    let code = match fault {
+        CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(error))
+        | CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(error)) => {
+            return wire_error_from_account(error);
+        }
+        CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+            crate::ManifestStoreRefusal::Absent | crate::ManifestStoreRefusal::CrossWorkspace,
+        )) => LocalErrorCode::OutcomeCandidateNotFound,
+        CandidateDocumentFault::Manifest(_)
+        | CandidateDocumentFault::Candidate(_)
+        | CandidateDocumentFault::Identity { .. }
+        | CandidateDocumentFault::Content { .. } => LocalErrorCode::OutcomeCandidateUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_mission(error: MissionError) -> WireError {
     let code = match error {
         MissionError::Account(error) => return wire_error_from_account(error),
@@ -3593,11 +3896,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LocalCommand, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
-        LocalSupervisorServer, LocalTransportError, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
-        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, PostPreparationFault,
-        PreparedOutcomeCandidateDto, ResponseEnvelope, WireError, accepts_completion_sized_request,
-        initialize_local_auth_token, response_from_transport_error, response_max,
+        CandidateDocumentFault, LocalCommand, LocalErrorCode, LocalServerConfig,
+        LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+        MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OutcomeCandidateDocumentDto,
+        PostPreparationFault, PreparedOutcomeCandidateDto, ResponseEnvelope, WireError,
+        accepts_completion_sized_request, initialize_local_auth_token,
+        response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
     use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal};
@@ -4390,6 +4695,61 @@ mod tests {
             }, &[NEEDLE_A];
     }
 
+    // C7's read vocabulary. The STAGE leads every name, because the stage is what decides whether an
+    // absence is an answer. Note the two `Account` rows: a read has no post-write uncertainty, so an
+    // account refusal keeps its own code at BOTH stages -- unlike C6's post-commit domain.
+    closed_table! {
+        expected_candidate_document / candidate_document_rows: CandidateDocumentFault,
+        "ManifestAccount" | CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(cause))
+            => format!("Manifest.Account.{}", expected_account(cause).1),
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(
+                OperatorAccountError::Store(driver_error(NEEDLE_A)),
+            )), &[NEEDLE_A];
+        "ManifestNotFound" | CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+            ManifestStoreRefusal::Absent | ManifestStoreRefusal::CrossWorkspace,
+        ))
+            => "Manifest.Manifest",
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+                ManifestStoreRefusal::Absent,
+            )), &[];
+        "Manifest" | CandidateDocumentFault::Manifest(refusal)
+            => format!("Manifest.{}", expected_preparation(refusal).1),
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+                ManifestStoreRefusal::Store(payload_a()),
+            )), &[NEEDLE_A];
+        "CandidateAccount" | CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(cause))
+            => format!("Candidate.Account.{}", expected_account(cause).1),
+            CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(
+                OperatorAccountError::Store(driver_error(NEEDLE_A)),
+            )), &[NEEDLE_A];
+        "Candidate" | CandidateDocumentFault::Candidate(refusal)
+            => format!("Candidate.{}", expected_preparation(refusal).1),
+            CandidateDocumentFault::Candidate(crate::PrepareRefusal::Artifact(
+                ArtifactError::NotFound,
+            )), &[];
+        // Three labels spelled out and a closed fallback -- never a repeat of the production
+        // interpolation, and never the production guard's own name.
+        "Identity" | CandidateDocumentFault::Identity { field, .. }
+            => match *field {
+                "manifestDigest" => "Identity.manifestDigest",
+                "candidateArtifactDigest" => "Identity.candidateArtifactDigest",
+                "candidateContentBytes" => "Identity.candidateContentBytes",
+                _ => "Identity",
+            },
+            CandidateDocumentFault::Identity {
+                field: "manifestDigest",
+                expected: payload_a(),
+                observed: payload_b(),
+            }, &[NEEDLE_A];
+        // The byte count is a fact about private content: it names itself and carries no number.
+        "Content" | CandidateDocumentFault::Content { .. }
+            => "Content",
+            CandidateDocumentFault::Content {
+                bytes: 7,
+                error: std::str::from_utf8(&[0xff]).unwrap_err(),
+            }, &[];
+    }
+
     closed_table! {
         expected_impact_classification / impact_classification_rows: crate::ClassificationCommandError,
         "Account" | crate::ClassificationCommandError::Account(cause)
@@ -4622,6 +4982,8 @@ mod tests {
         "OutcomeNotClassified" | LocalErrorCode::OutcomeNotClassified => "OutcomeNotClassified", LocalErrorCode::OutcomeNotClassified, &[];
         "OutcomeNoClassificationAtCompletion" | LocalErrorCode::OutcomeNoClassificationAtCompletion => "OutcomeNoClassificationAtCompletion", LocalErrorCode::OutcomeNoClassificationAtCompletion, &[];
         "OutcomePreparationUnavailable" | LocalErrorCode::OutcomePreparationUnavailable => "OutcomePreparationUnavailable", LocalErrorCode::OutcomePreparationUnavailable, &[];
+        "OutcomeCandidateNotFound" | LocalErrorCode::OutcomeCandidateNotFound => "OutcomeCandidateNotFound", LocalErrorCode::OutcomeCandidateNotFound, &[];
+        "OutcomeCandidateUnavailable" | LocalErrorCode::OutcomeCandidateUnavailable => "OutcomeCandidateUnavailable", LocalErrorCode::OutcomeCandidateUnavailable, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -4708,6 +5070,14 @@ mod tests {
                 expected: payload_a(),
                 observed: payload_a(),
             }), &[NEEDLE_A];
+        "R42S2.TRANSPORT.OutcomeCandidateDocument" | LocalTransportError::OutcomeCandidateDocument(fault)
+            => format!(
+                "Outcome candidate document read failed: {}",
+                expected_candidate_document(fault).1
+            ),
+            LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Manifest(
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+            )), &[];
         "R42S2.TRANSPORT.MissionImpactClassification" | LocalTransportError::MissionImpactClassification(error)
             => format!("Mission impact classification failed: {}", expected_impact_classification(error).1),
             LocalTransportError::MissionImpactClassification(crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
@@ -5804,6 +6174,43 @@ mod tests {
         "R42S2.TRANSPORT.OutcomePreparationAfterCommit",
         post_read_account
     );
+    /// C7's expansion, written out rather than macro-generated: this domain has TWO account arms,
+    /// one per stage, and `domain_cases!` knows how to expand exactly one.
+    fn candidate_document_cases(cases: &mut Vec<Case>) {
+        for (case, value, markers) in candidate_document_rows() {
+            let stage = match case {
+                "ManifestAccount" => Some("Manifest"),
+                "CandidateAccount" => Some("Candidate"),
+                _ => None,
+            };
+            match stage {
+                Some(stage) => {
+                    for (child, account, child_markers) in account_rows() {
+                        cases.push(Case {
+                            id: format!(
+                                "R42S2.TRANSPORT.OutcomeCandidateDocument.{stage}.Account.{child}"
+                            ),
+                            value: LocalTransportError::OutcomeCandidateDocument(match stage {
+                                "Manifest" => CandidateDocumentFault::Manifest(
+                                    crate::PrepareRefusal::Account(account),
+                                ),
+                                _ => CandidateDocumentFault::Candidate(
+                                    crate::PrepareRefusal::Account(account),
+                                ),
+                            }),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                None => cases.push(Case {
+                    id: format!("R42S2.TRANSPORT.OutcomeCandidateDocument.{case}"),
+                    value: LocalTransportError::OutcomeCandidateDocument(value),
+                    markers,
+                }),
+            }
+        }
+    }
+
     domain_cases!(
         impact_classification_cases,
         LocalTransportError::MissionImpactClassification,
@@ -6136,6 +6543,7 @@ mod tests {
                 "R42S2.TRANSPORT.OutcomePreparationAfterCommit" => {
                     post_preparation_cases(&mut cases)
                 }
+                "R42S2.TRANSPORT.OutcomeCandidateDocument" => candidate_document_cases(&mut cases),
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -6294,15 +6702,18 @@ mod tests {
             "R42S2.TRANSPORT.CARDINALITY.InvalidDraft"
         );
         // Counted at THIS source: 63 before this slice, plus the eight completion codes.
+        // 84 before C7, plus its two: `outcome_candidate_not_found` and
+        // `outcome_candidate_unavailable`.
         assert_eq!(
             code_rows().len(),
-            84,
+            86,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
-        // 23 before this slice, plus the `MissionCompletionCommand` carrier.
+        // 23 before this slice, plus the `MissionCompletionCommand` carrier. 27 before C7, plus its
+        // `OutcomeCandidateDocument` carrier.
         assert_eq!(
             transport_rows().len(),
-            27,
+            28,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
@@ -6318,7 +6729,11 @@ mod tests {
         // 950 before C6: plus its four Remote codes, the pre-commit domain's fourteen direct arms and
         // its `Account` arm over all eighteen account rows, and the post-commit domain's two direct
         // arms plus ITS `Account` arm over the same eighteen = 1006. Counted on this head.
-        assert_eq!(cases.len(), 1006, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 1006 before C7. Its read adds: two new Remote codes (the `Remote` branch expands
+        // `code_rows()`, so a code is also a case); five direct arms -- `ManifestNotFound`,
+        // `Manifest`, `Candidate`, `Identity`, `Content`; and TWO `Account` arms, one per stage,
+        // each over all eighteen account rows. 1006 + 2 + 5 + 36 = 1049. Counted on this head.
+        assert_eq!(cases.len(), 1049, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
@@ -6445,7 +6860,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 192] = [
+    const WIRE_MAP: [(&str, WireExpectation); 199] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -7145,6 +7560,40 @@ mod tests {
             "OutcomePreparationAfterCommit.Identity",
             WireExpectation::Code("outcome_preparation_unavailable"),
         ),
+        // C7's READ. The account rows recurse at BOTH stages -- a read wrote nothing, so a session
+        // refusal is still a definite answer.
+        (
+            "OutcomeCandidateDocument.ManifestAccount",
+            WireExpectation::Account,
+        ),
+        // The ONE absence this command reports, and the only row here that is not `unavailable`.
+        // Both `Absent` and `CrossWorkspace` arrive at it, deliberately collapsed.
+        (
+            "OutcomeCandidateDocument.ManifestNotFound",
+            WireExpectation::Code("outcome_candidate_not_found"),
+        ),
+        (
+            "OutcomeCandidateDocument.Manifest",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.CandidateAccount",
+            WireExpectation::Account,
+        ),
+        // Absence-shaped refusals INCLUDED: the manifest was already held, so this is a store
+        // disagreeing with itself rather than an absence a caller may act on.
+        (
+            "OutcomeCandidateDocument.Candidate",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.Identity",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.Content",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
     ];
 
     /// The 83 code spellings: wire literal and reviewed Remote NAME, both independent.
@@ -7153,7 +7602,7 @@ mod tests {
     /// read off the enum: a spelling that agreed with the code because it was generated from it
     /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
     /// without a spelling; that gap is C3's to close, not this slice's to edit.)
-    const CODE_SPELLINGS: [(&str, &str, &str); 83] = [
+    const CODE_SPELLINGS: [(&str, &str, &str); 85] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -7343,6 +7792,19 @@ mod tests {
             "MissionUnavailable",
             "mission_unavailable",
             "MissionUnavailable",
+        ),
+        // C7's two, transcribed from the accepted frontend's fixed copy table rather than read off
+        // the enum: a spelling that agreed with the code because it was generated from it would
+        // witness nothing.
+        (
+            "OutcomeCandidateNotFound",
+            "outcome_candidate_not_found",
+            "OutcomeCandidateNotFound",
+        ),
+        (
+            "OutcomeCandidateUnavailable",
+            "outcome_candidate_unavailable",
+            "OutcomeCandidateUnavailable",
         ),
         ("OutcomeAbsent", "outcome_absent", "OutcomeAbsent"),
         (
@@ -7563,8 +8025,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 192, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 83, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 199, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 85, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![

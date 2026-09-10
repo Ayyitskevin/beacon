@@ -76,8 +76,9 @@ pub use disk_encryption::{
     render_conclusion,
 };
 pub use local_transport::{
-    AppendixRequestDto, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
-    LocalSupervisorServer, LocalTransportError, PostPreparationFault, PreparedOutcomeCandidateDto,
+    AppendixRequestDto, CandidateDocumentFault, LocalErrorCode, LocalServerConfig,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+    OutcomeCandidateDocumentDto, PostPreparationFault, PreparedOutcomeCandidateDto,
     initialize_local_auth_token,
 };
 #[cfg(unix)]
