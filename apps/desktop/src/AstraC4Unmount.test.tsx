@@ -100,7 +100,7 @@ it("astra: an unmounted composer never calls its former parent on a late acknowl
 });
 it("astra: an unmounted composer never starts a new recovery read on a late refusal",async()=>{
  const hold=await submitThenUnmount();
- await act(async()=>{hold.no({code:"completion_unavailable"});});
+ await act(async()=>{hold.no({code:"mission_completion_unavailable"});});
  expect(hold.getReads(),"C4.LIFETIME.UNMOUNT_STARTS_NO_NEW_READ").toBe(0);
 });
 
