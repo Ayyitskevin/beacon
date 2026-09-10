@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2303,6 +2303,749 @@ fn the_preparation_command_is_known_to_the_wire_and_authenticated() {
     running.store(false, Ordering::Release);
     UnixStream::connect(&runtime.socket).ok();
     thread.join().unwrap().unwrap();
+}
+
+/// The document that crosses the socket IS the owner's stored bytes, and reading changes nothing.
+///
+/// The premise is established independently: a second authenticated `OutcomeService` on the same
+/// store reads the same manifest and candidate, and every one of the eight fields is compared against
+/// THAT, never against the reply's own other fields. The bytes are compared after a base64 decode --
+/// byte for byte, not by length or by digest, because a digest comparison would pass on two encodings
+/// of the same content and the point is that the encoding round trip is exact.
+#[test]
+fn the_candidate_document_crosses_the_socket_as_the_owners_exact_bytes() {
+    let runtime = TestRuntime::new("c7bytes");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.READ.THE_CANDIDATE_IS_PREPARED: {error}"));
+
+    // Counted BEFORE the read, on the settled store. The Artifact creation sequence alone would not
+    // prove a read writes nothing -- these counts bracket the read itself.
+    let before = domain_row_counts(&runtime.store);
+
+    let document = client
+        .read_outcome_candidate_document(&receipt.manifest_digest.value)
+        .unwrap_or_else(|error| panic!("C7T.READ.THE_OWNER_ANSWERS: {error}"));
+
+    let after = domain_row_counts(&runtime.store);
+    assert_eq!(
+        after, before,
+        "C7T.READ.A_READ_WRITES_NOTHING: manifests/artifacts/events moved"
+    );
+
+    // The owner's own records, read independently of the transport.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), prepared_mission.workspace_id);
+    let stored = outcomes
+        .manifest(&receipt.manifest_digest.value)
+        .expect("C7T.READ.THE_MANIFEST_IS_READABLE");
+    let record = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("C7T.READ.THE_CANDIDATE_IS_READABLE");
+    let payload = record.payload();
+
+    assert_eq!(
+        document.mission_id, prepared_mission.mission_id,
+        "C7T.DOCUMENT.MISSION_ID_IS_THE_FIXTURES"
+    );
+    assert_eq!(
+        document.manifest_id,
+        stored.manifest_id(),
+        "C7T.DOCUMENT.MANIFEST_ID_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.manifest_digest.algorithm.as_str(),
+            document.manifest_digest.canonicalizer.as_str(),
+            document.manifest_digest.value.as_str(),
+        ),
+        (
+            stored.digest().algorithm.as_str(),
+            stored.digest().canonicalizer.as_str(),
+            stored.digest().value.as_str(),
+        ),
+        "C7T.DOCUMENT.MANIFEST_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.candidate_artifact_digest.algorithm.as_str(),
+            document.candidate_artifact_digest.canonicalizer.as_str(),
+            document.candidate_artifact_digest.value.as_str(),
+        ),
+        (
+            record.digest().algorithm.as_str(),
+            record.digest().canonicalizer.as_str(),
+            record.digest().value.as_str(),
+        ),
+        "C7T.DOCUMENT.ARTIFACT_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.candidate_content_digest.algorithm.as_str(),
+            document.candidate_content_digest.canonicalizer.as_str(),
+            document.candidate_content_digest.value.as_str(),
+        ),
+        (
+            payload.content_digest.algorithm.as_str(),
+            payload.content_digest.canonicalizer.as_str(),
+            payload.content_digest.value.as_str(),
+        ),
+        "C7T.DOCUMENT.CONTENT_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    // TWO different envelopes over two different things. A DTO that filled both from one source
+    // would satisfy every equality above only if the owner's two digests happened to agree -- they do
+    // not, and this says so out loud.
+    assert_ne!(
+        document.candidate_artifact_digest.value, document.candidate_content_digest.value,
+        "C7T.DOCUMENT.THE_RECORD_AND_ITS_CONTENT_ARE_DIFFERENT_IDENTITIES"
+    );
+    assert_ne!(
+        document.candidate_artifact_digest.canonicalizer,
+        document.candidate_content_digest.canonicalizer,
+        "C7T.DOCUMENT.THE_TWO_DIGESTS_ARE_UNDER_DIFFERENT_CANONICALIZERS"
+    );
+    assert_eq!(
+        document.candidate_content_bytes, payload.content_bytes,
+        "C7T.DOCUMENT.CONTENT_BYTES_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        document.media_type, payload.media_type,
+        "C7T.DOCUMENT.MEDIA_TYPE_IS_THE_OWNERS"
+    );
+    // The receipt C6 handed the Operator and the document C7 answered with name the same records.
+    assert_eq!(
+        (
+            document.manifest_digest.value.as_str(),
+            document.candidate_artifact_digest.value.as_str(),
+            document.candidate_content_digest.value.as_str(),
+            document.candidate_content_bytes,
+        ),
+        (
+            receipt.manifest_digest.value.as_str(),
+            receipt.candidate_artifact_digest.value.as_str(),
+            receipt.candidate_content_digest.value.as_str(),
+            receipt.candidate_content_bytes,
+        ),
+        "C7T.DOCUMENT.THE_HELD_RECEIPT_AND_THE_DOCUMENT_AGREE"
+    );
+
+    // And the bytes themselves.
+    let decoded = data_encoding::BASE64
+        .decode(document.candidate_content_base64.as_bytes())
+        .unwrap_or_else(|error| panic!("C7T.DOCUMENT.THE_BODY_IS_CANONICAL_BASE64: {error}"));
+    assert_eq!(
+        decoded.as_slice(),
+        record.content(),
+        "C7T.DOCUMENT.THE_BYTES_ARE_THE_OWNERS_EXACTLY"
+    );
+    assert_eq!(
+        decoded.len() as u64,
+        document.candidate_content_bytes,
+        "C7T.DOCUMENT.THE_DECODED_LENGTH_IS_THE_DECLARED_COUNT"
+    );
+    assert!(
+        std::str::from_utf8(&decoded).is_ok(),
+        "C7T.DOCUMENT.THE_BYTES_ARE_TEXT"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// A foreign Workspace's REAL manifest and a digest that never existed answer with the same bytes.
+///
+/// Compared as whole serialized replies, not as enum arms, because the disclosure this bar exists to
+/// prevent is a difference a caller can SEE. The owner returns two distinct refusals for these two
+/// cases (`verified_manifest_within` selects on the digest alone and only then compares the stored
+/// Workspace), so the sameness is the transport's doing and has to be witnessed at the wire.
+///
+/// THE ONE FIXTURE WRITE NO PUBLIC OWNER CAN PRODUCE, and why it is unavoidable: this store bootstraps
+/// exactly ONE Workspace, and the supervisor binds to it, so no sequence of public commands can put a
+/// second Workspace's manifest in it. The manifest below is minted by the real owner through public
+/// commands and then RE-FILED under another Workspace id -- one UPDATE of one column. Its canonical
+/// bytes are untouched and nothing is fabricated: what changes is only which Workspace owns a real
+/// record. This is never a happy-path plant; the happy path is the bar above.
+#[test]
+fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
+    let runtime = TestRuntime::new("c7opaque");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_CANDIDATE_IS_PREPARED: {error}"));
+    let real_digest = receipt.manifest_digest.value.clone();
+
+    // It reads as this Workspace's own first, so the re-filing below is what changes the answer.
+    client
+        .read_outcome_candidate_document(&real_digest)
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_MANIFEST_IS_OURS_FIRST: {error}"));
+
+    // Stop the first supervisor before touching the store.
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+
+    // The second Workspace, inserted the way every multi-Workspace fixture in this crate inserts one
+    // (`sample_project.rs:3159-3166` records why: `Supervisor::bootstrap` is the ONLY site that
+    // creates a Workspace, and only when the store has none). Its `created_at_ms` is 0 so the next
+    // bootstrap's `ORDER BY created_at_ms, id LIMIT 1` (`lib.rs:1730-1740`) binds to IT.
+    //
+    // NOTHING canonical is fabricated: the manifest, its Artifact and its whole Mission chain are the
+    // real ones the owner minted above, and they keep belonging to the first Workspace. What changes
+    // is only WHO is asking.
+    let elsewhere = Uuid::new_v4();
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Second', 0)",
+            rusqlite::params![elsewhere.to_string()],
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_SECOND_WORKSPACE_INSERTS: {error}"));
+    drop(connection);
+
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_SESSION_REOPENS: {error}"));
+
+    // Raw bytes on both sides: the comparison is of what the caller receives, not of what it parses.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let ask = |digest: &str| -> Vec<u8> {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": {
+                "name": "read_outcome_candidate_document",
+                "manifest_digest": digest,
+            },
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        answer
+    };
+
+    // The control that makes this a CROSS-WORKSPACE bar rather than a second absence bar: the row is
+    // STILL THERE, under the first Workspace, while the service now asking is the second. Without
+    // this the two replies could be identical simply because both manifests were gone.
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    let owner: String = connection
+        .query_row(
+            "SELECT workspace_id FROM outcome_manifests WHERE manifest_digest = ?1",
+            rusqlite::params![real_digest],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_REAL_MANIFEST_ROW_IS_STILL_PRESENT: {error}"));
+    drop(connection);
+    assert_eq!(
+        owner,
+        prepared_mission.workspace_id.to_string(),
+        "C7T.OPACITY.THE_REAL_MANIFEST_STILL_BELONGS_TO_THE_FIRST_WORKSPACE"
+    );
+    assert_ne!(
+        owner,
+        elsewhere.to_string(),
+        "C7T.OPACITY.THE_ASKING_WORKSPACE_IS_NOT_THE_OWNING_ONE"
+    );
+
+    let foreign = ask(&real_digest);
+    let never_existed = ask("00000000000000000000000000000000000000000000000000000000000000ab");
+    assert_eq!(
+        String::from_utf8_lossy(&foreign),
+        String::from_utf8_lossy(&never_existed),
+        "C7T.OPACITY.A_FOREIGN_MANIFEST_AND_AN_ABSENT_ONE_ARE_ONE_ANSWER"
+    );
+    let answered: serde_json::Value = serde_json::from_slice(&foreign).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_not_found"),
+        "C7T.OPACITY.THE_SHARED_ANSWER_IS_NOT_FOUND"
+    );
+    // And the answer names nothing the caller did not send.
+    let text = String::from_utf8_lossy(&foreign);
+    for leaked in [
+        elsewhere.to_string(),
+        prepared_mission.mission_id.to_string(),
+        prepared_mission.project_id.to_string(),
+        prepared_mission.workspace_id.to_string(),
+        real_digest.clone(),
+    ] {
+        assert!(
+            !text.contains(&leaked),
+            "C7T.OPACITY.THE_REFUSAL_NAMES_NOTHING_ELSE: {leaked}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// A candidate Artifact missing BEHIND a verified manifest is unavailable, never absence.
+///
+/// This is the distinction the phase rule turns on. The manifest is held, so "no such candidate" would
+/// be a claim this transport cannot make: the owner answers `Artifact(NotFound)` from its SECOND read
+/// (`outcome_store.rs:1100`), and a store disagreeing with itself between two independent reads is not
+/// an absence a caller may act on.
+///
+/// THE CORRUPTION FIXTURE, labelled and bounded. The candidate is minted by the real owner through
+/// public commands first; only then is one row removed. `artifacts` carries an unconditional
+/// `BEFORE DELETE` trigger that aborts with "Artifacts are immutable"
+/// (`migrations/0027_artifacts.sql:186-190`) -- the product's anti-tamper guard, and it refused this
+/// delete when it was first attempted. The fixture therefore DROPS that one trigger, deletes the one
+/// row, and RECREATES the trigger verbatim, asserting each step. Nothing in production changes, no
+/// failpoint is added, and the owner happy path above is untouched: this store is already corrupt by
+/// the time the read runs, which is the whole point.
+#[test]
+fn a_missing_candidate_behind_a_verified_manifest_is_unavailable() {
+    let runtime = TestRuntime::new("c7broken");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_CANDIDATE_IS_PREPARED: {error}"));
+
+    // It reads as a real document FIRST, so what changes the answer below is the missing row and
+    // nothing else.
+    client
+        .read_outcome_candidate_document(&receipt.manifest_digest.value)
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_DOCUMENT_READS_FIRST: {error}"));
+    let before = domain_row_counts(&runtime.store);
+
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    // The guard refuses this delete while it stands -- asserted, not assumed, so the fixture cannot
+    // quietly stop needing the drop.
+    let guarded = connection.execute(
+        "DELETE FROM artifacts WHERE digest_value = ?1",
+        rusqlite::params![receipt.candidate_artifact_digest.value],
+    );
+    assert!(
+        guarded
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("Artifacts are immutable")),
+        "C7T.BROKEN.THE_STORES_OWN_GUARD_REFUSES_FIRST: {guarded:?}"
+    );
+    connection
+        .execute_batch("DROP TRIGGER artifacts_no_delete")
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_FIXTURE_DROPS_ONE_TRIGGER: {error}"));
+    // The manifest's own foreign key to its candidate Artifact refuses the delete as well -- which is
+    // the point of the state being built: a manifest cannot legally exist without its candidate. The
+    // pragma is per-CONNECTION and belongs to this fixture connection alone; no product code and no
+    // other connection is affected.
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_FIXTURE_SUSPENDS_ITS_OWN_FK_CHECK: {error}"));
+    let removed = connection
+        .execute(
+            "DELETE FROM artifacts WHERE digest_value = ?1",
+            rusqlite::params![receipt.candidate_artifact_digest.value],
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_ARTIFACT_IS_REMOVED: {error}"));
+    assert_eq!(removed, 1, "C7T.BROKEN.EXACTLY_ONE_ARTIFACT_REMOVED");
+    // Put the product's guard back, verbatim from `0027_artifacts.sql:186-190`.
+    connection
+        .execute_batch(
+            "CREATE TRIGGER artifacts_no_delete
+             BEFORE DELETE ON artifacts
+             BEGIN
+                 SELECT RAISE(ABORT, 'Artifacts are immutable');
+             END;",
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_GUARD_IS_RESTORED: {error}"));
+    drop(connection);
+
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let body = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": receipt.manifest_digest.value,
+        },
+    }))
+    .unwrap();
+    let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+    stream.write_all(&body).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_unavailable"),
+        "C7T.BROKEN.A_MISSING_CANDIDATE_IS_UNAVAILABLE_NOT_ABSENT"
+    );
+    assert_eq!(
+        answered.get("result"),
+        Some(&serde_json::Value::Null),
+        "C7T.BROKEN.NO_DOCUMENT_IS_RETURNED"
+    );
+    // The manifest is still there and still readable as a manifest: this is NOT an absent manifest
+    // dressed up as a broken candidate.
+    let still_there = rusqlite::Connection::open(&runtime.store).unwrap();
+    let manifests: i64 = still_there
+        .query_row(
+            "SELECT count(*) FROM outcome_manifests WHERE manifest_digest = ?1",
+            rusqlite::params![receipt.manifest_digest.value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(still_there);
+    assert_eq!(
+        manifests, 1,
+        "C7T.BROKEN.THE_MANIFEST_IS_STILL_PRESENT_AND_VERIFIED"
+    );
+    // And the refused read wrote nothing of its own: only the fixture's one deletion moved.
+    let after = domain_row_counts(&runtime.store);
+    assert_eq!(
+        after,
+        (before.0, before.1 - 1, before.2),
+        "C7T.BROKEN.THE_REFUSAL_WRITES_NOTHING"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The request is exactly one required field, and what a MALFORMED digest actually answers.
+///
+/// Stated as observed, not as designed: `verified_manifest_within` does no upfront hex validation
+/// (`outcome_store.rs:554-581` selects on the string it was given), so a digest that could never be a
+/// digest finds no row and returns the owner's real `Absent` -- which this transport answers as
+/// `outcome_candidate_not_found`. That is the current behaviour and this bar pins it.
+///
+/// A TINY CONTRACT ISSUE, flagged rather than closed here: the brief asks for an "invalid digest
+/// domain" to be refused before a document can return, and today it is refused by finding nothing
+/// rather than by a domain check. The observable outcome is the same opaque not-found, and adding a
+/// length/alphabet guard would introduce a NEW outward answer (`protocol_error`) for input the owner
+/// currently treats as a miss -- a contract change, not an implementation detail. Not taken
+/// unilaterally.
+#[test]
+fn the_candidate_read_request_is_one_required_field() {
+    let runtime = TestRuntime::new("c7request");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.REQUEST.THE_CANDIDATE_IS_PREPARED: {error}"));
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let ask = |command: serde_json::Value| -> serde_json::Value {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": command,
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).unwrap()
+    };
+    let code_of = |answer: &serde_json::Value| -> Option<String> {
+        answer
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+
+    // An authenticated session: the reply carries all eight keys and nothing else.
+    let answered = ask(json!({
+        "name": "read_outcome_candidate_document",
+        "manifest_digest": receipt.manifest_digest.value,
+    }));
+    assert_eq!(
+        answered
+            .pointer("/result/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_document"),
+        "C7T.REQUEST.THE_RESULT_NAMES_ITS_OWN_KIND"
+    );
+    let document = answered
+        .pointer("/result/document")
+        .unwrap_or_else(|| panic!("C7T.REQUEST.THE_RESULT_CARRIES_A_DOCUMENT"));
+    let mut keys = document
+        .as_object()
+        .expect("the document is an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "candidateArtifactDigest".to_owned(),
+            "candidateContentBase64".to_owned(),
+            "candidateContentBytes".to_owned(),
+            "candidateContentDigest".to_owned(),
+            "manifestDigest".to_owned(),
+            "manifestId".to_owned(),
+            "mediaType".to_owned(),
+            "missionId".to_owned(),
+        ],
+        "C7T.REQUEST.EXACTLY_EIGHT_CAMELCASE_KEYS"
+    );
+    for (field, canonicalizer) in [
+        ("manifestDigest", "beacon.outcome.manifest.v2"),
+        ("candidateArtifactDigest", "beacon.artifact.v1"),
+        ("candidateContentDigest", "beacon.raw.v1"),
+    ] {
+        let envelope = document.get(field).unwrap();
+        let mut envelope_keys = envelope
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        envelope_keys.sort();
+        assert_eq!(
+            envelope_keys,
+            vec![
+                "algorithm".to_owned(),
+                "canonicalizer".to_owned(),
+                "value".to_owned()
+            ],
+            "C7T.REQUEST.THE_DIGEST_ENVELOPE_IS_WHOLE: {field}"
+        );
+        assert_eq!(
+            envelope.get("algorithm").and_then(serde_json::Value::as_str),
+            Some("sha256"),
+            "C7T.REQUEST.THE_ALGORITHM_IS_NAMED: {field}"
+        );
+        assert_eq!(
+            envelope
+                .get("canonicalizer")
+                .and_then(serde_json::Value::as_str),
+            Some(canonicalizer),
+            "C7T.REQUEST.THE_CANONICALIZER_IS_ITS_OWN: {field}"
+        );
+        let value = envelope
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(
+            value.len() == 64 && value.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "C7T.REQUEST.THE_VALUE_IS_LOWER_HEX_64: {field}"
+        );
+    }
+    assert_eq!(
+        document.get("mediaType").and_then(serde_json::Value::as_str),
+        Some("text/markdown; charset=utf-8"),
+        "C7T.REQUEST.THE_MEDIA_TYPE_IS_FIXED"
+    );
+
+    // A MALFORMED digest: the observed answer, which is the opaque not-found the owner's miss
+    // produces. See the tiny contract issue in this test's own documentation.
+    for malformed in [
+        "not-a-digest",
+        "",
+        "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+        "zz00000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        let answered = ask(json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": malformed,
+        }));
+        assert_eq!(
+            code_of(&answered).as_deref(),
+            Some("outcome_candidate_not_found"),
+            "C7T.REQUEST.A_MALFORMED_DIGEST_IS_THE_SAME_OPAQUE_MISS: {malformed:?}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C7T.REQUEST.A_MALFORMED_DIGEST_RETURNS_NO_DOCUMENT: {malformed:?}"
+        );
+    }
+
+    // A wrong TYPE is a malformed envelope, not a miss: the field is a string.
+    for wrong in [json!(7), json!(null), json!(["a"])] {
+        let answered = ask(json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": wrong,
+        }));
+        assert_eq!(
+            code_of(&answered).as_deref(),
+            Some("protocol_error"),
+            "C7T.REQUEST.THE_DIGEST_IS_A_STRING: {wrong}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// A document response may cross the socket larger than the default frame -- and its ceiling is still
+/// finite.
+///
+/// The response ceiling is a CLIENT-side bound (`response_max` is read in `send_within` before the
+/// reply is taken), so this bar uses a CONTROLLED LOCAL PEER rather than the supervisor: what is under
+/// test is which frame the client accepts for which command, not how a document is produced. The peer
+/// is a plain `UnixListener` replying with bytes this test wrote.
+///
+/// Two sides of the same ceiling, because one side alone would pass with no ceiling at all:
+/// a reply well past the 64 KiB default is ACCEPTED, and a reply past
+/// `MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES` is REFUSED.
+///
+/// What this bar deliberately does NOT claim: that an old command's refusal of the same bytes isolates
+/// the frame. The client answers `Protocol` both for an over-frame reply and for a reply whose result
+/// arm is simply the wrong one, so that comparison would prove nothing -- an earlier version of this
+/// test asserted it anyway and was wrong. That every other command keeps the default domain is proved
+/// directly instead, by the lib bar
+/// `the_largest_candidate_document_fits_its_own_ceiling_and_not_the_default` reading `response_max`
+/// for each family.
+#[test]
+fn a_document_response_may_exceed_the_default_frame_and_its_ceiling_is_finite() {
+    let runtime = TestRuntime::new("c7frame");
+    initialize_local_auth_token(&runtime.token).unwrap();
+    let listener = UnixListener::bind(&runtime.socket).unwrap();
+
+    // One document envelope whose body is `content_bytes` bytes of content, serialized as the wire
+    // would carry it. Written here, never produced by the transport under test.
+    fn document_reply(content_bytes: usize) -> Vec<u8> {
+        let content = vec![b'x'; content_bytes];
+        let digest = |canonicalizer: &str| {
+            json!({
+                "algorithm": "sha256",
+                "canonicalizer": canonicalizer,
+                "value": "f".repeat(64),
+            })
+        };
+        serde_json::to_vec(&json!({
+            "protocol": 1,
+            "result": {
+                "kind": "outcome_candidate_document",
+                "document": {
+                    "missionId": Uuid::new_v4(),
+                    "manifestId": Uuid::new_v4(),
+                    "manifestDigest": digest("beacon.outcome.manifest.v2"),
+                    "candidateArtifactDigest": digest("beacon.artifact.v1"),
+                    "candidateContentDigest": digest("beacon.raw.v1"),
+                    "candidateContentBytes": content.len(),
+                    "mediaType": "text/markdown; charset=utf-8",
+                    "candidateContentBase64": data_encoding::BASE64.encode(&content),
+                },
+            },
+            "error": null,
+        }))
+        .unwrap()
+    }
+
+    // 70 KiB of content -> ~93 KiB on the wire: past the 64 KiB default, well inside the read's own
+    // ceiling. The lengths are measured and asserted, not assumed.
+    let accepted = document_reply(70 * 1024);
+    assert!(
+        accepted.len() > 64 * 1024 && accepted.len() < 1_403_904,
+        "C7T.FRAME.THE_ACCEPTED_FIXTURE_IS_BETWEEN_THE_TWO_CEILINGS: {}",
+        accepted.len()
+    );
+    // And one past the read's own ceiling.
+    let refused = document_reply(1_060_000);
+    assert!(
+        refused.len() > 1_403_904,
+        "C7T.FRAME.THE_REFUSED_FIXTURE_IS_PAST_THE_READS_CEILING: {}",
+        refused.len()
+    );
+
+    let replies = vec![accepted.clone(), refused.clone()];
+    let peer = thread::spawn(move || {
+        for reply in replies {
+            let (mut stream, _) = listener.accept().expect("the peer accepts");
+            let mut request = Vec::new();
+            // Read the request first: the client shuts its write half before reading.
+            stream.read_to_end(&mut request).expect("the peer reads");
+            // A client that refuses the frame stops reading, so a broken pipe here is that refusal
+            // arriving, not a fixture fault.
+            let _ = stream.write_all(&reply);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    let document = client
+        .read_outcome_candidate_document(&"a".repeat(64))
+        .unwrap_or_else(|error| panic!("C7T.FRAME.THE_READ_ACCEPTS_A_LARGE_REPLY: {error}"));
+    assert_eq!(
+        document.candidate_content_bytes,
+        70 * 1024,
+        "C7T.FRAME.THE_WHOLE_BODY_ARRIVED"
+    );
+    assert_eq!(
+        document.candidate_content_base64.len(),
+        4 * (70 * 1024 / 3 + 1),
+        "C7T.FRAME.THE_BODY_IS_WHOLE_NOT_TRUNCATED"
+    );
+
+    let over = client
+        .read_outcome_candidate_document(&"b".repeat(64))
+        .expect_err("C7T.FRAME.THE_READS_CEILING_IS_FINITE");
+    assert!(
+        matches!(over, LocalTransportError::Protocol),
+        "C7T.FRAME.A_REPLY_PAST_THE_CEILING_IS_REFUSED: {over:?}"
+    );
+
+    peer.join().unwrap();
 }
 
 /// C7's candidate-document read is KNOWN to the wire, and answers with the account's own refusal.
