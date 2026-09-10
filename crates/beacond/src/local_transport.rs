@@ -35,6 +35,25 @@ use crate::{
 const PROTOCOL_VERSION: u16 = 1;
 const AUTH_TOKEN_BYTES: usize = 32;
 const MAX_MESSAGE_BYTES: u64 = 64 * 1024;
+/// The completion family's REQUEST parser ceiling (`C4-transport-decision.md` 2-3).
+///
+/// A finite parser ceiling, not a resource grant: the only two commands that may use it are
+/// `PreviewMissionCompletion` and `RecordMissionCompletion`, whose argument is one
+/// `CompletionIntentRequest`. A conservative upper bound on that request's compact JSON --
+/// `J <= 2*C + (J - 2*C)`, since permitted escaping at most doubles a scalar's UTF-8 bytes and the
+/// owner caps `C` at 65,536 canonical bytes -- is 147,094 plus independently counted envelope
+/// overhead; this constant covers that with margin, and `completion_ceiling_covers_the_grammar`
+/// fails if the grammar ever outgrows it.
+///
+/// Nothing else moves: `MAX_MESSAGE_BYTES` remains every other command's accepted domain, its
+/// refusal, and its refusal ORDER.
+const MAX_COMPLETION_REQUEST_BYTES: u64 = 160 * 1024;
+/// The completion family's RESPONSE parser ceiling, for `PreviewMissionCompletion` ALONE.
+///
+/// `RecordMissionCompletion` answers with one token and `GetMissionCompletionIntent` with a token or
+/// null, so both keep the 64 KiB domain. Only the preview echoes the whole normalized request, plus
+/// its bindings and the Mission's declared condition texts.
+const MAX_COMPLETION_PREVIEW_RESPONSE_BYTES: u64 = 192 * 1024;
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -120,6 +139,14 @@ pub enum LocalErrorCode {
     MissionMemberIneligible,
     MissionUnavailable,
     MissionCompletionUnavailable,
+    CompletionIntentChanged,
+    CompletionAlreadyRecorded,
+    CompletionResidentNotInAdmissionRoster,
+    CompletionConditionCoverageIncomplete,
+    CompletionSupportOverLimit,
+    CompletionTextOverLimit,
+    CompletionSpendReasonRequired,
+    CompletionInvalidDetails,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -159,6 +186,7 @@ pub enum LocalTransportError {
     Team(TeamError),
     Mission(MissionError),
     MissionCompletionRead(crate::MissionCompletionReadError),
+    MissionCompletionCommand(crate::CompletionCommandError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -512,6 +540,16 @@ impl fmt::Display for LocalTransportError {
                     error.name()
                 )
             }
+            // ONE closed literal, the owner's own outward token. `MalformedRequest` and
+            // `DuplicateSetEntry` each carry the field they refused; that field stays in the derived
+            // `Debug`, never on this line and never in the wire code.
+            Self::MissionCompletionCommand(error) => {
+                write!(
+                    formatter,
+                    "Mission completion command failed: {}",
+                    error.name()
+                )
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -631,6 +669,12 @@ impl From<TeamError> for LocalTransportError {
 impl From<crate::MissionCompletionReadError> for LocalTransportError {
     fn from(error: crate::MissionCompletionReadError) -> Self {
         Self::MissionCompletionRead(error)
+    }
+}
+
+impl From<crate::CompletionCommandError> for LocalTransportError {
+    fn from(error: crate::CompletionCommandError) -> Self {
+        Self::MissionCompletionCommand(error)
     }
 }
 
@@ -788,6 +832,19 @@ mod zeroizing_string {
     }
 }
 
+/// Which commands may exceed `MAX_MESSAGE_BYTES` as a REQUEST.
+///
+/// Exactly the two that carry a `CompletionIntentRequest`. `GetMissionCompletionIntent` is
+/// deliberately absent: its argument is one UUID, so granting it the larger domain would widen a
+/// parser ceiling for a command that cannot need it.
+fn accepts_completion_sized_request(command: &LocalCommand) -> bool {
+    matches!(
+        command,
+        LocalCommand::PreviewMissionCompletion { .. }
+            | LocalCommand::RecordMissionCompletion { .. }
+    )
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope {
@@ -933,6 +990,19 @@ enum LocalCommand {
     MissionCompletion {
         mission_id: uuid::Uuid,
     },
+    /// Derive the whole intended record and its reviewed-intent token. Writes nothing.
+    PreviewMissionCompletion {
+        request: crate::CompletionIntentRequest,
+    },
+    /// Record the reviewed completion. The token is what the Operator reviewed, not a fresh one.
+    RecordMissionCompletion {
+        request: crate::CompletionIntentRequest,
+        reviewed_intent_sha256: String,
+    },
+    /// The token of the completion visible for this Mission in one snapshot, or null.
+    GetMissionCompletionIntent {
+        mission_id: uuid::Uuid,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1044,6 +1114,15 @@ enum LocalResult {
     MissionCompletion {
         completion: Option<crate::CompletionView>,
     },
+    MissionCompletionPreview {
+        preview: crate::CompletionPreview,
+    },
+    MissionCompletionAcknowledgement {
+        intent: crate::ReviewedIntent,
+    },
+    MissionCompletionIntent {
+        intent: Option<crate::ReviewedIntent>,
+    },
     Mission {
         mission: MissionView,
     },
@@ -1090,6 +1169,7 @@ pub struct LocalSupervisorServer {
     teams: TeamService,
     missions: MissionService,
     mission_completions: crate::MissionCompletionReadService,
+    completion_commands: crate::MissionCompletionCommandService,
     outcomes: OutcomeService,
     resource_discovery: ResourceDiscoveryService,
     disk_encryption: DiskEncryptionService,
@@ -1138,6 +1218,8 @@ impl LocalSupervisorServer {
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let mission_completions =
             crate::MissionCompletionReadService::new(Arc::clone(&accounts), report.workspace.id);
+        let completion_commands =
+            crate::MissionCompletionCommandService::new(Arc::clone(&accounts), report.workspace.id);
         let outcomes = OutcomeService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -1173,6 +1255,7 @@ impl LocalSupervisorServer {
             teams,
             missions,
             mission_completions,
+            completion_commands,
             outcomes,
             resource_discovery,
             disk_encryption,
@@ -1214,13 +1297,45 @@ impl LocalSupervisorServer {
         }
     }
 
+    /// Read one request, refusing by SIZE before anything else and by FAMILY before anything but the
+    /// parse.
+    ///
+    /// The command name lives inside the JSON (`RequestEnvelope` is parsed as a whole), so the size
+    /// decision cannot be made per command before reading. The order below is what keeps every old
+    /// command's behaviour identical anyway:
+    ///
+    /// 1. over the completion ceiling -> `Protocol`, before any parse, as today;
+    /// 2. parse ONCE; a parse failure on a body over the OLD ceiling is `Protocol` -- that body
+    ///    could not be read at all before, so its refusal must not become `Json`; an old-size parse
+    ///    failure stays `Json`;
+    /// 3. a successfully parsed NON-completion command over the old ceiling -> `Protocol`, BEFORE
+    ///    the protocol-version and token checks, which is exactly where it was refused before;
+    /// 4. then the original checks, unchanged.
+    ///
+    /// Disclosed consequence (`C4-transport-decision.md` 2, 4): an oversized valid old body now
+    /// costs one parse, and an unauthenticated peer can make this read up to
+    /// `MAX_COMPLETION_REQUEST_BYTES + 1` bytes and parse up to `MAX_COMPLETION_REQUEST_BYTES` of
+    /// them before the token check, where the old ceiling was 65,537/65,536. Kevin gates that before
+    /// publication.
     fn read_request(&self, stream: &mut UnixStream) -> Result<LocalCommand, LocalTransportError> {
         let mut bytes = Zeroizing::new(Vec::new());
-        stream.take(MAX_MESSAGE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+        stream
+            .take(MAX_COMPLETION_REQUEST_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        let received = bytes.len() as u64;
+        if received > MAX_COMPLETION_REQUEST_BYTES {
             return Err(LocalTransportError::Protocol);
         }
-        let request: RequestEnvelope = serde_json::from_slice(&bytes)?;
+        let request: RequestEnvelope = match serde_json::from_slice(&bytes) {
+            Ok(request) => request,
+            Err(_) if received > MAX_MESSAGE_BYTES => {
+                return Err(LocalTransportError::Protocol);
+            }
+            Err(error) => return Err(LocalTransportError::Json(error)),
+        };
+        if received > MAX_MESSAGE_BYTES && !accepts_completion_sized_request(&request.command) {
+            return Err(LocalTransportError::Protocol);
+        }
         if request.protocol != PROTOCOL_VERSION {
             return Err(LocalTransportError::Protocol);
         }
@@ -1481,6 +1596,24 @@ impl LocalSupervisorServer {
             LocalCommand::MissionCompletion { mission_id } => LocalResult::MissionCompletion {
                 completion: self.mission_completions.get(mission_id)?,
             },
+            LocalCommand::PreviewMissionCompletion { request } => {
+                LocalResult::MissionCompletionPreview {
+                    preview: self.completion_commands.preview(request)?,
+                }
+            }
+            LocalCommand::RecordMissionCompletion {
+                request,
+                reviewed_intent_sha256,
+            } => LocalResult::MissionCompletionAcknowledgement {
+                intent: self
+                    .completion_commands
+                    .record(request, &reviewed_intent_sha256)?,
+            },
+            LocalCommand::GetMissionCompletionIntent { mission_id } => {
+                LocalResult::MissionCompletionIntent {
+                    intent: self.completion_commands.get_intent(mission_id)?,
+                }
+            }
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
                 mission: self.missions.admit(draft)?,
             },
@@ -1930,6 +2063,44 @@ impl LocalSupervisorClient {
         expect_mission_completion(self.send(LocalCommand::MissionCompletion { mission_id })?)
     }
 
+    /// Derive the completion the Operator would record, and its reviewed-intent token.
+    ///
+    /// The EXACT owner DTO crosses the socket in both directions: this method builds no record,
+    /// re-validates no field the owner owns, and reads nothing back out of the preview.
+    pub fn preview_mission_completion(
+        &self,
+        request: crate::CompletionIntentRequest,
+    ) -> Result<crate::CompletionPreview, LocalTransportError> {
+        expect_mission_completion_preview(
+            self.send(LocalCommand::PreviewMissionCompletion { request })?,
+        )
+    }
+
+    /// Record the reviewed completion. `reviewed_intent_sha256` is the token the Operator reviewed;
+    /// it is forwarded unchanged, never recomputed here.
+    pub fn record_mission_completion(
+        &self,
+        request: crate::CompletionIntentRequest,
+        reviewed_intent_sha256: String,
+    ) -> Result<crate::ReviewedIntent, LocalTransportError> {
+        expect_mission_completion_acknowledgement(self.send(
+            LocalCommand::RecordMissionCompletion {
+                request,
+                reviewed_intent_sha256,
+            },
+        )?)
+    }
+
+    /// The token of the completion visible for this Mission in one snapshot, or `None`.
+    pub fn get_mission_completion_intent(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<Option<crate::ReviewedIntent>, LocalTransportError> {
+        expect_mission_completion_intent(
+            self.send(LocalCommand::GetMissionCompletionIntent { mission_id })?,
+        )
+    }
+
     pub fn mission(&self, mission_id: uuid::Uuid) -> Result<MissionView, LocalTransportError> {
         expect_mission(self.send(LocalCommand::Mission { mission_id })?)
     }
@@ -1997,6 +2168,9 @@ impl LocalSupervisorClient {
         response_timeout: Duration,
     ) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
+        // Chosen from the command while it is still ours to read; moving it into the envelope first
+        // would leave the ceiling to be guessed from something else.
+        let response_ceiling = response_max(&command);
         let request = RequestEnvelope {
             protocol: PROTOCOL_VERSION,
             token: WireSecret(token.encode()),
@@ -2008,8 +2182,8 @@ impl LocalSupervisorClient {
         stream.write_all(&serialized)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         let mut bytes = Zeroizing::new(Vec::new());
-        stream.take(MAX_MESSAGE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+        stream.take(response_ceiling + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > response_ceiling {
             return Err(LocalTransportError::Protocol);
         }
         let response: ResponseEnvelope = serde_json::from_slice(&bytes)?;
@@ -2024,6 +2198,73 @@ impl LocalSupervisorClient {
             }),
             _ => Err(LocalTransportError::Protocol),
         }
+    }
+}
+
+/// The RESPONSE ceiling for one outgoing command, chosen from the command BEFORE it is moved into
+/// the envelope.
+///
+/// Exhaustive and named, with no catch-all: a new `LocalCommand` arm does not compile until someone
+/// states its response domain, so a command cannot inherit a widened ceiling by being forgotten.
+/// Only the preview echoes a whole normalized request; `RecordMissionCompletion` answers with one
+/// token and `GetMissionCompletionIntent` with a token or null, so both stay at the old domain.
+fn response_max(command: &LocalCommand) -> u64 {
+    match command {
+        LocalCommand::PreviewMissionCompletion { .. } => MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        LocalCommand::Status
+        | LocalCommand::SessionPolicy
+        | LocalCommand::SetSessionTimeout { .. }
+        | LocalCommand::PlatformSessionMonitorStatus
+        | LocalCommand::BeginPasswordSetup { .. }
+        | LocalCommand::CompleteOperatorSetup { .. }
+        | LocalCommand::AuthenticatePassword { .. }
+        | LocalCommand::RecoverWithKey { .. }
+        | LocalCommand::Lock
+        | LocalCommand::RecordOperatorActivity
+        | LocalCommand::StarterOrganization
+        | LocalCommand::AcceptStarterOrganization { .. }
+        | LocalCommand::DiscardStarterOrganization { .. }
+        | LocalCommand::Residents
+        | LocalCommand::ActivateResident { .. }
+        | LocalCommand::SuspendResident { .. }
+        | LocalCommand::ReactivateResident { .. }
+        | LocalCommand::RetireResident { .. }
+        | LocalCommand::ResidentCapabilityCatalog
+        | LocalCommand::ResidentConfigurations
+        | LocalCommand::ConfigureResident { .. }
+        | LocalCommand::ClearResidentConfiguration { .. }
+        | LocalCommand::Projects
+        | LocalCommand::SampleProjectStatus
+        | LocalCommand::InstallSampleProject
+        | LocalCommand::Project { .. }
+        | LocalCommand::ProjectCharterHistory { .. }
+        | LocalCommand::CreateProject { .. }
+        | LocalCommand::ReviseProjectCharter { .. }
+        | LocalCommand::ProjectPolicy { .. }
+        | LocalCommand::ProjectPolicyHistory { .. }
+        | LocalCommand::MissionPublications { .. }
+        | LocalCommand::OutcomeDocument { .. }
+        | LocalCommand::PublishProjectPolicy { .. }
+        | LocalCommand::CurrentProjectRepository { .. }
+        | LocalCommand::ProjectRepositoryHistory { .. }
+        | LocalCommand::BindProjectRepository { .. }
+        | LocalCommand::PreflightProjectChecks { .. }
+        | LocalCommand::RecentReceipts { .. }
+        | LocalCommand::Teams { .. }
+        | LocalCommand::Team { .. }
+        | LocalCommand::FormTeam { .. }
+        | LocalCommand::Missions { .. }
+        | LocalCommand::Mission { .. }
+        | LocalCommand::MissionCompletion { .. }
+        | LocalCommand::RecordMissionCompletion { .. }
+        | LocalCommand::GetMissionCompletionIntent { .. }
+        | LocalCommand::AdmitMission { .. }
+        | LocalCommand::DiscoverLocalModels
+        | LocalCommand::LiveDataEncryptionStatus
+        | LocalCommand::InspectLocalModel { .. }
+        | LocalCommand::ActivateLocalModel { .. }
+        | LocalCommand::LocalModelActivations
+        | LocalCommand::DeactivateLocalModel { .. } => MAX_MESSAGE_BYTES,
     }
 }
 
@@ -2239,6 +2480,33 @@ fn expect_mission_completion(
     }
 }
 
+fn expect_mission_completion_preview(
+    result: LocalResult,
+) -> Result<crate::CompletionPreview, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionPreview { preview } => Ok(preview),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_completion_acknowledgement(
+    result: LocalResult,
+) -> Result<crate::ReviewedIntent, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionAcknowledgement { intent } => Ok(intent),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_completion_intent(
+    result: LocalResult,
+) -> Result<Option<crate::ReviewedIntent>, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionIntent { intent } => Ok(intent),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_missions(result: LocalResult) -> Result<Vec<MissionView>, LocalTransportError> {
     match result {
         LocalResult::Missions { missions } => Ok(missions),
@@ -2317,6 +2585,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::MissionCompletionRead(error) => {
             wire_error_from_mission_completion(error)
+        }
+        LocalTransportError::MissionCompletionCommand(error) => {
+            wire_error_from_completion_command(error)
         }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -2610,6 +2881,43 @@ fn wire_error_from_mission_completion(error: crate::MissionCompletionReadError) 
     }
 }
 
+/// The completion family's closed outward answer.
+///
+/// Every arm names a code the caller already has fixed copy for. Two things this deliberately does
+/// NOT do: it never forwards the field name inside `MalformedRequest`/`DuplicateSetEntry` (that
+/// stays in `Debug` and `source`, R42), and it never calls a malformed identity, digest, tag,
+/// integer or duplicated set entry "text over limit" -- a grammar failure disguised as a length
+/// failure would send the Operator to shorten text that was never the problem.
+fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> WireError {
+    let code = match error {
+        crate::CompletionCommandError::Account(error) => return wire_error_from_account(error),
+        crate::CompletionCommandError::IntentChanged => LocalErrorCode::CompletionIntentChanged,
+        crate::CompletionCommandError::AlreadyRecorded => LocalErrorCode::CompletionAlreadyRecorded,
+        crate::CompletionCommandError::ResidentNotInAdmissionRoster => {
+            LocalErrorCode::CompletionResidentNotInAdmissionRoster
+        }
+        crate::CompletionCommandError::ConditionCoverageIncomplete => {
+            LocalErrorCode::CompletionConditionCoverageIncomplete
+        }
+        crate::CompletionCommandError::SupportOverLimit => LocalErrorCode::CompletionSupportOverLimit,
+        crate::CompletionCommandError::TextOverLimit => LocalErrorCode::CompletionTextOverLimit,
+        crate::CompletionCommandError::SpendReasonRequired => {
+            LocalErrorCode::CompletionSpendReasonRequired
+        }
+        crate::CompletionCommandError::MalformedRequest(_)
+        | crate::CompletionCommandError::DuplicateSetEntry(_) => {
+            LocalErrorCode::CompletionInvalidDetails
+        }
+        // The same code C3's read already uses, with C3's exact sentence: an unverifiable Mission
+        // completion is one condition, and the caller knows which operation it asked for.
+        crate::CompletionCommandError::Unavailable(_) => LocalErrorCode::MissionCompletionUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_mission(error: MissionError) -> WireError {
     let code = match error {
         MissionError::Account(error) => return wire_error_from_account(error),
@@ -2708,9 +3016,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-        LocalTransportError, ResponseEnvelope, WireError, initialize_local_auth_token,
-        response_from_transport_error,
+        LocalCommand, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
+        LocalSupervisorServer, LocalTransportError, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, ResponseEnvelope, WireError,
+        accepts_completion_sized_request, initialize_local_auth_token,
+        response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
     use crate::outcome_pdf::PdfRefusal;
@@ -2970,6 +3280,9 @@ mod tests {
     /// Two fixed synthetic markers, each placed before any newline so that "is it in the line"
     /// is a substring question and never an escaping question.
     const NEEDLE_A: &str = "R42S2_PRIVATE_A";
+    /// The field name a malformed/duplicate completion refusal carries. A needle, not a message: an
+    /// outward line or wire code containing it would be the owner's private diagnostic escaping.
+    const NEEDLE_FIELD: &str = "R42S2_PRIVATE_FIELD";
     const NEEDLE_B: &str = "R42S2_PRIVATE_B";
 
     /// Approved numeric context, chosen here before any error is built and pairwise distinct so a
@@ -3409,6 +3722,38 @@ mod tests {
     }
 
     closed_table! {
+        expected_completion_command / completion_command_rows: crate::CompletionCommandError,
+        "Account" | crate::CompletionCommandError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::CompletionCommandError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "IntentChanged" | crate::CompletionCommandError::IntentChanged
+            => "IntentChanged", crate::CompletionCommandError::IntentChanged, &[];
+        "AlreadyRecorded" | crate::CompletionCommandError::AlreadyRecorded
+            => "AlreadyRecorded", crate::CompletionCommandError::AlreadyRecorded, &[];
+        "ResidentNotInAdmissionRoster" | crate::CompletionCommandError::ResidentNotInAdmissionRoster
+            => "ResidentNotInAdmissionRoster",
+            crate::CompletionCommandError::ResidentNotInAdmissionRoster, &[];
+        "ConditionCoverageIncomplete" | crate::CompletionCommandError::ConditionCoverageIncomplete
+            => "ConditionCoverageIncomplete",
+            crate::CompletionCommandError::ConditionCoverageIncomplete, &[];
+        "SupportOverLimit" | crate::CompletionCommandError::SupportOverLimit
+            => "SupportOverLimit", crate::CompletionCommandError::SupportOverLimit, &[];
+        "TextOverLimit" | crate::CompletionCommandError::TextOverLimit
+            => "TextOverLimit", crate::CompletionCommandError::TextOverLimit, &[];
+        "SpendReasonRequired" | crate::CompletionCommandError::SpendReasonRequired
+            => "SpendReasonRequired", crate::CompletionCommandError::SpendReasonRequired, &[];
+        "MalformedRequest" | crate::CompletionCommandError::MalformedRequest(_)
+            => "MalformedRequest",
+            crate::CompletionCommandError::MalformedRequest(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "DuplicateSetEntry" | crate::CompletionCommandError::DuplicateSetEntry(_)
+            => "DuplicateSetEntry",
+            crate::CompletionCommandError::DuplicateSetEntry(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "Unavailable" | crate::CompletionCommandError::Unavailable(_)
+            => "Unavailable",
+            crate::CompletionCommandError::Unavailable(crate::CompletionCommandUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
         expected_mission / mission_rows: MissionError,
         "Account" | MissionError::Account(cause)
             => format!("Account.{}", expected_account(cause).1),
@@ -3560,6 +3905,14 @@ mod tests {
         "MissionMemberIneligible" | LocalErrorCode::MissionMemberIneligible => "MissionMemberIneligible", LocalErrorCode::MissionMemberIneligible, &[];
         "MissionUnavailable" | LocalErrorCode::MissionUnavailable => "MissionUnavailable", LocalErrorCode::MissionUnavailable, &[];
         "MissionCompletionUnavailable" | LocalErrorCode::MissionCompletionUnavailable => "MissionCompletionUnavailable", LocalErrorCode::MissionCompletionUnavailable, &[];
+        "CompletionIntentChanged" | LocalErrorCode::CompletionIntentChanged => "CompletionIntentChanged", LocalErrorCode::CompletionIntentChanged, &[];
+        "CompletionAlreadyRecorded" | LocalErrorCode::CompletionAlreadyRecorded => "CompletionAlreadyRecorded", LocalErrorCode::CompletionAlreadyRecorded, &[];
+        "CompletionResidentNotInAdmissionRoster" | LocalErrorCode::CompletionResidentNotInAdmissionRoster => "CompletionResidentNotInAdmissionRoster", LocalErrorCode::CompletionResidentNotInAdmissionRoster, &[];
+        "CompletionConditionCoverageIncomplete" | LocalErrorCode::CompletionConditionCoverageIncomplete => "CompletionConditionCoverageIncomplete", LocalErrorCode::CompletionConditionCoverageIncomplete, &[];
+        "CompletionSupportOverLimit" | LocalErrorCode::CompletionSupportOverLimit => "CompletionSupportOverLimit", LocalErrorCode::CompletionSupportOverLimit, &[];
+        "CompletionTextOverLimit" | LocalErrorCode::CompletionTextOverLimit => "CompletionTextOverLimit", LocalErrorCode::CompletionTextOverLimit, &[];
+        "CompletionSpendReasonRequired" | LocalErrorCode::CompletionSpendReasonRequired => "CompletionSpendReasonRequired", LocalErrorCode::CompletionSpendReasonRequired, &[];
+        "CompletionInvalidDetails" | LocalErrorCode::CompletionInvalidDetails => "CompletionInvalidDetails", LocalErrorCode::CompletionInvalidDetails, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -3633,6 +3986,9 @@ mod tests {
         "R42S2.TRANSPORT.MissionCompletionRead" | LocalTransportError::MissionCompletionRead(error)
             => format!("Mission completion read failed: {}", expected_completion_read(error).1),
             LocalTransportError::MissionCompletionRead(crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::OrphanCompletedEvent)), &[];
+        "R42S2.TRANSPORT.MissionCompletionCommand" | LocalTransportError::MissionCompletionCommand(error)
+            => format!("Mission completion command failed: {}", expected_completion_command(error).1),
+            LocalTransportError::MissionCompletionCommand(crate::CompletionCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
         "R42S2.TRANSPORT.Mission" | LocalTransportError::Mission(error)
             => format!("Mission operation failed: {}", expected_mission(error).1),
             LocalTransportError::Mission(MissionError::MissionNotFound), &[];
@@ -5317,7 +5673,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 153] = [
+    const WIRE_MAP: [(&str, WireExpectation); 164] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -5858,10 +6214,62 @@ mod tests {
         ),
         ("Outcome.Absent", WireExpectation::Code("outcome_absent")),
         ("Outcome.Account", WireExpectation::Account),
+        // The completion COMMAND family. Transcribed from the contract, one row per owner arm:
+        // malformed grammar and duplicated set entries are `completion_invalid_details`, never
+        // "text over limit", and an unverifiable completion reuses C3's existing code.
+        (
+            "MissionCompletionCommand.Account",
+            WireExpectation::Account,
+        ),
+        (
+            "MissionCompletionCommand.IntentChanged",
+            WireExpectation::Code("completion_intent_changed"),
+        ),
+        (
+            "MissionCompletionCommand.AlreadyRecorded",
+            WireExpectation::Code("completion_already_recorded"),
+        ),
+        (
+            "MissionCompletionCommand.ResidentNotInAdmissionRoster",
+            WireExpectation::Code("completion_resident_not_in_admission_roster"),
+        ),
+        (
+            "MissionCompletionCommand.ConditionCoverageIncomplete",
+            WireExpectation::Code("completion_condition_coverage_incomplete"),
+        ),
+        (
+            "MissionCompletionCommand.SupportOverLimit",
+            WireExpectation::Code("completion_support_over_limit"),
+        ),
+        (
+            "MissionCompletionCommand.TextOverLimit",
+            WireExpectation::Code("completion_text_over_limit"),
+        ),
+        (
+            "MissionCompletionCommand.SpendReasonRequired",
+            WireExpectation::Code("completion_spend_reason_required"),
+        ),
+        (
+            "MissionCompletionCommand.MalformedRequest",
+            WireExpectation::Code("completion_invalid_details"),
+        ),
+        (
+            "MissionCompletionCommand.DuplicateSetEntry",
+            WireExpectation::Code("completion_invalid_details"),
+        ),
+        (
+            "MissionCompletionCommand.Unavailable",
+            WireExpectation::Code("mission_completion_unavailable"),
+        ),
     ];
 
-    /// The 62 code spellings: wire literal and reviewed Remote NAME, both independent.
-    const CODE_SPELLINGS: [(&str, &str, &str); 62] = [
+    /// The 70 code spellings: wire literal and reviewed Remote NAME, both independent.
+    ///
+    /// The eight completion rows are transcribed from `C4-interface.md`'s superseding section, not
+    /// read off the enum: a spelling that agreed with the code because it was generated from it
+    /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
+    /// without a spelling; that gap is C3's to close, not this slice's to edit.)
+    const CODE_SPELLINGS: [(&str, &str, &str); 70] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -6104,6 +6512,46 @@ mod tests {
             "UnauthorizedClient",
         ),
         ("ProtocolError", "protocol_error", "ProtocolError"),
+        (
+            "CompletionIntentChanged",
+            "completion_intent_changed",
+            "CompletionIntentChanged",
+        ),
+        (
+            "CompletionAlreadyRecorded",
+            "completion_already_recorded",
+            "CompletionAlreadyRecorded",
+        ),
+        (
+            "CompletionResidentNotInAdmissionRoster",
+            "completion_resident_not_in_admission_roster",
+            "CompletionResidentNotInAdmissionRoster",
+        ),
+        (
+            "CompletionConditionCoverageIncomplete",
+            "completion_condition_coverage_incomplete",
+            "CompletionConditionCoverageIncomplete",
+        ),
+        (
+            "CompletionSupportOverLimit",
+            "completion_support_over_limit",
+            "CompletionSupportOverLimit",
+        ),
+        (
+            "CompletionTextOverLimit",
+            "completion_text_over_limit",
+            "CompletionTextOverLimit",
+        ),
+        (
+            "CompletionSpendReasonRequired",
+            "completion_spend_reason_required",
+            "CompletionSpendReasonRequired",
+        ),
+        (
+            "CompletionInvalidDetails",
+            "completion_invalid_details",
+            "CompletionInvalidDetails",
+        ),
     ];
 
     // -------------------------------------------------------------------------------------
@@ -6166,8 +6614,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 153, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 62, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 164, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 70, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
@@ -6385,7 +6833,7 @@ mod tests {
             );
         }
 
-        // All 62 Remote codes relay BOTH fields unchanged, including a retry on a code that does
+        // All 70 Remote codes relay BOTH fields unchanged, including a retry on a code that does
         // not otherwise carry one. Existing behaviour, pinned -- not a new promise.
         for (variant, literal, _) in CODE_SPELLINGS {
             let code = code_rows()
@@ -6403,7 +6851,7 @@ mod tests {
         }
     }
 
-    /// R42 slice 2: the wire schema and all 62 code spellings are closed.
+    /// R42 slice 2: the wire schema and all 70 code spellings are closed.
     #[test]
     fn r42_wire_schema_and_code_spellings_are_closed() {
         for (variant, literal, name) in CODE_SPELLINGS {
@@ -6521,6 +6969,11 @@ mod tests {
             domain!("Team", LocalTransportError::Team, team_rows),
             domain!("Mission", LocalTransportError::Mission, mission_rows),
             domain!(
+                "MissionCompletionCommand",
+                LocalTransportError::MissionCompletionCommand,
+                completion_command_rows
+            ),
+            domain!(
                 "ResourceDiscovery",
                 LocalTransportError::ResourceDiscovery,
                 discovery_rows
@@ -6543,5 +6996,563 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
         ]
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // C4 -- the completion family's parser ceilings, refusal ORDER and closed vocabulary.
+    //
+    // FOR A COLD READER: written while this seat had no Cargo grant (Opus held the sole grant for
+    // the owner build). Nothing below had been compiled or run when it was committed. It is source.
+    // ------------------------------------------------------------------------------------------
+
+    struct CompletionScratch(std::path::PathBuf);
+
+    impl Drop for CompletionScratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A bound server plus its paths. The scratch must stay alive for the test's duration.
+    fn completion_fixture(
+        tag: &str,
+    ) -> (
+        LocalSupervisorServer,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        CompletionScratch,
+    ) {
+        let root = std::env::temp_dir().join(format!("beacond-c4-{tag}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let scratch = CompletionScratch(root.clone());
+        let socket_path = root.join("beacond.sock");
+        let token_path = root.join("beacond.token");
+        initialize_local_auth_token(&token_path).unwrap();
+        let server = LocalSupervisorServer::bind(LocalServerConfig {
+            store_path: root.join("beacon.sqlite3"),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: socket_path.clone(),
+            auth_token_path: token_path.clone(),
+            lock_path: root.join("beacond.lock"),
+            local_model_endpoint: LocalModelEndpoint::ollama_default(),
+        })
+        .unwrap();
+        (server, socket_path, token_path, scratch)
+    }
+
+    /// Send BYTES, not a typed command: a size test that goes through the client would be testing
+    /// the client's own serializer instead of what the server accepts.
+    fn raw_exchange(socket_path: &std::path::Path, body: &[u8]) -> ResponseEnvelope {
+        use std::io::{Read as _, Write as _};
+
+        let mut stream = std::os::unix::net::UnixStream::connect(socket_path).unwrap();
+        stream.write_all(body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).expect("the supervisor answers with an envelope")
+    }
+
+    /// One valid OLD-family request, padded to `total` bytes through a legal string field.
+    fn padded_old_command(token: &str, total: usize) -> Vec<u8> {
+        let build = |padding: usize| {
+            serde_json::to_vec(&serde_json::json!({
+                "protocol": 1,
+                "token": token,
+                "command": {
+                    "name": "inspect_local_model",
+                    "model_name": "m".repeat(padding),
+                    "expected_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                },
+            }))
+            .unwrap()
+        };
+        let empty = build(0).len();
+        assert!(total > empty, "the padding target is below the empty body");
+        let body = build(total - empty);
+        assert_eq!(body.len(), total, "C4.FIXTURE.PADDED_TO_EXACT_LENGTH");
+        body
+    }
+
+    #[test]
+    fn the_larger_request_domain_is_exactly_preview_and_record() {
+        assert!(
+            accepts_completion_sized_request(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            "C4.FAMILY.PREVIEW_IS_IN"
+        );
+        assert!(
+            accepts_completion_sized_request(&LocalCommand::RecordMissionCompletion {
+                request: completion_request_fixture(),
+                reviewed_intent_sha256: "a".repeat(64),
+            }),
+            "C4.FAMILY.RECORD_IS_IN"
+        );
+        // One UUID in, one token or null out: it can never need the larger domain.
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::GetMissionCompletionIntent {
+                mission_id: Uuid::new_v4(),
+            }),
+            "C4.FAMILY.GET_INTENT_IS_OUT"
+        );
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::MissionCompletion {
+                mission_id: Uuid::new_v4(),
+            }),
+            "C4.FAMILY.C3_READ_IS_OUT"
+        );
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::Status),
+            "C4.FAMILY.OLD_COMMAND_IS_OUT"
+        );
+    }
+
+    #[test]
+    fn only_the_preview_response_leaves_the_old_domain() {
+        assert_eq!(
+            response_max(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C4.RESPONSE.PREVIEW_IS_LARGER"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::RecordMissionCompletion {
+                request: completion_request_fixture(),
+                reviewed_intent_sha256: "a".repeat(64),
+            }),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.RECORD_STAYS_OLD"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::GetMissionCompletionIntent {
+                mission_id: Uuid::new_v4(),
+            }),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.GET_INTENT_STAYS_OLD"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::Status),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.OLD_COMMAND_STAYS_OLD"
+        );
+    }
+
+    /// Every wire command states its own response domain, derived from the source rather than from a
+    /// hand list -- a hand list would need editing exactly when nobody edits it.
+    ///
+    /// The needles are assembled with `concat!` so this parser does not match its own source text.
+    #[test]
+    fn every_command_states_its_response_domain() {
+        let source = include_str!("local_transport.rs");
+        let arms: Vec<String> = source
+            .split(concat!("enum ", "LocalCommand {"))
+            .nth(1)
+            .expect("the wire vocabulary is an enum in this file")
+            .split("\n}")
+            .next()
+            .expect("the enum closes")
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with(',') || line.ends_with(" {"))
+            .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
+            .map(|line| line.trim_end_matches(" {").trim_end_matches(',').to_owned())
+            .filter(|name| {
+                name.chars().next().is_some_and(char::is_uppercase)
+                    && name.chars().all(char::is_alphanumeric)
+            })
+            .collect();
+        assert!(arms.len() >= 55, "C4.RESPONSE.TABLE.ARMS_FOUND: {}", arms.len());
+
+        let table = source
+            .split(concat!("fn response", "_max(command: &LocalCommand) -> u64 {"))
+            .nth(1)
+            .expect("the response table is a function in this file")
+            .split("\n}")
+            .next()
+            .expect("the function closes");
+        for arm in &arms {
+            assert!(
+                table.contains(&format!("LocalCommand::{arm}")),
+                "C4.RESPONSE.TABLE.STATES_EVERY_COMMAND: {arm}"
+            );
+        }
+        // Exactly one command may leave the old domain, and it is named here independently.
+        let larger = table
+            .split(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES"))
+            .next()
+            .expect("the larger ceiling appears once");
+        assert!(
+            larger.contains("LocalCommand::PreviewMissionCompletion"),
+            "C4.RESPONSE.TABLE.ONLY_PREVIEW_IS_LARGER"
+        );
+        assert_eq!(
+            table.matches(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES")).count(),
+            1,
+            "C4.RESPONSE.TABLE.LARGER_CEILING_APPEARS_ONCE"
+        );
+    }
+
+    /// The ceilings cover the grammar, by a conservative bound rather than by an example.
+    ///
+    /// `J <= 2C + K`, where `C` is the owner's canonical size and `K` is the maximum of `J - 2C` over
+    /// the grammar. Adding `b` UTF-8 bytes of text adds at most `2b` to `J` (escaping at most doubles
+    /// a scalar) and exactly `8 + b` to `C` (the codec's `u64` length prefix), so `d(J - 2C) <= -16`:
+    /// the maximum is reached with EMPTY text placeholders, which exist for the algebra only and are
+    /// not a legal record.
+    ///
+    /// **What this bounds, exactly.** It bounds every OWNER-VALID request. It does NOT bound what
+    /// serde would parse: a `Vec` or a `String` has no length limit at the parser, so parser-valid
+    /// input is not finitely bounded by the owner's caps at all, and no ceiling derived from them
+    /// could claim to be a maximum parser domain. The ceiling is a finite parser ceiling chosen to
+    /// COVER the owner-valid domain; a larger body is refused by size, which is the intended answer.
+    ///
+    /// The literals are measured, not derived here: `tools/c4/opus2/transport/verify-bound.py` and
+    /// `bound-certificate.json`. They use `u32::MAX` for every ordinal, which is a deliberate
+    /// CONSERVATIVE SUPERSET of the owner-valid input -- the owner requires dense ordinals, so a
+    /// legal record's ordinals are at most two digits. Blue's independently proved owner-valid bounds
+    /// are 147,219 and 171,539; the 702-byte gap in both totals is exactly that ordinal digit width,
+    /// and the wider figure is used here on purpose.
+    #[test]
+    fn the_completion_ceilings_cover_the_conservative_grammar_bound() {
+        // Transcribed from `mission_completion.rs`, not read from it: that constant is private, and
+        // a bound that imported its own input would witness nothing.
+        const OWNER_CANONICAL_CAP: u64 = 65_536;
+        const K_MAX_RESIDUAL: u64 = 16_622;
+        const REQUEST_ENVELOPE_OVERHEAD: u64 = 227;
+        const PREVIEW_RESPONSE_EXTRA: u64 = 24_462;
+        const PREVIEW_RESPONSE_ENVELOPE_OVERHEAD: u64 = 85;
+
+        let request_upper = 2 * OWNER_CANONICAL_CAP + K_MAX_RESIDUAL + REQUEST_ENVELOPE_OVERHEAD;
+        assert_eq!(request_upper, 147_921, "C4.BOUND.REQUEST_UPPER_IS_UNCHANGED");
+        assert!(
+            request_upper <= MAX_COMPLETION_REQUEST_BYTES,
+            "C4.BOUND.REQUEST_CEILING_COVERS_THE_GRAMMAR"
+        );
+
+        let preview_upper = 2 * OWNER_CANONICAL_CAP
+            + K_MAX_RESIDUAL
+            + PREVIEW_RESPONSE_EXTRA
+            + PREVIEW_RESPONSE_ENVELOPE_OVERHEAD;
+        assert_eq!(preview_upper, 172_241, "C4.BOUND.PREVIEW_UPPER_IS_UNCHANGED");
+        assert!(
+            preview_upper <= MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C4.BOUND.PREVIEW_CEILING_COVERS_THE_GRAMMAR"
+        );
+
+        // The old domain is untouched, and the new ones are strictly above it.
+        assert_eq!(MAX_MESSAGE_BYTES, 64 * 1024, "C4.BOUND.OLD_DOMAIN_UNCHANGED");
+        assert!(
+            MAX_COMPLETION_REQUEST_BYTES > MAX_MESSAGE_BYTES
+                && MAX_COMPLETION_PREVIEW_RESPONSE_BYTES > MAX_COMPLETION_REQUEST_BYTES,
+            "C4.BOUND.CEILINGS_ARE_ORDERED"
+        );
+    }
+
+    /// An old command over the old ceiling is refused for its SIZE, before authentication -- which is
+    /// where it was refused before this change. The token below is wrong on purpose: if the size
+    /// check had moved after the token check, the answer would be `unauthorized_client`.
+    #[test]
+    fn an_old_command_over_the_old_ceiling_is_refused_before_authentication() {
+        let (server, socket_path, _token_path, _scratch) = completion_fixture("old-over");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+
+        let over = raw_exchange(
+            &socket_path,
+            &padded_old_command("not-the-real-token", (MAX_MESSAGE_BYTES + 1) as usize),
+        );
+        assert_eq!(
+            over.error.map(|error| error.code),
+            Some(LocalErrorCode::ProtocolError),
+            "C4.OLD_DOMAIN.OVER_LIMIT_IS_PROTOCOL_BEFORE_AUTH"
+        );
+
+        // ... and one byte under it still reaches authentication, so the boundary is the boundary.
+        let under = raw_exchange(
+            &socket_path,
+            &padded_old_command("not-the-real-token", MAX_MESSAGE_BYTES as usize),
+        );
+        assert_eq!(
+            under.error.map(|error| error.code),
+            Some(LocalErrorCode::UnauthorizedClient),
+            "C4.OLD_DOMAIN.AT_LIMIT_STILL_REACHES_AUTH"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// A body over the COMPLETION ceiling is refused by size, whatever it claims to be.
+    #[test]
+    fn a_body_over_the_completion_ceiling_is_refused_by_size() {
+        let (server, socket_path, _token_path, _scratch) = completion_fixture("c4-over");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+
+        let body = padded_old_command(
+            "not-the-real-token",
+            (MAX_COMPLETION_REQUEST_BYTES + 1) as usize,
+        );
+        let answer = raw_exchange(&socket_path, &body);
+        assert_eq!(
+            answer.error.map(|error| error.code),
+            Some(LocalErrorCode::ProtocolError),
+            "C4.CEILING.OVER_THE_COMPLETION_CEILING_IS_PROTOCOL"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// A malformed body keeps the refusal it had: `Json` under the old ceiling, `Protocol` above it.
+    ///
+    /// Read through `read_request` directly, because both variants project to the same wire code --
+    /// the distinction is internal, and an outward-only test could not see it.
+    #[test]
+    fn a_malformed_body_keeps_its_refusal_on_each_side_of_the_old_ceiling() {
+        use std::io::Write as _;
+
+        let (server, _socket_path, _token_path, _scratch) = completion_fixture("malformed");
+
+        let mut refuse = |length: usize| {
+            let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+            let body = vec![b'{'; length];
+            thread::spawn(move || {
+                let _ = theirs.write_all(&body);
+                let _ = theirs.shutdown(std::net::Shutdown::Write);
+            });
+            server.read_request(&mut ours)
+        };
+
+        assert!(
+            matches!(refuse(64), Err(LocalTransportError::Json(_))),
+            "C4.PARSE.UNDER_THE_OLD_CEILING_IS_STILL_JSON"
+        );
+        assert!(
+            matches!(
+                refuse((MAX_MESSAGE_BYTES + 1) as usize),
+                Err(LocalTransportError::Protocol)
+            ),
+            "C4.PARSE.OVER_THE_OLD_CEILING_IS_STILL_PROTOCOL"
+        );
+        assert!(
+            matches!(
+                refuse((MAX_COMPLETION_REQUEST_BYTES + 1) as usize),
+                Err(LocalTransportError::Protocol)
+            ),
+            "C4.PARSE.OVER_THE_COMPLETION_CEILING_IS_PROTOCOL"
+        );
+    }
+
+    /// The three commands are registered, reach the owner, and are authenticated like every other
+    /// command. This is NOT a claim that a completion round trips: it is a claim that an
+    /// unauthenticated caller is refused by the account, not by a missing route.
+    #[test]
+    fn the_completion_commands_are_registered_and_authenticated() {
+        let (server, socket_path, token_path, _scratch) = completion_fixture("auth");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+        let client = LocalSupervisorClient::connect(&socket_path, &token_path).unwrap();
+
+        assert!(
+            matches!(
+                client.preview_mission_completion(completion_request_fixture()),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.PREVIEW_IS_AUTHENTICATED"
+        );
+        assert!(
+            matches!(
+                client.record_mission_completion(completion_request_fixture(), "a".repeat(64)),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.RECORD_IS_AUTHENTICATED"
+        );
+        assert!(
+            matches!(
+                client.get_mission_completion_intent(Uuid::new_v4()),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.GET_INTENT_IS_AUTHENTICATED"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// The smallest legal request: one condition, nothing optional cited. Used where the CONTENT does
+    /// not matter, only that a real DTO crosses the boundary.
+    fn completion_request_fixture() -> crate::CompletionIntentRequest {
+        crate::CompletionIntentRequest {
+            mission_id: Uuid::new_v4(),
+            accountable_resident_id: Uuid::new_v4(),
+            disposition: "concluded".to_owned(),
+            condition_results: vec![crate::ConditionResultDto {
+                ordinal: 0,
+                outcome: "met".to_owned(),
+                support: Vec::new(),
+                note: None,
+            }],
+            delivered_artifacts: Vec::new(),
+            unfinished_work: Vec::new(),
+            uncertainty: Vec::new(),
+            spend: crate::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+            summary: "Shipped it.".to_owned(),
+        }
+    }
+
+    /// The wire vocabulary is strict in both directions: every field required, `null` explicit, no
+    /// unknown field, no unknown command.
+    #[test]
+    fn the_completion_wire_vocabulary_is_strict() {
+        let with_command = |command: serde_json::Value| {
+            serde_json::from_value::<LocalCommand>(command)
+        };
+
+        let mut request = serde_json::json!({
+            "missionId": "11111111-1111-4111-8111-111111111111",
+            "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+            "disposition": "concluded",
+            "conditionResults": [{
+                "ordinal": 0,
+                "outcome": "met",
+                "support": [],
+                "note": null,
+            }],
+            "deliveredArtifacts": [],
+            "unfinishedWork": [],
+            "uncertainty": [],
+            "spend": {"notMeasured": "no meter on this Mission"},
+            "summary": "Shipped it.",
+        });
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": request.clone(),
+            }))
+            .is_ok(),
+            "C4.WIRE.A_COMPLETE_REQUEST_IS_ACCEPTED"
+        );
+
+        // An ABSENT note is not the same fact as an explicit null, and the owner is told which.
+        let mut absent = request.clone();
+        absent["conditionResults"][0]
+            .as_object_mut()
+            .expect("the condition is an object")
+            .remove("note");
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": absent,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_ABSENT_NOTE_IS_REFUSED"
+        );
+
+        request["conditionResults"][0]["unexpected"] = serde_json::Value::from(1);
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": request,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_UNKNOWN_FIELD_IS_REFUSED"
+        );
+
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion_v2",
+                "request": serde_json::Value::Null,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_UNKNOWN_COMMAND_IS_REFUSED"
+        );
+
+        // The record leg carries the REVIEWED token, spelled as the contract spells it.
+        assert!(
+            with_command(serde_json::json!({
+                "name": "record_mission_completion",
+                "request": serde_json::json!({
+                    "missionId": "11111111-1111-4111-8111-111111111111",
+                    "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+                    "disposition": "concluded",
+                    "conditionResults": [],
+                    "deliveredArtifacts": [],
+                    "unfinishedWork": [],
+                    "uncertainty": [],
+                    "spend": {"notMeasured": "x"},
+                    "summary": "y",
+                }),
+                "reviewed_intent_sha256": "a".repeat(64),
+            }))
+            .is_ok(),
+            "C4.WIRE.THE_RECORD_LEG_CARRIES_THE_REVIEWED_TOKEN"
+        );
+        assert!(
+            with_command(serde_json::json!({
+                "name": "record_mission_completion",
+                "request": serde_json::json!({
+                    "missionId": "11111111-1111-4111-8111-111111111111",
+                    "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+                    "disposition": "concluded",
+                    "conditionResults": [],
+                    "deliveredArtifacts": [],
+                    "unfinishedWork": [],
+                    "uncertainty": [],
+                    "spend": {"notMeasured": "x"},
+                    "summary": "y",
+                }),
+            }))
+            .is_err(),
+            "C4.WIRE.A_RECORD_WITHOUT_THE_REVIEWED_TOKEN_IS_REFUSED"
+        );
+    }
+
+    /// The slow deadline still belongs to exactly one command, and the completion family does not
+    /// take it. Source-derived, for the same reason as the response table.
+    #[test]
+    fn only_the_install_command_uses_the_slow_deadline() {
+        let source = include_str!("local_transport.rs");
+        let needle = concat!("CLIENT_SLOW", "_COMMAND_TIMEOUT");
+        let call_sites: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains(needle))
+            .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with("///"))
+            .collect();
+        // One definition, one call site. Anything else means a second command took the slow budget.
+        assert_eq!(
+            call_sites.len(),
+            2,
+            "C4.DEADLINE.SLOW_BUDGET_HAS_ONE_CALLER: {call_sites:?}"
+        );
+        assert!(
+            source
+                .split(concat!("fn install_sample", "_project"))
+                .nth(1)
+                .expect("the install command is in this file")
+                .split("\n    }")
+                .next()
+                .expect("the method closes")
+                .contains(needle),
+            "C4.DEADLINE.SLOW_BUDGET_BELONGS_TO_INSTALL"
+        );
     }
 }

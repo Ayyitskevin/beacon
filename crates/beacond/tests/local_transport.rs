@@ -1015,6 +1015,260 @@ fn authenticated_client_forms_a_team_and_admits_a_mission_over_the_real_socket()
     thread.join().unwrap().unwrap();
 }
 
+/// The three completion commands over the REAL socket, with a record wide enough that the old
+/// 64 KiB frame could not have carried it.
+///
+/// This is the bar the ceiling exists for: every field, every citation and every narrative item
+/// survives the round trip, the reviewed token the Operator saw is the token the write is judged
+/// against, and the same token reads back afterwards. Sets are compared as SETS, because the owner
+/// sorts support and delivered Artifacts into its canonical order -- "unchanged" means nothing was
+/// dropped or truncated, not that the Operator's typing order is preserved.
+#[test]
+fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
+    let runtime = TestRuntime::new("completion");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    // Twenty declared conditions: the owner's cap, so the completion below is as wide as one can be.
+    let conditions: Vec<String> = (0..20)
+        .map(|index| format!("Declared condition {index} holds"))
+        .collect();
+    let admitted = client
+        .admit_mission(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: formed.id,
+            desired_outcome: "Ship one reviewed feature".to_owned(),
+            success_conditions: conditions.clone(),
+            constraints: vec!["Keep authority explicit".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![MissionMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+
+    let request = wide_completion_request(admitted.id, resident_id);
+    let sent_bytes = serde_json::to_vec(&request).unwrap().len();
+    assert!(
+        sent_bytes > 65_536,
+        "C4.WIDE.REQUEST_EXCEEDS_THE_OLD_FRAME: {sent_bytes} bytes"
+    );
+
+    let preview = client.preview_mission_completion(request.clone()).unwrap();
+
+    // Bindings the client never sent and cannot forge.
+    assert_eq!(preview.actor, "operator", "C4.WIDE.ACTOR");
+    assert_eq!(preview.project_id, project.id, "C4.WIDE.PROJECT_BINDING");
+    assert_eq!(
+        preview.accountable_resident_configuration_id, configuration.id,
+        "C4.WIDE.HISTORICAL_CONFIGURATION"
+    );
+    assert_eq!(preview.conditions, conditions, "C4.WIDE.DECLARED_CONDITIONS");
+    assert_eq!(preview.intent_sha256.len(), 64, "C4.WIDE.TOKEN_IS_HEX64");
+
+    // Nothing dropped and nothing truncated. Scalar fields must be identical; the two SET fields are
+    // compared after sorting both sides, because the owner owns their order.
+    let echoed = &preview.request;
+    assert_eq!(echoed.mission_id, request.mission_id, "C4.WIDE.MISSION_ID");
+    assert_eq!(
+        echoed.accountable_resident_id, request.accountable_resident_id,
+        "C4.WIDE.ACCOUNTABLE_RESIDENT"
+    );
+    assert_eq!(echoed.disposition, request.disposition, "C4.WIDE.DISPOSITION");
+    assert_eq!(echoed.summary, request.summary, "C4.WIDE.SUMMARY");
+    assert_eq!(echoed.spend, request.spend, "C4.WIDE.SPEND");
+    assert_eq!(
+        echoed.unfinished_work, request.unfinished_work,
+        "C4.WIDE.UNFINISHED_WORK"
+    );
+    assert_eq!(echoed.uncertainty, request.uncertainty, "C4.WIDE.UNCERTAINTY");
+    assert_eq!(
+        echoed.condition_results.len(),
+        request.condition_results.len(),
+        "C4.WIDE.CONDITION_COUNT"
+    );
+    for (echoed_result, sent_result) in echoed
+        .condition_results
+        .iter()
+        .zip(request.condition_results.iter())
+    {
+        assert_eq!(echoed_result.ordinal, sent_result.ordinal, "C4.WIDE.ORDINAL");
+        assert_eq!(echoed_result.outcome, sent_result.outcome, "C4.WIDE.OUTCOME");
+        assert_eq!(echoed_result.note, sent_result.note, "C4.WIDE.NOTE");
+        assert_eq!(
+            echoed_result.support.len(),
+            sent_result.support.len(),
+            "C4.WIDE.SUPPORT_COUNT"
+        );
+        let mut echoed_support = format_support(&echoed_result.support);
+        let mut sent_support = format_support(&sent_result.support);
+        echoed_support.sort();
+        sent_support.sort();
+        assert_eq!(echoed_support, sent_support, "C4.WIDE.SUPPORT_SET");
+    }
+    let mut echoed_delivered = echoed.delivered_artifacts.clone();
+    let mut sent_delivered = request.delivered_artifacts.clone();
+    echoed_delivered.sort();
+    sent_delivered.sort();
+    assert_eq!(echoed_delivered, sent_delivered, "C4.WIDE.DELIVERED_SET");
+
+    // Nothing is recorded by a preview.
+    assert_eq!(
+        client.get_mission_completion_intent(admitted.id).unwrap(),
+        None,
+        "C4.WIDE.PREVIEW_WRITES_NOTHING"
+    );
+
+    // The REVIEWED token is what the write is judged against, and the frozen normalized request is
+    // what is sent.
+    let acknowledgement = client
+        .record_mission_completion(echoed.clone(), preview.intent_sha256.clone())
+        .unwrap();
+    assert_eq!(
+        acknowledgement.intent_sha256, preview.intent_sha256,
+        "C4.WIDE.ACKNOWLEDGEMENT_IS_THE_REVIEWED_TOKEN"
+    );
+    assert_eq!(
+        client
+            .get_mission_completion_intent(admitted.id)
+            .unwrap()
+            .map(|intent| intent.intent_sha256),
+        Some(preview.intent_sha256.clone()),
+        "C4.WIDE.READ_BACK_IS_THE_SAME_TOKEN"
+    );
+
+    // A second write does not overwrite, and says so by its own name.
+    assert_remote_code(
+        client.record_mission_completion(echoed.clone(), preview.intent_sha256.clone()),
+        LocalErrorCode::CompletionAlreadyRecorded,
+    );
+    // A stale reviewed token is refused as a changed intent, not as a malformed one.
+    assert_remote_code(
+        client.record_mission_completion(echoed.clone(), "0".repeat(64)),
+        LocalErrorCode::CompletionIntentChanged,
+    );
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+/// A stable, comparable spelling of one support reference, so a SET can be sorted without ordering
+/// the DTO itself.
+fn format_support(support: &[beacond::SupportRefDto]) -> Vec<String> {
+    support
+        .iter()
+        .map(|reference| match reference {
+            beacond::SupportRefDto::Artifact(digest) => format!("artifact:{digest}"),
+            beacond::SupportRefDto::Evaluation(digest) => format!("evaluation:{digest}"),
+            beacond::SupportRefDto::Ruling(digest) => format!("ruling:{digest}"),
+            beacond::SupportRefDto::Receipt {
+                run_id,
+                receipt_version,
+                receipt_bytes_sha256,
+            } => format!("receipt:{run_id}:{receipt_version}:{receipt_bytes_sha256}"),
+        })
+        .collect()
+}
+
+/// The widest completion this Mission can carry: every list at the owner's cap, every digest and run
+/// id UNIQUE (a repeated entry is a duplicate the owner refuses, not a wider record), and every text
+/// at its scalar bound.
+fn wide_completion_request(
+    mission_id: Uuid,
+    accountable_resident_id: Uuid,
+) -> beacond::CompletionIntentRequest {
+    let digest = |seed: u128| format!("{seed:064x}");
+    let condition_results = (0..20u32)
+        .map(|ordinal| beacond::ConditionResultDto {
+            ordinal,
+            outcome: "assessment_inconclusive".to_owned(),
+            support: (0..8u128)
+                .map(|slot| {
+                    let seed = u128::from(ordinal) * 100 + slot;
+                    match slot % 4 {
+                        0 => beacond::SupportRefDto::Artifact(digest(seed)),
+                        1 => beacond::SupportRefDto::Evaluation(digest(seed)),
+                        2 => beacond::SupportRefDto::Ruling(digest(seed)),
+                        _ => beacond::SupportRefDto::Receipt {
+                            run_id: Uuid::from_u128(seed + 1),
+                            receipt_version: u32::MAX,
+                            receipt_bytes_sha256: digest(seed + 2),
+                        },
+                    }
+                })
+                .collect(),
+            note: Some("n".repeat(500)),
+        })
+        .collect();
+    let narrative = |kind: &str| {
+        (0..32u32)
+            .map(|ordinal| beacond::NarrativeItemDto {
+                ordinal,
+                kind: kind.to_owned(),
+                condition_ordinal: Some(ordinal % 20),
+                summary: "s".repeat(500),
+            })
+            .collect::<Vec<_>>()
+    };
+    beacond::CompletionIntentRequest {
+        mission_id,
+        accountable_resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results,
+        delivered_artifacts: (0..32u128).map(|index| digest(index + 10_000)).collect(),
+        unfinished_work: narrative("blocked_dependency"),
+        uncertainty: narrative("outside_scope_of_checks"),
+        spend: beacond::SpendDto::NotMeasured("r".repeat(500)),
+        summary: "y".repeat(2_000),
+    }
+}
+
 fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {
     StarterResidentDraft {
         role,
