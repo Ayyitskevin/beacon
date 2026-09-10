@@ -114,7 +114,12 @@ const CODE_COPY: Record<string, string> = {
     "This condition cites more support than a completion can record.",
   completion_text_over_limit: "Some completion text exceeds the supported length.",
   completion_spend_reason_required: "Explain why spend was not measured.",
-  completion_unavailable: "The Mission completion could not be verified.",
+  // Grammar, not length: a malformed identity, digest, tag or integer, or the same entry twice in a
+  // set. Telling the Operator to shorten text would send them to fix what was never wrong.
+  completion_invalid_details: "Some completion details are invalid. Review the completion again.",
+  // The SHARED unavailable code, with C3's exact sentence. One condition, one code, whichever
+  // completion operation asked: the caller already knows which one it invoked.
+  mission_completion_unavailable: "The Mission completion could not be verified.",
 };
 
 function describeCompletionWriteError(error: unknown): string {
@@ -226,10 +231,8 @@ export function MissionCompletionCompose({
   /** The control the review was opened from, so cancelling returns the keyboard where it was. */
   const reviewTrigger = useRef<HTMLButtonElement | null>(null);
   const returnFocus = useRef(false);
-  // Lifetime counters, read at CALLBACK time through a ref. The first version compared `mission.id`
-  // against a value captured in the same render, so both sides moved together and the comparison
-  // could never fail -- a valid answer for the Mission the Operator had left still entered the new
-  // Mission's review.
+  // Lifetime counters, read at CALLBACK time through a ref -- never compared against a value
+  // captured in the same render, which would move with them and could never disagree.
   //
   // TWO counters because an edit and a Mission change retire DIFFERENT things. `attempt` retires a
   // leg outright: a newer leg owns the screen, or this is no longer that Mission, so the answer is
@@ -286,17 +289,13 @@ export function MissionCompletionCompose({
     reviewTrigger.current?.focus();
   }, [preview]);
 
-  // Unmount retires every leg by the SAME rule the rest of this screen uses.
+  // Unmount retires the current attempt, by the same rule as a Mission change.
   //
-  // I previously reported unmount as unwitnessable, and that was WRONG: it is true only of
-  // `setState`, which React makes a silent no-op after unmount. Two effects here are not state at
-  // all -- `onRecorded` is the PARENT's callback, and a read-back is a NEW request to the native
-  // side -- so a late answer to a composer nobody is looking at used to refresh someone else's
-  // screen and issue a read for a Mission this component no longer shows. Root measured both.
-  //
-  // This does NOT cancel the native write, and nothing here claims it did; it stops a retired
-  // composer from speaking. (A StrictMode remount runs this cleanup once at mount, when no leg is
-  // in flight, so the extra bump retires nothing.)
+  // `setState` after unmount is a silent no-op, but two effects of a late answer are not state:
+  // `onRecorded` is the PARENT's callback and a read-back is a NEW request. Retiring the attempt is
+  // what stops both from escaping a closed composer. It does not cancel a write already dispatched,
+  // and claims nothing about one. (A StrictMode remount runs this cleanup once at mount, with no leg
+  // in flight, so that bump retires nothing.)
   useEffect(() => {
     const lifetime = live;
     return () => {

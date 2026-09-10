@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -321,7 +321,7 @@ it("preserves the form and reads back when the record itself fails", async () =>
       Promise.resolve(previewFor((args as { request: unknown }).request)),
     record_mission_completion: (args) => {
       writes.push(args);
-      return Promise.reject({ code: "completion_unavailable" });
+      return Promise.reject({ code: "mission_completion_unavailable" });
     },
     get_mission_completion_intent: () => Promise.resolve(null),
   });
@@ -347,9 +347,9 @@ it("offers a read Retry, never a repeated write, when the read-back is unavailab
       Promise.resolve(previewFor((args as { request: unknown }).request)),
     record_mission_completion: (args) => {
       writes.push(args);
-      return Promise.reject({ code: "completion_unavailable" });
+      return Promise.reject({ code: "mission_completion_unavailable" });
     },
-    get_mission_completion_intent: () => Promise.reject({ code: "completion_unavailable" }),
+    get_mission_completion_intent: () => Promise.reject({ code: "mission_completion_unavailable" }),
   });
   expect(
     await screen.findByText("The recorded completion could not be read. Retry the read."),
@@ -457,7 +457,7 @@ it("a record refusal for the Mission the Operator left plants no failure and no 
   const { view, write, reads, onRecorded } = await recordHeldForMission();
   view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={onRecorded} />);
   await act(async () => {
-    write.settle.reject({ code: "completion_unavailable" });
+    write.settle.reject({ code: "mission_completion_unavailable" });
   });
   expect(
     screen.queryByText("The Mission completion could not be verified."),
@@ -491,7 +491,7 @@ it("a read-back for the Mission the Operator left reports nothing here", async (
       return Promise.resolve(previewFor((args as { request: unknown }).request));
     }
     if (command === "record_mission_completion") {
-      return Promise.reject({ code: "completion_unavailable" });
+      return Promise.reject({ code: "mission_completion_unavailable" });
     }
     if (command === "get_mission_completion_intent") return read.promise;
     return Promise.reject(new Error(`unexpected ${String(command)}`));
@@ -862,7 +862,7 @@ it("axe: the read-back-pending state", async () => {
       return Promise.resolve(previewFor((args as { request: unknown }).request));
     }
     if (command === "record_mission_completion") {
-      return Promise.reject({ code: "completion_unavailable" });
+      return Promise.reject({ code: "mission_completion_unavailable" });
     }
     if (command === "get_mission_completion_intent") return new Promise<unknown>(() => {});
     return Promise.reject(new Error(`unexpected ${String(command)}`));
@@ -940,4 +940,80 @@ it("sends the exact frozen reviewed request and token on the record leg", async 
       reviewedIntentSha256: TOKEN,
     },
   ]);
+});
+
+/* The closed caller table, transcribed from `C4-interface.md`'s dated addendum rather than read off
+   the component: a table generated from the map under test would agree with any map. `mission_
+   completion_unavailable` is C3's existing shared code and keeps C3's exact sentence; the proposed
+   `completion_unavailable` alias is retired and must no longer produce completion copy. */
+const CALLER_LINES: readonly (readonly [string, string])[] = [
+  ["completion_intent_changed", "The reviewed details changed. Review the completion again."],
+  [
+    "completion_already_recorded",
+    "A completion is already recorded for this Mission. Read the recorded completion.",
+  ],
+  ["completion_resident_not_in_admission_roster", "Choose a Resident admitted to this Mission."],
+  ["completion_condition_coverage_incomplete", "Assess every declared condition explicitly."],
+  [
+    "completion_support_over_limit",
+    "This condition cites more support than a completion can record.",
+  ],
+  ["completion_text_over_limit", "Some completion text exceeds the supported length."],
+  ["completion_spend_reason_required", "Explain why spend was not measured."],
+  [
+    "completion_invalid_details",
+    "Some completion details are invalid. Review the completion again.",
+  ],
+  ["mission_completion_unavailable", "The Mission completion could not be verified."],
+];
+
+it("gives every completion code its exact fixed line, through the real projection", async () => {
+  for (const [code, line] of CALLER_LINES) {
+    await previewRefusedBy(code);
+    // The ALERT's whole text, not a substring match: a line that merely contains the sentence is a
+    // different line, and `findByText` would fail before the assertion name could be printed.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent, `C4.COPY.EXACT_LINE: ${code}`).toBe(line);
+    cleanup();
+  }
+});
+
+it("no longer answers the retired completion_unavailable proposal with completion copy", async () => {
+  await previewRefusedBy("completion_unavailable");
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent, "C4.COPY.RETIRED_ALIAS_IS_NOT_COMPLETION_COPY").toBe(
+    "Beacon could not complete that local request.",
+  );
+});
+
+it("renders the fixed line and nothing the payload carried with it", async () => {
+  const user = userEvent.setup();
+  const needle = "R42_PRIVATE_/home/operator/beacon.sqlite3";
+  invokeMock.mockImplementation((command) =>
+    command === "preview_mission_completion"
+      ? Promise.reject({
+          code: "completion_invalid_details",
+          // Everything a real refusal might carry beside its code. None of it is caller copy.
+          message: `${needle} column=private_column`,
+          field: "conditionResults[3].support[2].receipt.runId",
+          detail: { path: needle, sql: `SELECT * FROM completions -- ${needle}` },
+        })
+      : Promise.reject(new Error("no")),
+  );
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent, "C4.COPY.RAW_PAYLOAD_IS_NOT_RENDERED").toBe(
+    "Some completion details are invalid. Review the completion again.",
+  );
+  expect(
+    document.body.textContent ?? "",
+    "C4.COPY.RAW_PAYLOAD_IS_NOT_RENDERED",
+  ).not.toContain(needle);
+  expect(
+    document.body.textContent ?? "",
+    "C4.COPY.RAW_PAYLOAD_IS_NOT_RENDERED",
+  ).not.toContain("conditionResults[3]");
 });

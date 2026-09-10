@@ -101,8 +101,8 @@ it("astra: unavailable recovery provides an actual read-only retry", async () =>
   let writes=0; let reads=0;
   await recordWith(user, {
     preview_mission_completion: args => Promise.resolve(previewFor((args as {request:unknown}).request)),
-    record_mission_completion: () => { writes++; return Promise.reject({code:"completion_unavailable"}); },
-    get_mission_completion_intent: () => { reads++; return reads === 1 ? Promise.reject({code:"completion_unavailable"}) : Promise.resolve(null); },
+    record_mission_completion: () => { writes++; return Promise.reject({code:"mission_completion_unavailable"}); },
+    get_mission_completion_intent: () => { reads++; return reads === 1 ? Promise.reject({code:"mission_completion_unavailable"}) : Promise.resolve(null); },
   });
   await screen.findByText("The recorded completion could not be read. Retry the read.");
   const retry=screen.queryByRole("button", {name:/retry.*read|read.*retry/i});
