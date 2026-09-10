@@ -227,6 +227,11 @@ export function MissionClassification({
       // observation that is already out of date, and the contract's answer to "unknown" is a READ.
       // A fresh observation reopens the judgment; nothing here is permanently disabled.
       !(outcome === "unknown" && recovery === null) &&
+      // A refresh that is still in flight, or that FAILED, authorizes nothing: the form is still
+      // backed by the older observation, and a write built on it would name a Policy revision and a
+      // predecessor nobody has re-read. The same control retries.
+      !recoveryPending &&
+      recoveryFailure === "" &&
       current.publishedPolicy !== null &&
       impact !== "" &&
       reason.trim() === reason &&
@@ -296,6 +301,9 @@ export function MissionClassification({
     if (recoveryPending) return;
     const mine = fresh();
     setRecoveryPending(true);
+    // Only this read's own previous failure is cleared. `outcome` is untouched: an attempt whose
+    // reply was lost stays UNKNOWN through any number of failed reads, and a failed read is never
+    // rendered as "no record".
     setRecoveryFailure("");
     setRecovery(null);
     loadMissionClassification(mission.id).then(
@@ -432,6 +440,8 @@ export function MissionClassification({
                       {writeFailure}
                     </p>
                     {READABLE_REFUSALS.includes(writeFailure) && (
+                      // Still offered after a failed read: the control that failed is the control
+                      // that retries, and the Operator decides when to press it again.
                       <Button size="small" onClick={readBack} disabled={recoveryPending}>
                         Read the classification
                       </Button>
@@ -454,21 +464,24 @@ export function MissionClassification({
                   A classification is recorded at version {recorded.version}.
                 </p>
               )}
+              {/* The refresh reports itself wherever it was started from. It used to render only
+                  inside the unknown branch, so a failed refresh after a DEFINITE refusal was
+                  invisible and the form stayed quietly backed by the old observation. */}
+              {recoveryPending && (
+                <p role="status" className={classes.body}>
+                  Reading the classification
+                </p>
+              )}
+              {recoveryFailure !== "" && (
+                <p role="alert" className={classes.body}>
+                  {recoveryFailure}
+                </p>
+              )}
               {outcome === "unknown" && (
                 <>
                   <p role="alert" className={classes.body}>
                     Whether your submission was recorded is still unknown.
                   </p>
-                  {recoveryPending && (
-                    <p role="status" className={classes.body}>
-                      Reading the classification
-                    </p>
-                  )}
-                  {recoveryFailure !== "" && (
-                    <p role="alert" className={classes.body}>
-                      {recoveryFailure}
-                    </p>
-                  )}
                   {recovery !== null &&
                     (recovery.latest === null ? (
                       <p className={classes.body}>
