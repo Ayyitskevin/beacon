@@ -168,6 +168,17 @@ fn project_draft() -> ProjectDraft {
     }
 }
 
+/// A charter draft that actually differs from the previous one.
+///
+/// `revise_charter` refuses an unchanged charter (`ProjectError::UnchangedCharter`), which is what
+/// the first run of this fixture hit: reusing `project_draft().charter` verbatim is not a revision.
+fn charter_draft(revision: u32) -> ProjectCharterDraft {
+    ProjectCharterDraft {
+        purpose: format!("Build a trustworthy local software product, take {revision}."),
+        ..project_draft().charter
+    }
+}
+
 fn policy_draft() -> ProjectPolicyDraft {
     ProjectPolicyDraft {
         team_lead_selection: TeamLeadSelectionPolicy {
@@ -218,7 +229,7 @@ fn fixture(label: &str) -> Fixture {
         "C5 fixture: Policy 1 cites charter 1"
     );
     let project = projects
-        .revise_charter(project.id, 1, project_draft().charter)
+        .revise_charter(project.id, 1, charter_draft(2))
         .unwrap();
     assert_eq!(project.charter.revision, 2, "C5 fixture: charter 2");
     let second = policies
@@ -230,7 +241,7 @@ fn fixture(label: &str) -> Fixture {
         "C5 fixture: Policy 2 cites charter 2"
     );
     let project = projects
-        .revise_charter(project.id, 2, project_draft().charter)
+        .revise_charter(project.id, 2, charter_draft(3))
         .unwrap();
     assert_eq!(
         project.charter.revision, 3,

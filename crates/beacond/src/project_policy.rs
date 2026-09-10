@@ -815,6 +815,54 @@ fn verify_one_project_policy(
     Ok(())
 }
 
+/// The latest published Policy revision of one Project, **proven against its own owning Event**.
+///
+/// Narrow and owning, not a projection accessor: it answers only the two numbers a citation needs,
+/// and it answers them only when exactly one `project.policy_published` Event exists for that
+/// revision and `verify_project_policy_event` -- the shipped validation, reused rather than
+/// re-derived -- agrees the Event and the row say the same thing. A caller cannot get an unproven
+/// revision number out of it.
+///
+/// `None` is "this Project has never published a Policy", which is a different answer from a
+/// revision that does not prove; the latter is an error.
+pub(crate) fn verified_latest_policy_citation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<(u32, u32)>, ProjectPolicyError> {
+    let Some(policy) = latest_stored_policy(connection, workspace_id, project_id)? else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'project.policy_published'
+           AND json_extract(payload_json, '$.policy.projectId') = ?2
+           AND json_extract(payload_json, '$.policy.revision') = ?3",
+    )?;
+    let owning = statement
+        .query_map(
+            params![
+                workspace_id.to_string(),
+                project_id.to_string(),
+                i64::from(policy.revision)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    // Exactly one. Zero is a row the log does not account for; more than one is two claims about
+    // one revision, and neither is something to read a citation out of.
+    let [(payload_json, occurred_at_ms)] = owning.as_slice() else {
+        return Err(ProjectPolicyError::InvalidStore);
+    };
+    verify_project_policy_event(
+        connection,
+        workspace_id,
+        nonnegative_u64(*occurred_at_ms)?,
+        payload_json,
+    )?;
+    Ok(Some((policy.revision, policy.charter_revision)))
+}
+
 pub(crate) fn verify_project_policy_event(
     connection: &Connection,
     workspace_id: Uuid,

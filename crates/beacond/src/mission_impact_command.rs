@@ -15,13 +15,21 @@
 //! and no Outcome policy changes: a classification recorded after a completion's boundary does not
 //! and must not change that completion's Outcome (R23.4).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+use data_encoding::BASE64;
+use rusqlite::{Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::mission_impact::MissionImpactClassificationV1;
+use crate::mission_impact::{
+    ClassificationActor, ClassificationBasis, ClassificationRecordError, ClassificationSupersedes,
+    ImpactLevel, MalformedClassification, MissionImpactClassification,
+    MissionImpactClassificationV1, MissionImpactClassifiedPayload, PolicyRevisionRef,
+    classify_within, verified_classification_within,
+};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 
 // ---------------------------------------------------------------------------------------------
@@ -261,8 +269,366 @@ impl MissionImpactCommandService {
         &self,
         request: ClassificationIntentRequest,
     ) -> Result<ClassificationView, ClassificationCommandError> {
-        let _ = (&self.accounts, &self.workspace_id, &request);
-        let _: Option<MissionImpactClassificationV1> = None;
-        todo!("C5.OWNER: the classification owner is not implemented yet")
+        self.accounts.with_authenticated_store(|connection, now| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let outcome = self.derive_and_record(&transaction, &request, now);
+            match outcome {
+                Ok(view) => {
+                    transaction.commit()?;
+                    Ok(Ok(view))
+                }
+                // The transaction is dropped unwritten: a refusal writes nothing.
+                Err(refusal) => Ok::<_, OperatorAccountError>(Err(refusal)),
+            }
+        })?
+    }
+
+    fn derive_and_record(
+        &self,
+        transaction: &Transaction<'_>,
+        request: &ClassificationIntentRequest,
+        now: i64,
+    ) -> Result<ClassificationView, ClassificationCommandError> {
+        // The Mission, through its OWN verified admission -- not the `missions` projection column
+        // `mission_project_of` reads. An unknown Mission and another Workspace's are one answer.
+        let mission = crate::mission::verified_mission_admission(
+            transaction,
+            self.workspace_id,
+            request.mission_id,
+        )
+        .map_err(|error| unavailable(Unprovable::MissionUnverified(format!("{error:?}"))))?
+        .ok_or_else(|| unavailable(Unprovable::MissionAbsent))?;
+
+        // The Policy citation, PROVEN against its own `project.policy_published` Event.
+        let (policy_revision, charter_revision) = crate::project_policy::
+            verified_latest_policy_citation(transaction, self.workspace_id, mission.project_id)
+            .map_err(|error| unavailable(Unprovable::PolicyBindingUnproven(format!("{error:?}"))))?
+            .ok_or(ClassificationCommandError::NoPolicyPublished)?;
+        if request.expected_policy_revision != Some(policy_revision) {
+            return Err(ClassificationCommandError::StalePolicyRevision);
+        }
+
+        // The ladder, proven before ANY of it is judged.
+        let ladder = self.proven_ladder(transaction, request.mission_id)?;
+        let (version, supersedes) = self.ladder_position(request, &ladder)?;
+
+        let record = MissionImpactClassificationV1 {
+            workspace_id: self.workspace_id,
+            mission_id: request.mission_id,
+            classification_id: Uuid::new_v4(),
+            version,
+            impact: impact_from(&request.impact)?,
+            // Fixed. ADR 0044 gives `policy_rule` a tag and no path, so there is no input for it
+            // and `rule_id` is absent by construction rather than by a caller remembering.
+            basis: ClassificationBasis::OperatorDeclared,
+            policy: PolicyRevisionRef {
+                project_id: mission.project_id,
+                policy_revision,
+                charter_revision,
+            },
+            rule_id: None,
+            reason: request.reason.clone(),
+            classified_by: ClassificationActor::Operator,
+            classified_at_ms: u64::try_from(now).map_err(|_| malformed("classifiedAtMs"))?,
+            supersedes,
+        };
+        // The codec's own grammar is the validator; its classes are PROJECTED, not flattened.
+        let bytes = record.canonical_bytes().map_err(codec_refusal)?;
+
+        let recorded = classify_within(transaction, self.workspace_id, &bytes).map_err(write_refusal)?;
+        if recorded.payload() != &record {
+            return Err(unavailable(Unprovable::WriteReadBackDisagrees));
+        }
+        // The record just written proves itself the same way every older one had to.
+        self.prove_owning_event(transaction, &recorded)?;
+        Ok(view_of(&recorded))
+    }
+
+    /// Every classification of one Mission, each proven by its bytes AND by its owning Event, in
+    /// proven-version order.
+    ///
+    /// Discovery selects candidates; it decides nothing. An unreadable row is `Unavailable`, never
+    /// an empty ladder -- collapsing those two would let a corrupt latest row turn a
+    /// reclassification into a silent "first" classification at the wrong version.
+    fn proven_ladder(
+        &self,
+        transaction: &Transaction<'_>,
+        mission_id: Uuid,
+    ) -> Result<Vec<MissionImpactClassification>, ClassificationCommandError> {
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT digest_value, version FROM mission_impact_classifications
+                 WHERE workspace_id = ?1 AND mission_id = ?2",
+            )?;
+            statement
+                .query_map(
+                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        // The stored integer domain of every candidate, before any of them is used for anything.
+        for (digest, version) in &candidates {
+            if u32::try_from(*version).ok().filter(|value| *value >= 1).is_none() {
+                return Err(unavailable(Unprovable::LadderUnprovable(format!(
+                    "{digest} carries version {version}"
+                ))));
+            }
+        }
+
+        let mut proven = Vec::with_capacity(candidates.len());
+        for (digest, _) in &candidates {
+            let record = verified_classification_within(transaction, self.workspace_id, digest)
+                .map_err(|error| {
+                    unavailable(Unprovable::LadderUnprovable(format!("{digest}: {error:?}")))
+                })?
+                .ok_or_else(|| {
+                    unavailable(Unprovable::LadderUnprovable(format!("{digest} vanished")))
+                })?;
+            self.prove_owning_event(transaction, &record)?;
+            proven.push(record);
+        }
+
+        // The OTHER direction, before anything treats this history as empty: an Event naming a
+        // classification this store does not hold is a broken history, not an absent one.
+        let known: BTreeSet<&str> = proven
+            .iter()
+            .map(|record| record.digest().value.as_str())
+            .collect();
+        let named = {
+            let mut statement = transaction.prepare(
+                "SELECT json_extract(payload_json, '$.digest.value') FROM events
+                 WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
+                   AND json_extract(payload_json, '$.missionId') = ?2",
+            )?;
+            statement
+                .query_map(
+                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for digest in named {
+            let digest = digest.ok_or_else(|| {
+                unavailable(Unprovable::OrphanClassificationEvent("no digest".to_owned()))
+            })?;
+            if !known.contains(digest.as_str()) {
+                return Err(unavailable(Unprovable::OrphanClassificationEvent(digest)));
+            }
+        }
+
+        // The order is the PROVEN payload's, not the column's.
+        proven.sort_by_key(|record| record.payload().version);
+        Ok(proven)
+    }
+
+    /// Exactly one `mission.impact_classified` Event, agreeing with the row's retained bytes and
+    /// with every selector it projects.
+    ///
+    /// `verified_classification_within` proves the row against its own bytes and does not look at
+    /// the log at all. This is the half it does not do, added at THIS command's perimeter only.
+    fn prove_owning_event(
+        &self,
+        transaction: &Transaction<'_>,
+        record: &MissionImpactClassification,
+    ) -> Result<(), ClassificationCommandError> {
+        let digest = record.digest().value.as_str();
+        let unproven = |detail: String| {
+            unavailable(Unprovable::ClassificationEventUnproven(format!(
+                "{digest}: {detail}"
+            )))
+        };
+        let payloads = {
+            let mut statement = transaction.prepare(
+                "SELECT payload_json FROM events
+                 WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
+                   AND json_extract(payload_json, '$.digest.value') = ?2",
+            )?;
+            statement
+                .query_map(
+                    rusqlite::params![self.workspace_id.to_string(), digest],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        // Zero is a row the log does not account for; more than one is two claims about one record.
+        let [payload_json] = payloads.as_slice() else {
+            return Err(unproven(format!("{} owning Events", payloads.len())));
+        };
+        let event: MissionImpactClassifiedPayload = serde_json::from_str(payload_json)
+            .map_err(|error| unproven(format!("payload: {error}")))?;
+        let bytes = BASE64
+            .decode(event.canonical_bytes_base64.as_bytes())
+            .map_err(|error| unproven(format!("retained bytes: {error}")))?;
+        if bytes != record.canonical_bytes() {
+            return Err(unproven("retained bytes disagree".to_owned()));
+        }
+        let payload = record.payload();
+        let observed = (
+            event.workspace_id.as_str(),
+            event.classification_id.as_str(),
+            event.mission_id.as_str(),
+            event.project_id.as_str(),
+            event.version,
+            event.impact.as_str(),
+            event.basis.as_str(),
+            event.policy_revision,
+            event.charter_revision,
+            event.classified_at_ms,
+        );
+        let workspace = payload.workspace_id.to_string();
+        let classification = payload.classification_id.to_string();
+        let mission = payload.mission_id.to_string();
+        let project = payload.policy.project_id.to_string();
+        let expected = (
+            workspace.as_str(),
+            classification.as_str(),
+            mission.as_str(),
+            project.as_str(),
+            payload.version,
+            payload.impact.as_str(),
+            payload.basis.as_str(),
+            payload.policy.policy_revision,
+            payload.policy.charter_revision,
+            payload.classified_at_ms,
+        );
+        if observed != expected {
+            return Err(unproven("a selector disagrees".to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Initial or reclassification, decided only from PROVEN records.
+    fn ladder_position(
+        &self,
+        request: &ClassificationIntentRequest,
+        ladder: &[MissionImpactClassification],
+    ) -> Result<(u32, ClassificationSupersedes), ClassificationCommandError> {
+        match (&request.supersedes, ladder.last()) {
+            (SupersedesDto::None, None) => Ok((1, ClassificationSupersedes::None)),
+            (SupersedesDto::None, Some(_)) => Err(ClassificationCommandError::AlreadyClassified),
+            (SupersedesDto::Record { .. }, None) => {
+                Err(ClassificationCommandError::PredecessorUnproven)
+            }
+            (SupersedesDto::Record { predecessor_digest }, Some(latest)) => {
+                let named = digest64(predecessor_digest, "supersedes.predecessorDigest")?;
+                if !ladder
+                    .iter()
+                    .any(|record| record.digest().value == named)
+                {
+                    return Err(ClassificationCommandError::PredecessorUnproven);
+                }
+                if latest.digest().value != named {
+                    return Err(ClassificationCommandError::PredecessorNotLatest);
+                }
+                // `checked_add`: wrapping would produce version 0, which no legitimate record has
+                // and which sorts below the whole ladder.
+                let next = latest
+                    .payload()
+                    .version
+                    .checked_add(1)
+                    .ok_or(ClassificationCommandError::VersionCeilingReached)?;
+                Ok((next, ClassificationSupersedes::Record(named)))
+            }
+        }
+    }
+}
+
+use ClassificationCommandUnavailable as Unprovable;
+
+fn unavailable(cause: ClassificationCommandUnavailable) -> ClassificationCommandError {
+    ClassificationCommandError::Unavailable(cause)
+}
+
+fn malformed(field: &'static str) -> ClassificationCommandError {
+    ClassificationCommandError::MalformedRequest(field)
+}
+
+fn impact_from(token: &str) -> Result<ImpactLevel, ClassificationCommandError> {
+    match token {
+        "high" => Ok(ImpactLevel::High),
+        "ordinary" => Ok(ImpactLevel::Ordinary),
+        // No third arm and no default: ADR 0044 refuses `unclassified`, and a default-to-ordinary
+        // would be omission achieving what removing `omit` from the appendix API prevented.
+        _ => Err(malformed("impact")),
+    }
+}
+
+fn digest64(value: &str, field: &'static str) -> Result<String, ClassificationCommandError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(malformed(field));
+    }
+    Ok(value.to_owned())
+}
+
+/// The codec's refusal, projected into this owner's small truthful set.
+///
+/// Every arm is the codec's own class, and only the genuinely length-shaped one reaches a
+/// length-shaped caller line.
+fn codec_refusal(refusal: MalformedClassification) -> ClassificationCommandError {
+    match refusal {
+        MalformedClassification::TextTooLong => ClassificationCommandError::TextOverLimit,
+        MalformedClassification::EmptyText => malformed("reason.empty"),
+        MalformedClassification::UntrimmedText => malformed("reason.untrimmed"),
+        MalformedClassification::ControlCharacter => malformed("reason.control"),
+        MalformedClassification::SupersedesDigest => malformed("supersedes.predecessorDigest"),
+        MalformedClassification::Revision => malformed("policy.revision"),
+        MalformedClassification::RuleId | MalformedClassification::RuleIdBasisMismatch => {
+            malformed("basis.ruleId")
+        }
+        MalformedClassification::OverLimitLength => malformed("record.overLimit"),
+        MalformedClassification::RecordTooLarge => malformed("record.tooLarge"),
+        MalformedClassification::Magic
+        | MalformedClassification::Truncated
+        | MalformedClassification::TrailingBytes
+        | MalformedClassification::UnknownTag
+        | MalformedClassification::InvalidUtf8 => malformed("canonical_bytes"),
+    }
+}
+
+/// The store writer's refusal, projected. Its account arm keeps its own meaning; its malformed arm
+/// goes back through the codec projection so one class cannot get two caller lines.
+fn write_refusal(refusal: ClassificationRecordError) -> ClassificationCommandError {
+    match refusal {
+        ClassificationRecordError::Account(error) => ClassificationCommandError::Account(error),
+        ClassificationRecordError::Malformed(class) => codec_refusal(class),
+        other => unavailable(Unprovable::Write(format!("{other:?}"))),
+    }
+}
+
+fn view_of(record: &MissionImpactClassification) -> ClassificationView {
+    let payload = record.payload();
+    ClassificationView {
+        mission_id: payload.mission_id,
+        classification_id: payload.classification_id,
+        version: payload.version,
+        impact: payload.impact.as_str().to_owned(),
+        basis: payload.basis.as_str().to_owned(),
+        reason: payload.reason.clone(),
+        policy: PolicyCitationDto {
+            project_id: payload.policy.project_id,
+            policy_revision: payload.policy.policy_revision,
+            charter_revision: payload.policy.charter_revision,
+        },
+        classified_by: match payload.classified_by {
+            ClassificationActor::Operator => "operator".to_owned(),
+        },
+        classified_at_ms: payload.classified_at_ms,
+        supersedes: match &payload.supersedes {
+            ClassificationSupersedes::None => SupersedesDto::None,
+            ClassificationSupersedes::Record(digest) => SupersedesDto::Record {
+                predecessor_digest: digest.clone(),
+            },
+        },
+        digest: ClassificationDigestDto {
+            algorithm: record.digest().algorithm.clone(),
+            canonicalizer: record.digest().canonicalizer.clone(),
+            value: record.digest().value.clone(),
+        },
     }
 }
