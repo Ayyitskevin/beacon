@@ -8,15 +8,16 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CompletionView, ExportedOutcome,
-    LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
-    LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
-    MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CompletionIntentRequest,
+    CompletionPreview, CompletionView, ExportedOutcome, LiveDataEncryptionReport,
+    LocalErrorCode, LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
+    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
     PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectPolicy,
     ProjectPolicyDraft, ProjectRepository, ProjectSummary, ProjectView, ProviderFeature,
     PublicationSummary, RecentReceiptPage, RepositoryDraft, ResidentAgentView,
-    ResidentConfiguration, SampleProjectInstallResult, SampleProjectStatus, SecretString,
-    StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
+    ResidentConfiguration, ReviewedIntent, SampleProjectInstallResult, SampleProjectStatus,
+    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
     initialize_local_auth_token,
 };
 use serde::Serialize;
@@ -513,8 +514,74 @@ impl From<LocalTransportError> for CommandError {
                 "A Team member is no longer eligible for Mission admission.",
                 None,
             ),
-            // The one generic unavailable answer for a completion read. Existing typed session and
-            // authentication errors are matched earlier and keep their own semantics.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionIntentChanged,
+                ..
+            } => (
+                "completion_intent_changed",
+                "The reviewed details changed. Review the completion again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionAlreadyRecorded,
+                ..
+            } => (
+                "completion_already_recorded",
+                "A completion is already recorded for this Mission. Read the recorded completion.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionResidentNotInAdmissionRoster,
+                ..
+            } => (
+                "completion_resident_not_in_admission_roster",
+                "Choose a Resident admitted to this Mission.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionConditionCoverageIncomplete,
+                ..
+            } => (
+                "completion_condition_coverage_incomplete",
+                "Assess every declared condition explicitly.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionSupportOverLimit,
+                ..
+            } => (
+                "completion_support_over_limit",
+                "This condition cites more support than a completion can record.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionTextOverLimit,
+                ..
+            } => (
+                "completion_text_over_limit",
+                "Some completion text exceeds the supported length.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionSpendReasonRequired,
+                ..
+            } => (
+                "completion_spend_reason_required",
+                "Explain why spend was not measured.",
+                None,
+            ),
+            // A malformed identity, digest, tag or integer, or the same entry twice in a set. It is
+            // NOT a length problem and must never be shown as one.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionInvalidDetails,
+                ..
+            } => (
+                "completion_invalid_details",
+                "Some completion details are invalid. Review the completion again.",
+                None,
+            ),
+            // The one generic unavailable answer for a completion read OR write. Existing typed
+            // session and authentication errors are matched earlier and keep their own semantics.
             LocalTransportError::Remote {
                 code: LocalErrorCode::MissionCompletionUnavailable,
                 ..
@@ -997,6 +1064,46 @@ fn get_mission_completion_value(
         .map_err(Into::into)
 }
 
+/// Derive the completion the Operator would record, and its reviewed-intent token. Writes nothing.
+///
+/// The request crosses unchanged: this adapter does not validate a field the owner owns, does not
+/// rebuild a record, and does not read anything back out of the preview.
+fn preview_mission_completion_value(
+    state: &DesktopState,
+    request: CompletionIntentRequest,
+) -> Result<CompletionPreview, CommandError> {
+    state
+        .supervisor
+        .preview_mission_completion(request)
+        .map_err(Into::into)
+}
+
+/// Record the reviewed completion. The reviewed token is forwarded exactly as reviewed.
+fn record_mission_completion_value(
+    state: &DesktopState,
+    request: CompletionIntentRequest,
+    reviewed_intent_sha256: String,
+) -> Result<ReviewedIntent, CommandError> {
+    state
+        .supervisor
+        .record_mission_completion(request, reviewed_intent_sha256)
+        .map_err(Into::into)
+}
+
+/// The token of the completion visible for this Mission in one snapshot, or `null`.
+///
+/// `null` is "nothing visible in this snapshot", never a substitute for a read that could not be
+/// verified.
+fn get_mission_completion_intent_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<Option<ReviewedIntent>, CommandError> {
+    state
+        .supervisor
+        .get_mission_completion_intent(mission_id)
+        .map_err(Into::into)
+}
+
 fn mission_value(
     state: &DesktopState,
     mission_id: uuid::Uuid,
@@ -1462,6 +1569,31 @@ fn get_mission_completion(
 }
 
 #[tauri::command]
+fn preview_mission_completion(
+    state: State<'_, DesktopState>,
+    request: CompletionIntentRequest,
+) -> Result<CompletionPreview, CommandError> {
+    preview_mission_completion_value(&state, request)
+}
+
+#[tauri::command]
+fn record_mission_completion(
+    state: State<'_, DesktopState>,
+    request: CompletionIntentRequest,
+    reviewed_intent_sha256: String,
+) -> Result<ReviewedIntent, CommandError> {
+    record_mission_completion_value(&state, request, reviewed_intent_sha256)
+}
+
+#[tauri::command]
+fn get_mission_completion_intent(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<Option<ReviewedIntent>, CommandError> {
+    get_mission_completion_intent_value(&state, mission_id)
+}
+
+#[tauri::command]
 fn mission(
     state: State<'_, DesktopState>,
     mission_id: uuid::Uuid,
@@ -1774,6 +1906,9 @@ pub fn run() {
             form_team,
             missions,
             get_mission_completion,
+            preview_mission_completion,
+            record_mission_completion,
+            get_mission_completion_intent,
             mission,
             admit_mission,
             mission_publications,
