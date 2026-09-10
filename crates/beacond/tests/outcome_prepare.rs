@@ -158,6 +158,10 @@ fn serve_ollama_inspections(count: usize) -> (SocketAddr, JoinHandle<()>) {
 /// A Workspace with one Project, one published Policy revision, and one admitted Mission whose
 /// roster holds two Residents at their exact admission Configurations.
 fn admitted_mission(label: &str) -> Fixture {
+    admitted_mission_with_members(label, 2)
+}
+
+fn admitted_mission_with_members(label: &str, member_count: usize) -> Fixture {
     let store = TestStore::new(label);
     let report = Supervisor::bootstrap(StartupConfig {
         store_path: store.path.clone(),
@@ -177,7 +181,7 @@ fn admitted_mission(label: &str) -> Fixture {
         OperatorSessionPhase::Unlocked
     );
 
-    let admitted = admit_mission_in(&accounts, workspace_id);
+    let admitted = admit_mission_in_with_members(&accounts, workspace_id, member_count);
     Fixture {
         outcomes: OutcomeService::new(Arc::clone(&accounts), workspace_id),
         store,
@@ -211,6 +215,15 @@ struct AdmittedMission {
 }
 
 fn admit_mission_in(accounts: &Arc<OperatorAccountService>, workspace_id: Uuid) -> AdmittedMission {
+    admit_mission_in_with_members(accounts, workspace_id, 2)
+}
+
+fn admit_mission_in_with_members(
+    accounts: &Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+    member_count: usize,
+) -> AdmittedMission {
+    assert!((1..=2).contains(&member_count));
     let accounts = Arc::clone(accounts);
     let project = ProjectService::new(Arc::clone(&accounts), workspace_id)
         .create(ProjectDraft {
@@ -304,6 +317,7 @@ fn admit_mission_in(accounts: &Arc<OperatorAccountService>, workspace_id: Uuid) 
             name: "Mission Team".to_owned(),
             members: configurations
                 .iter()
+                .take(member_count)
                 .map(|configuration| TeamMemberDraft {
                     resident_id: configuration.resident_id,
                     expected_configuration_id: configuration.id,
@@ -322,6 +336,7 @@ fn admit_mission_in(accounts: &Arc<OperatorAccountService>, workspace_id: Uuid) 
             prohibitions: vec!["Do not deploy".to_owned()],
             members: configurations
                 .iter()
+                .take(member_count)
                 .map(|configuration| MissionMemberDraft {
                     resident_id: configuration.resident_id,
                     expected_configuration_id: configuration.id,
@@ -8532,4 +8547,351 @@ fn the_unreachable_r39_sites_are_recorded_rather_than_barred() {
         matches!(checked_first, SupervisorError::ForeignKeyViolations(_)),
         "the foreign-key check no longer refuses first: {checked_first:?}"
     );
+}
+
+mod candidate_evaluation {
+    use super::*;
+    use beacond::CandidateEvaluationService;
+
+    fn record_counts(fixture: &Fixture) -> Vec<i64> {
+        let connection = fixture.store.connect();
+        [
+            "events",
+            "runs",
+            "receipts",
+            "evaluations",
+            "artifacts",
+            "outcome_manifests",
+            "model_invocations",
+        ]
+        .iter()
+        .map(|table| {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn context_holds_exact_candidate_and_non_author_admission_without_writes() {
+        let fixture = admitted_mission("evaluation-context-exact");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let held_manifest = fixture
+            .outcomes
+            .manifest(&candidate.manifest_digest)
+            .unwrap();
+        let held_artifact = fixture
+            .outcomes
+            .candidate(&candidate.manifest_digest)
+            .unwrap();
+        let held_mission = MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .get(fixture.mission_id)
+            .unwrap();
+        let before = record_counts(&fixture);
+
+        let context =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .context(&candidate.manifest_digest)
+                .unwrap()
+                .expect("the prepared candidate has a historical evaluation context");
+
+        assert_eq!(context.manifest(), &held_manifest);
+        assert_eq!(context.candidate(), &held_artifact);
+        assert_eq!(context.mission_admission(), &held_mission);
+        assert_eq!(
+            context.admitted_non_author_residents(),
+            &[Evaluator {
+                resident_id: fixture.other_resident_id,
+                configuration_id: fixture.other_configuration_id,
+            }],
+            "B15.CONTEXT.EXACT_NON_AUTHOR_ADMISSION"
+        );
+        assert_eq!(
+            record_counts(&fixture),
+            before,
+            "B15.CONTEXT.READ_WRITES_NOTHING"
+        );
+    }
+
+    #[test]
+    fn later_author_reconfiguration_preserves_historical_non_author_context() {
+        let fixture = admitted_mission("evaluation-context-author");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let second = fixture.second_configuration_for_author();
+        assert_ne!(second, fixture.configuration_id);
+
+        let context =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .context(&candidate.manifest_digest)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            context.admitted_non_author_residents(),
+            &[Evaluator {
+                resident_id: fixture.other_resident_id,
+                configuration_id: fixture.other_configuration_id,
+            }],
+            "B15.CONTEXT.HISTORICAL_AUTHOR_CONFIGURATION_PRESERVED"
+        );
+        assert_eq!(
+            context.mission_admission().members[0].admission_configuration_id,
+            fixture.configuration_id,
+            "historical author configuration stays admitted"
+        );
+    }
+
+    #[test]
+    fn absent_and_foreign_manifest_are_indistinguishable_but_broken_proof_refuses() {
+        let fixture = admitted_mission("evaluation-context-opacity");
+        fixture.classify(ImpactLevel::Ordinary);
+        let (completion_digest, _) =
+            fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let service =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let foreign_scope =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), Uuid::new_v4());
+        assert_eq!(
+            service.context(&"ff".repeat(32)).unwrap(),
+            foreign_scope.context(&candidate.manifest_digest).unwrap(),
+            "B15.CONTEXT.ABSENT_FOREIGN_OPACITY"
+        );
+        assert!(service.context(&"ff".repeat(32)).unwrap().is_none());
+        assert!(
+            service
+                .context(&candidate.manifest_digest)
+                .unwrap()
+                .is_some()
+        );
+        let changed = fixture
+            .store
+            .connect()
+            .execute(
+                "DELETE FROM events WHERE kind = 'mission.completed'
+             AND json_extract(payload_json, '$.digestValue') = ?1",
+                params![completion_digest],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        fixture
+            .outcomes
+            .manifest(&candidate.manifest_digest)
+            .expect(
+                "the lighter byte/candidate reader still succeeds without the completion Event",
+            );
+        assert!(
+            matches!(
+                service.context(&candidate.manifest_digest),
+                Err(beacond::CandidateEvaluationError::Manifest(_))
+            ),
+            "B15.CONTEXT.BROKEN_OWNER_IS_NOT_ABSENT"
+        );
+    }
+
+    #[test]
+    fn later_team_or_configuration_cannot_repair_historical_admission() {
+        let fixture = admitted_mission_with_members("evaluation-context-historical", 1);
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let service =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let before = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        assert!(before.admitted_non_author_residents().is_empty());
+        let new_author_configuration = fixture.second_configuration_for_author();
+        TeamService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .form(TeamDraft {
+                project_id: fixture.project_id,
+                name: "Later reviewer team".to_owned(),
+                members: vec![
+                    TeamMemberDraft {
+                        resident_id: fixture.resident_id,
+                        expected_configuration_id: new_author_configuration,
+                    },
+                    TeamMemberDraft {
+                        resident_id: fixture.other_resident_id,
+                        expected_configuration_id: fixture.other_configuration_id,
+                    },
+                ],
+            })
+            .unwrap();
+        let after = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.mission_admission(), before.mission_admission());
+        assert_eq!(after.mission_admission().members.len(), 1);
+        assert!(
+            after.admitted_non_author_residents().is_empty(),
+            "B15.CONTEXT.LATER_TEAM_CANNOT_REPAIR_ADMISSION"
+        );
+    }
+
+    #[test]
+    fn oversized_selected_artifact_refuses_before_owner_decode() {
+        let fixture = admitted_mission("evaluation-context-artifact-cap");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        with_trigger_down(
+            &fixture.store,
+            "artifacts_no_update",
+            "artifacts",
+            "Artifacts are immutable",
+            |connection| {
+                connection
+                    .execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .unwrap();
+                assert_eq!(connection.execute(
+                "UPDATE artifacts SET canonical_bytes = zeroblob(4097) WHERE digest_value = ?1",
+                params![candidate.candidate_artifact_digest],
+            ).unwrap(), 1);
+            },
+        );
+        let refusal =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .context(&candidate.manifest_digest)
+                .expect_err("the selected record exceeds the read-owned cap");
+        assert_eq!(
+            refusal.name(),
+            "ReadLimit",
+            "B15.CONTEXT.BOUND_BEFORE_DECODE"
+        );
+    }
+
+    #[test]
+    fn public_errors_keep_nested_details_out_of_fixed_display() {
+        use beacond::CandidateEvaluationError as Error;
+        let private = "nested-private-driver-detail";
+        let driver = || rusqlite::Error::InvalidParameterName(private.to_owned());
+        let cases = [
+            (
+                Error::Account(OperatorAccountError::Store(driver())),
+                "Account",
+                true,
+            ),
+            (Error::InvalidManifestDigest, "InvalidManifestDigest", false),
+            (Error::ReadLimit, "ReadLimit", false),
+            (
+                Error::Artifact(ArtifactError::Store(driver())),
+                "Artifact",
+                true,
+            ),
+            (
+                Error::Manifest(ManifestStoreRefusal::Irreconcilable {
+                    detail: private.to_owned(),
+                }),
+                "Manifest",
+                true,
+            ),
+            (
+                Error::Mission(MissionError::Store(driver())),
+                "Mission",
+                true,
+            ),
+            (Error::MissionAbsent, "MissionAbsent", false),
+            (Error::ScopeMismatch, "ScopeMismatch", false),
+            (Error::Store(driver()), "Store", true),
+        ];
+        for (error, expected, carries_details) in cases {
+            // Independent literals above, and an exhaustive match: a new public arm needs a case.
+            let expected_by_arm = match &error {
+                Error::Account(_) => "Account",
+                Error::InvalidManifestDigest => "InvalidManifestDigest",
+                Error::ReadLimit => "ReadLimit",
+                Error::Artifact(_) => "Artifact",
+                Error::Manifest(_) => "Manifest",
+                Error::Mission(_) => "Mission",
+                Error::MissionAbsent => "MissionAbsent",
+                Error::ScopeMismatch => "ScopeMismatch",
+                Error::Store(_) => "Store",
+            };
+            assert_eq!(expected, expected_by_arm);
+            assert_eq!(error.name(), expected);
+            assert_eq!(
+                error.to_string(),
+                expected,
+                "B15.CONTEXT.CLOSED_ERROR_DISPLAY"
+            );
+            assert_eq!(format!("{error:?}").contains(private), carries_details);
+            assert_eq!(std::error::Error::source(&error).is_some(), carries_details);
+        }
+    }
+
+    #[test]
+    fn authentication_precedes_selector_details_and_draft_is_explicit() {
+        let fixture = admitted_mission("evaluation-context-auth");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let service =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        assert_eq!(
+            service.context("malformed").unwrap_err().name(),
+            "InvalidManifestDigest"
+        );
+        let context = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            context.current_eligibility(),
+            beacond::CurrentEvaluationEligibility::NotMeasured
+        );
+        assert_eq!(
+            context.source_packet(),
+            beacond::EvaluationSourcePacket::NotCollected
+        );
+        assert_eq!(context.rubric().id(), "outcome-fidelity-draft");
+        assert_eq!(context.rubric().version(), 1);
+        let rubric = std::str::from_utf8(context.rubric().bytes()).unwrap();
+        for criterion in [
+            "completion_fidelity:",
+            "evidence_fidelity:",
+            "honesty_states:",
+            "limitations_and_authority:",
+        ] {
+            assert_eq!(rubric.matches(criterion).count(), 1);
+        }
+        fixture.accounts.lock().unwrap();
+        for selector in ["malformed", candidate.manifest_digest.as_str()] {
+            assert!(
+                matches!(
+                    service.context(selector),
+                    Err(beacond::CandidateEvaluationError::Account(
+                        OperatorAccountError::NotAuthenticated
+                    ))
+                ),
+                "B15.CONTEXT.AUTHENTICATION_FIRST"
+            );
+        }
+    }
 }

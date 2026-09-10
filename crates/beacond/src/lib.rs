@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod artifact;
 mod candidate;
+mod candidate_evaluation;
 mod check_preflight;
 mod declared_checks;
 #[cfg(unix)]
@@ -61,6 +62,10 @@ mod worktree;
 #[cfg(unix)]
 mod local_transport;
 
+pub use candidate_evaluation::{
+    CandidateEvaluationContext, CandidateEvaluationError, CandidateEvaluationService,
+    CurrentEvaluationEligibility, EvaluationSourcePacket, ProposedOutcomeFidelityRubric,
+};
 pub use check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt, Recorded,
     ResolvedCheck, UnavailableEvidence, enumerate_runs,

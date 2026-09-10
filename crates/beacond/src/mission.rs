@@ -925,6 +925,47 @@ pub(crate) fn verified_mission_declaration(
     )
 }
 
+/// Bound the directly selected historical context before its admission reader allocates it.
+/// This is not an admission proof. Call the owning verified reader in the same snapshot afterward.
+/// Other owners reached during manifest reconciliation retain their existing allocation behavior.
+pub(crate) fn mission_within_context_read_limits(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<bool, MissionError> {
+    let text_bytes: (i64, i64, i64, i64) = connection.query_row(
+        "SELECT coalesce(max(length(CAST(desired_outcome AS BLOB))), 0),
+                coalesce(max(length(CAST(success_conditions_json AS BLOB))), 0),
+                coalesce(max(length(CAST(constraints_json AS BLOB))), 0),
+                coalesce(max(length(CAST(prohibitions_json AS BLOB))), 0)
+         FROM missions WHERE workspace_id = ?1 AND id = ?2",
+        params![workspace_id.to_string(), mission_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let (members, resident_bytes, configuration_bytes): (i64, i64, i64) = connection.query_row(
+        "SELECT count(*), coalesce(max(length(CAST(resident_id AS BLOB))), 0),
+                coalesce(max(length(CAST(configuration_id AS BLOB))), 0)
+         FROM mission_admission_members WHERE workspace_id = ?1 AND mission_id = ?2",
+        params![workspace_id.to_string(), mission_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (events, event_bytes): (i64, i64) = connection.query_row(
+        "SELECT count(*), coalesce(max(length(CAST(payload_json AS BLOB))), 0) FROM events
+         WHERE workspace_id = ?1 AND kind = 'mission.admitted'
+           AND json_extract(payload_json, '$.mission.id') = ?2",
+        params![workspace_id.to_string(), mission_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok([text_bytes.0, text_bytes.1, text_bytes.2, text_bytes.3]
+        .into_iter()
+        .all(|bytes| bytes <= 64 * 1024)
+        && members <= 256
+        && resident_bytes <= 36
+        && configuration_bytes <= 36
+        && events <= 1
+        && event_bytes <= 1024 * 1024)
+}
+
 /// The COMPLETE admitted Mission, proved the way startup proves it.
 ///
 /// The stored row must equal the one `mission.admitted` Event payload that recorded it, whole --

@@ -1083,6 +1083,38 @@ fn paired_event_sequence(
     nonnegative_u64(sequence)
 }
 
+/// Preflight the directly selected context Artifact before its owning reader transfers blobs.
+/// This does not verify the Artifact; the caller must still use the verified owner in the same
+/// snapshot. The Event byte cap is a read-allocation bound, not a resource or inference budget.
+pub(crate) fn artifact_within_context_read_limits(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<bool, ArtifactError> {
+    let lengths: Option<(i64, i64)> = connection
+        .query_row(
+            "SELECT length(canonical_bytes), length(content_inline) FROM artifacts
+         WHERE workspace_id = ?1 AND digest_value = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((canonical_bytes, content_bytes)) = lengths
+        && (canonical_bytes > MAX_CANONICAL_BYTES as i64
+            || content_bytes > MAX_CONTENT_BYTES as i64)
+    {
+        return Ok(false);
+    }
+    let (events, event_bytes): (i64, i64) = connection.query_row(
+        "SELECT count(*), coalesce(max(length(CAST(payload_json AS BLOB))), 0) FROM events
+         WHERE workspace_id = ?1 AND kind = 'artifact.recorded'
+           AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
+        params![workspace_id.to_string(), digest_value],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(events <= 1 && event_bytes <= 64 * 1024)
+}
+
 /// One stored Artifact, fully proved, inside the caller's transaction.
 ///
 /// Returns `Ok(None)` when this Workspace has no such Artifact -- a different fact from one that
