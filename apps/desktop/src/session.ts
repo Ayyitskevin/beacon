@@ -1917,6 +1917,132 @@ export async function prepareOutcomeCandidate(request: {
   return value;
 }
 
+/** The eight fields of C7's candidate document read. Metadata plus the exact stored bytes, base64
+ *  encoded; no flag, no status, no appendix mode and no inferred "current" candidate. */
+export type OutcomeCandidateDocument = {
+  missionId: string;
+  manifestId: string;
+  manifestDigest: OutcomeDigestValue;
+  candidateArtifactDigest: OutcomeDigestValue;
+  candidateContentDigest: OutcomeDigestValue;
+  candidateContentBytes: number;
+  mediaType: string;
+  candidateContentBase64: string;
+};
+
+/** The decoded document, beside the reply it came from. The text is produced ONCE, under fatal
+ *  decoding, and never re-derived by a caller. */
+export type ReadCandidateDocument = {
+  document: OutcomeCandidateDocument;
+  text: string;
+};
+
+/** `4 * ceil(MAX_CANDIDATE_CONTENT_BYTES / 3)`. Checked BEFORE decoding: a bound that exists to
+ *  prevent an allocation has to run before the allocation. */
+const MAX_CANDIDATE_BASE64_LENGTH = 1_398_104;
+
+/** Canonical base64, strictly: the standard alphabet, correct padding, and no over-long
+ *  representation. The last significant character of a padded group carries unused low bits, and
+ *  two encodings that differ only there decode to the same bytes -- so accepting both would let one
+ *  document have two encodings, which is exactly what a content-addressed record must not have. */
+function isCanonicalBase64(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length > MAX_CANDIDATE_BASE64_LENGTH) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if (value.endsWith("==")) {
+    // 12 bits carried, 8 used: the second character's low FOUR bits must be zero.
+    return (alphabet.indexOf(value[value.length - 3]) & 0b1111) === 0;
+  }
+  if (value.endsWith("=")) {
+    // 18 bits carried, 16 used: the third character's low TWO bits must be zero.
+    return (alphabet.indexOf(value[value.length - 2]) & 0b11) === 0;
+  }
+  return true;
+}
+
+function isOutcomeCandidateDocument(value: unknown): value is OutcomeCandidateDocument {
+  if (
+    !hasExactKeys(value, [
+      "candidateArtifactDigest",
+      "candidateContentBase64",
+      "candidateContentBytes",
+      "candidateContentDigest",
+      "manifestDigest",
+      "manifestId",
+      "mediaType",
+      "missionId",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.manifestId)) return false;
+  if (!isOutcomeDigest(value.manifestDigest, "beacon.outcome.manifest.v2")) return false;
+  if (!isOutcomeDigest(value.candidateArtifactDigest, "beacon.artifact.v1")) return false;
+  if (!isOutcomeDigest(value.candidateContentDigest, "beacon.raw.v1")) return false;
+  if (!isNonnegativeInteger(value.candidateContentBytes)) return false;
+  if (value.candidateContentBytes > MAX_CANDIDATE_CONTENT_BYTES) return false;
+  if (value.mediaType !== CANDIDATE_MEDIA_TYPE) return false;
+  return isCanonicalBase64(value.candidateContentBase64);
+}
+
+function sameDigest(left: OutcomeDigestValue, right: OutcomeDigestValue): boolean {
+  return (
+    left.algorithm === right.algorithm &&
+    left.canonicalizer === right.canonicalizer &&
+    left.value === right.value
+  );
+}
+
+/** Read the exact stored text of the candidate this receipt names.
+ *
+ *  The native receives ONE value -- the held manifest digest's hex -- and the whole held receipt is
+ *  passed here so every expectation is the RECEIPT's, never the reply's. A reply that answers a
+ *  different Mission, manifest, Artifact, content or size is refused before anything is displayed.
+ *
+ *  Decoding is fatal and happens once: a replacement character would be a byte this client invented,
+ *  and a document is its bytes. The BOM, if the stored text has one, is PRESERVED
+ *  (`ignoreBOM: true` means "do not strip it"), and nothing here trims, normalises newlines or
+ *  otherwise edits what was stored.
+ *
+ *  This function does not re-hash anything: the owner verifies the digest/content relationship, and
+ *  restating that here without implementing it would be a claim this client cannot make.
+ *
+ *  MOCKED CONTRACT, precisely: the OWNERS exist -- `OutcomeService::manifest` and
+ *  `OutcomeService::candidate` already read and verify these records. What is missing is the ROUTE:
+ *  there is no `read_outcome_candidate_document` LocalCommand and no native command yet. */
+export async function readOutcomeCandidateDocument(
+  held: PreparedOutcomeCandidate,
+): Promise<ReadCandidateDocument> {
+  const document = await invokeAndValidate(
+    "read_outcome_candidate_document",
+    { manifestDigest: held.manifestDigest.value },
+    isOutcomeCandidateDocument,
+    "Outcome candidate document",
+  );
+  if (
+    document.missionId !== held.missionId ||
+    document.manifestId !== held.manifestId ||
+    !sameDigest(document.manifestDigest, held.manifestDigest) ||
+    !sameDigest(document.candidateArtifactDigest, held.candidateArtifactDigest) ||
+    !sameDigest(document.candidateContentDigest, held.candidateContentDigest) ||
+    document.candidateContentBytes !== held.candidateContentBytes ||
+    document.mediaType !== held.mediaType
+  ) {
+    throw new Error("Beacon received an invalid Outcome candidate document.");
+  }
+
+  const encoded = document.candidateContentBase64;
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  if (bytes.length !== held.candidateContentBytes || bytes.length > MAX_CANDIDATE_CONTENT_BYTES) {
+    throw new Error("Beacon received an invalid Outcome candidate document.");
+  }
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  return { document, text };
+}
+
 async function invokeAndValidate<T>(
   command: string,
   argumentsValue: Record<string, unknown> | undefined,

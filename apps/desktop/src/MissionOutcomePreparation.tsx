@@ -1,6 +1,7 @@
 import { Button, Field, Radio, RadioGroup, makeStyles, tokens } from "@fluentui/react-components";
 import { useEffect, useId, useRef, useState } from "react";
 
+import { OutcomeCandidateDocument } from "./OutcomeCandidateDocument";
 import {
   type AppendixRequest,
   type PreparedOutcomeCandidate,
@@ -68,7 +69,8 @@ const CODE_COPY: Record<string, string> = {
  *
  *  Two families are definite. This surface's three sequencing refusals: the owner decides each of
  *  them before it assembles or writes anything. And the session gate: these stop the request before
- *  it reaches the owner at all, so no candidate could exist.
+ *  it reaches the owner at all, so THIS ATTEMPT cannot have recorded a candidate. That is not a
+ *  claim that no candidate exists: an earlier preparation may already have written one.
  *
  *  Everything else is UNKNOWN, deliberately: `outcome_preparation_unavailable` is one outward code
  *  over several owner causes and the contract puts a failed post-commit read behind it;
@@ -239,9 +241,11 @@ export function MissionOutcomePreparation({ missionId }: { missionId: string }):
           <p className={styles.body}>
             Outcome candidate prepared. Preparing does not evaluate or publish it.
           </p>
-          <p className={styles.body}>
-            The candidate is prepared, but this screen cannot display its document yet.
-          </p>
+          {/* C7 replaced the temporary "this screen cannot display its document yet" line. Keeping
+              it beside a working View control would be false. The child gets the HELD receipt as a
+              prop -- it never parses this panel's DOM for an identity -- and it runs nothing until
+              the Operator clicks. */}
+          <OutcomeCandidateDocument receipt={receipt} />
           <ul className={styles.identities}>
             <li>
               <span>{`Appendix: ${REQUEST_LABEL[receipt.appendixRequest]} — ${MODE_LABEL[receipt.appendixMode]}.`}</span>

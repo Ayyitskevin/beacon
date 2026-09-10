@@ -63,7 +63,10 @@ it("C6.PREPARE.THE_HUMAN_CHOICE_IS_SENT: an explicit appendix choice reaches the
 
 const UNKNOWN_COPY =
   "Beacon could not confirm whether the candidate was prepared. No automatic retry was made. You may explicitly prepare again with the same appendix choice.";
-const LIMIT_COPY = "The candidate is prepared, but this screen cannot display its document yet.";
+// The marker for "a receipt is on screen". C7 deliberately replaced the temporary limit sentence
+// with the candidate-document child, whose neutral line appears exactly when a receipt is shown and
+// nothing has been read. The six assertions below keep their original meaning; only the string moved.
+const LIMIT_COPY = "Candidate document is not loaded.";
 
 async function chooseAndPrepare(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
   await user.click(screen.getByRole("radio", { name: label }));
