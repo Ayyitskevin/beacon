@@ -930,3 +930,122 @@ it("refuses an alien nested record by its own independent literal", async () => 
     "C5S.READ.AN_ALIEN_NESTED_MISSION_OFFERS_NO_FORM",
   ).toBeNull();
 });
+
+/* Root's fold-2 probe, ADOPTED VERBATIM from `R13/astra-c5-failed-refresh-probe.tsx`: the failed-
+   refresh branch of "no form on unreadable refresh". Its siblings follow. */
+it("astra_c5_a_failed_refusal_refresh_never_silently_reopens_stale_intent", async () => {
+  const { user } = await submitWith(() => Promise.reject({ code: "classification_stale_policy_revision" }));
+  await screen.findByText("The Project Policy changed. Review the Policy and classify again.");
+  invokeMock.mockImplementation((command) => command === "get_mission_classification"
+    ? Promise.reject({ code: "mission_classification_unavailable" })
+    : Promise.reject(new Error("unexpected write")));
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+  expect(document.body.textContent ?? "", "C5.ASTRA.FAILED_REFRESH_IS_VISIBLE")
+    .toContain("The Mission classification could not be verified.");
+  const action = screen.queryByRole("button", { name: "Record classification" });
+  expect(action === null || action.hasAttribute("disabled"),
+    "C5.ASTRA.FAILED_REFRESH_DOES_NOT_AUTHORIZE_STALE_INTENT").toBe(true);
+});
+
+it("shows the refresh as pending and authorizes no write while it is in flight", async () => {
+  const { user } = await submitWith(() =>
+    Promise.reject({ code: "classification_stale_policy_revision" }),
+  );
+  await screen.findByText("The Project Policy changed. Review the Policy and classify again.");
+  invokeMock.mockImplementation((command) =>
+    command === "get_mission_classification"
+      ? new Promise(() => {})
+      : Promise.reject(new Error("unexpected write")),
+  );
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+
+  expect(
+    await screen.findByText("Reading the classification"),
+    "C5S.REFRESH.PENDING_IS_VISIBLE_ON_BOTH_PATHS",
+  ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Record classification" }),
+    "C5S.REFRESH.NO_WRITE_WHILE_A_FRESH_OBSERVATION_IS_PENDING",
+  ).toBeDisabled();
+});
+
+it("lets the Operator retry a failed refresh, and only then accepts a new intent", async () => {
+  const writes: unknown[] = [];
+  const fresher = record({ version: 6, digestValue: "a".repeat(64), policyRevision: 11 });
+  const { user } = await submitWith((args) => {
+    writes.push(args);
+    return writes.length === 1
+      ? Promise.reject({ code: "classification_stale_policy_revision" })
+      : new Promise(() => {});
+  });
+  await screen.findByText("The Project Policy changed. Review the Policy and classify again.");
+
+  let reads = 0;
+  invokeMock.mockImplementation((command, args) => {
+    // The classify branch CAPTURES the second attempt: this test is about what that attempt names.
+    if (command !== "get_mission_classification") {
+      writes.push(args);
+      return new Promise(() => {});
+    }
+    reads += 1;
+    return reads === 1
+      ? Promise.reject({ code: "mission_classification_unavailable" })
+      : Promise.resolve(observation({ publishedPolicy: policy(11, 2), latest: fresher }));
+  });
+
+  // The failed read is visible, and the control that failed is the control that retries.
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+  await screen.findByText("The Mission classification could not be verified.");
+  expect(
+    screen.getByRole("button", { name: "Record classification" }),
+    "C5S.REFRESH.A_FAILED_REFRESH_AUTHORIZES_NOTHING",
+  ).toBeDisabled();
+
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+  await screen.findByText(/Recorded Ordinary impact, version 6/);
+  expect(reads, "C5S.REFRESH.THE_RETRY_IS_ONE_MORE_READ").toBe(2);
+  await choose(user, "Impact", "High");
+  const again = screen.getByRole("button", { name: "Record classification" });
+  expect(again, "C5S.REFRESH.A_SUCCESSFUL_REFRESH_REOPENS_THE_JUDGMENT").toBeEnabled();
+  await user.click(again);
+
+  expect(
+    (writes[1] as { request: { supersedes: unknown; expectedPolicyRevision: number } }).request,
+    "C5S.REFRESH.THE_NEW_INTENT_NAMES_THE_LAST_SUCCESSFUL_OBSERVATION",
+  ).toMatchObject({
+    supersedes: { kind: "record", predecessorDigest: "a".repeat(64) },
+    expectedPolicyRevision: 11,
+  });
+});
+
+it("keeps an unknown attempt unknown when its read fails", async () => {
+  const { user } = await submitWith(() => Promise.reject(new Error("lost after send")));
+  await screen.findByText("Whether your submission was recorded is still unknown.");
+  invokeMock.mockImplementation((command) =>
+    command === "get_mission_classification"
+      ? Promise.reject({ code: "mission_classification_unavailable" })
+      : Promise.reject(new Error("unexpected write")),
+  );
+  await user.click(screen.getByRole("button", { name: "Read the classification" }));
+
+  await screen.findByText("The Mission classification could not be verified.");
+  expect(
+    screen.getByText("Whether your submission was recorded is still unknown."),
+    "C5S.REFRESH.A_FAILED_READ_LEAVES_THE_ATTEMPT_UNKNOWN",
+  ).toBeVisible();
+  // The HELD observation's own line stays, labelled by the cursor it was taken at -- that is honest,
+  // and it is not the failed read speaking. What must never happen is the failure being swallowed, so
+  // both are required to be on screen at once.
+  expect(
+    screen.getByText(`No classification is recorded for this Mission as of event ${BIG_CURSOR}.`),
+    "C5S.REFRESH.THE_HELD_OBSERVATION_KEEPS_ITS_OWN_CURSOR",
+  ).toBeVisible();
+  expect(
+    screen.getByText("The Mission classification could not be verified."),
+    "C5S.REFRESH.A_FAILED_READ_IS_NOT_NO_RECORD",
+  ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Record classification" }),
+    "C5S.REFRESH.A_FAILED_REFRESH_AUTHORIZES_NOTHING",
+  ).toBeDisabled();
+});
