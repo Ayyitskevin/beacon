@@ -11,6 +11,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
+  COMPLETION_CLASSIFICATION_REQUIRED,
   type CompletionConditionInput,
   type CompletionIntentRequest,
   type CompletionNarrativeInput,
@@ -106,6 +107,12 @@ const MANUAL_LABEL = "Reference entered manually; supporting content is not veri
 
 const CODE_COPY: Record<string, string> = {
   completion_intent_changed: "The reviewed details changed. Review the completion again.",
+  // B15 F1. It names the ACTION, because the Operator's next step is a different screen and a
+  // generic "invalid details" would send them to re-read a request that is fine. The control below
+  // stays enabled: this is an order, not a disabled button, and a stale read is recovered by
+  // reading again rather than by guessing.
+  [COMPLETION_CLASSIFICATION_REQUIRED]:
+    "Classify this Mission's impact first, then record the completion.",
   completion_already_recorded:
     "A completion is already recorded for this Mission. Read the recorded completion.",
   completion_resident_not_in_admission_roster: "Choose a Resident admitted to this Mission.",
@@ -121,6 +128,15 @@ const CODE_COPY: Record<string, string> = {
   // completion operation asked: the caller already knows which one it invoked.
   mission_completion_unavailable: "The Mission completion could not be verified.",
 };
+
+/** The wire code, when the refusal carried one. Read once, beside the sentence. */
+function codeOfError(error: unknown): string {
+  const code =
+    typeof error === "object" && error !== null && !Array.isArray(error)
+      ? (error as Record<string, unknown>).code
+      : undefined;
+  return typeof code === "string" ? code : "";
+}
 
 function describeCompletionWriteError(error: unknown): string {
   const code =
@@ -221,6 +237,9 @@ export function MissionCompletionCompose({
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState<"" | "preview" | "record" | "recovery">("");
   const [failure, setFailure] = useState("");
+  /** The wire code behind `failure`, when there was one. Kept beside the sentence so a recovery
+   *  control can belong to ONE refusal rather than to every failure. */
+  const [failureCode, setFailureCode] = useState("");
   const [outcome, setOutcome] = useState<
     "" | "recorded" | "conflicting" | "not_visible" | "unavailable"
   >("");
@@ -458,11 +477,22 @@ export function MissionCompletionCompose({
 
   /** A second READ of the submission that was already made. It never writes: the submitted review
    *  is preserved, and recording again stays an explicit Operator action on it. */
+  /** The explicit recovery for B15 F1: clear this refusal and preview again, so the next attempt is
+   *  built on a fresh read of the Mission rather than on the state that refused. It is a READ, and
+   *  it never replays the write. */
+  function retryAfterClassifying() {
+    if (pending !== "") return;
+    setFailure("");
+    setFailureCode("");
+    runPreview();
+  }
+
   function retryRead() {
     if (submitted === "" || pending !== "") return;
     const mine = fresh();
     setOutcome("");
     setFailure("");
+    setFailureCode("");
     readBack(submitted, mine);
   }
 
@@ -491,6 +521,16 @@ export function MissionCompletionCompose({
         // what happened, and it is still owed even when this leg is the current one.
         if (stale(mine)) return;
         setFailure(describeCompletionWriteError(error));
+        const code = codeOfError(error);
+        setFailureCode(code);
+        // B15 F1 is a DEFINITE pre-write refusal: the guard runs before any identity, time or
+        // boundary is assigned, so nothing could have been written and there is nothing to read
+        // back. Every other refusal keeps the read-back, because it is what establishes what
+        // happened when the answer is not certain.
+        if (code === COMPLETION_CLASSIFICATION_REQUIRED) {
+          setPending("");
+          return;
+        }
         // The form and the frozen reviewed token are preserved; the READ decides what happened.
         readBack(reviewed, mine);
       },
@@ -812,6 +852,12 @@ export function MissionCompletionCompose({
         <p role="alert" className={classes.body}>
           {failure}
         </p>
+      )}
+
+      {failureCode === COMPLETION_CLASSIFICATION_REQUIRED && (
+        <Button disabled={pending !== ""} onClick={retryAfterClassifying}>
+          Check the classification again
+        </Button>
       )}
 
       {pending === "preview" && (

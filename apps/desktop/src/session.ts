@@ -1780,6 +1780,13 @@ export async function previewMissionCompletion(
 
 /** Record the reviewed intent. The echoed token is a consistency check on authenticated input --
  *  not proof a screen was viewed, and not an idempotency key. */
+/** B15 F1: the completion command refuses a Mission that has no classification.
+ *
+ *  Named here so the surface and its bars share ONE spelling of the wire code. A completion recorded
+ *  before a classification would freeze a cut no classification was current at, and a classification
+ *  added afterwards cannot repair that cut -- so the order is required, not warned about. */
+export const COMPLETION_CLASSIFICATION_REQUIRED = "completion_classification_required";
+
 export async function recordMissionCompletion(
   request: CompletionIntentRequest,
   reviewedIntentSha256: string,
