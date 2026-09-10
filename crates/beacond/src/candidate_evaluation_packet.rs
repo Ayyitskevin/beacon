@@ -749,6 +749,21 @@ pub fn encode_packet(
 }
 
 fn validate_owner_bounds(inputs: &PacketInputs) -> Result<(), FidelityPacketRefusal> {
+    // S2 and S3 are DECLARED lengths that reach the encoder like any other owner source, and their
+    // ceilings are owner facts. Bounded HERE, before `charge_packet` and before `Encoder::new`, so
+    // an oversized subject or manifest is `SourceOverOwnerCeiling` and never the framing codec's
+    // `OverLimitLength` reported from inside a constructed encoder (R71's accepted structural form,
+    // extended to S2/S3 by R77 clause 3).
+    if inputs.subject.record_bytes.len() > MAX_ARTIFACT_RECORD_BYTES
+        || inputs.subject.content_bytes.len() > MAX_ARTIFACT_CONTENT_BYTES
+    {
+        return Err(FidelityPacketRefusal::SourceOverOwnerCeiling {
+            kind: EntryKind::Artifact.as_str(),
+        });
+    }
+    if inputs.recipe.manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(FidelityPacketRefusal::SourceOverOwnerCeiling { kind: "recipe" });
+    }
     for entry in &inputs.evidence {
         let over = match (&entry.kind, &entry.body) {
             (
