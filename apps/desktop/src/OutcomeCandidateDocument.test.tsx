@@ -382,3 +382,39 @@ it("C7.VIEW.THE_SURFACE_MEETS_WCAG_2_2", async () => {
   await screen.findByText(TEXT, { collapseWhitespace: false, trim: false });
   await expectNoWcag22Violations(document.body);
 });
+
+
+it("astra_c7_one_byte_noncanonical_tail_is_refused_at_its_actual_length", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockResolvedValue(reply("A", { candidateContentBase64: "QR==" }));
+  render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 1 })} />);
+  await view(user);
+  expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.ONE_BYTE_TAIL_BITS_ARE_CANONICAL").toBeInTheDocument();
+  expect(screen.queryByText("Stored candidate text"), "C7.ASTRA.ONE_BYTE_NONCANONICAL_TEXT_NOT_SHOWN").toBeNull();
+});
+
+it("astra_c7_two_byte_noncanonical_tail_is_refused_at_its_actual_length", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockResolvedValue(reply("AB", { candidateContentBase64: "QUJ=" }));
+  render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 2 })} />);
+  await view(user);
+  expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.TWO_BYTE_TAIL_BITS_ARE_CANONICAL").toBeInTheDocument();
+  expect(screen.queryByText("Stored candidate text"), "C7.ASTRA.TWO_BYTE_NONCANONICAL_TEXT_NOT_SHOWN").toBeNull();
+});
+
+it("astra_c7_the_encoded_ceiling_is_checked_before_decoding", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockResolvedValue(reply(TEXT, {
+    candidateContentBytes: 1_048_576,
+    candidateContentBase64: "A".repeat(1_398_108),
+  }));
+  const decode = vi.spyOn(globalThis, "atob");
+  try {
+    render(<OutcomeCandidateDocument receipt={held({ candidateContentBytes: 1_048_576 })} />);
+    await view(user);
+    expect(screen.queryByText(UNAVAILABLE), "C7.ASTRA.OVERLIMIT_IS_UNAVAILABLE").toBeInTheDocument();
+    expect(decode.mock.calls.length, "C7.ASTRA.ENCODED_LIMIT_PRECEDES_DECODING").toBe(0);
+  } finally {
+    decode.mockRestore();
+  }
+});
