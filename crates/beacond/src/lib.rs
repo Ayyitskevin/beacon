@@ -64,7 +64,8 @@ mod local_transport;
 
 pub use candidate_evaluation::{
     CandidateEvaluationContext, CandidateEvaluationError, CandidateEvaluationService,
-    CurrentEvaluationEligibility, EvaluationSourcePacket, ProposedOutcomeFidelityRubric,
+    CurrentActivationEvidence, CurrentEvaluationEligibility, CurrentEvaluatorEvidence,
+    CurrentEvaluatorGap, EvaluationSourcePacket, ProposedOutcomeFidelityRubric,
 };
 pub use check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt, Recorded,

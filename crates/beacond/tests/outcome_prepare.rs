@@ -162,6 +162,21 @@ fn admitted_mission(label: &str) -> Fixture {
 }
 
 fn admitted_mission_with_members(label: &str, member_count: usize) -> Fixture {
+    admitted_mission_with_reviewer_capabilities(
+        label,
+        member_count,
+        &[
+            BeaconCapability::WorkCreateMission,
+            BeaconCapability::WorkCoordinateMission,
+        ],
+    )
+}
+
+fn admitted_mission_with_reviewer_capabilities(
+    label: &str,
+    member_count: usize,
+    reviewer_capabilities: &[BeaconCapability],
+) -> Fixture {
     let store = TestStore::new(label);
     let report = Supervisor::bootstrap(StartupConfig {
         store_path: store.path.clone(),
@@ -181,7 +196,12 @@ fn admitted_mission_with_members(label: &str, member_count: usize) -> Fixture {
         OperatorSessionPhase::Unlocked
     );
 
-    let admitted = admit_mission_in_with_members(&accounts, workspace_id, member_count);
+    let admitted = admit_mission_in_with_reviewer_capabilities(
+        &accounts,
+        workspace_id,
+        member_count,
+        reviewer_capabilities,
+    );
     Fixture {
         outcomes: OutcomeService::new(Arc::clone(&accounts), workspace_id),
         store,
@@ -222,6 +242,23 @@ fn admit_mission_in_with_members(
     accounts: &Arc<OperatorAccountService>,
     workspace_id: Uuid,
     member_count: usize,
+) -> AdmittedMission {
+    admit_mission_in_with_reviewer_capabilities(
+        accounts,
+        workspace_id,
+        member_count,
+        &[
+            BeaconCapability::WorkCreateMission,
+            BeaconCapability::WorkCoordinateMission,
+        ],
+    )
+}
+
+fn admit_mission_in_with_reviewer_capabilities(
+    accounts: &Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+    member_count: usize,
+    reviewer_capabilities: &[BeaconCapability],
 ) -> AdmittedMission {
     assert!((1..=2).contains(&member_count));
     let accounts = Arc::clone(accounts);
@@ -297,16 +334,21 @@ fn admit_mission_in_with_members(
 
     let configurations = residents
         .iter()
-        .map(|resident| {
+        .enumerate()
+        .map(|(index, resident)| {
             ResidentConfigurationService::new(Arc::clone(&accounts), workspace_id)
                 .configure(
                     resident.id,
                     None,
                     activation.id,
-                    vec![
-                        BeaconCapability::WorkCreateMission,
-                        BeaconCapability::WorkCoordinateMission,
-                    ],
+                    if index == 1 {
+                        reviewer_capabilities.to_vec()
+                    } else {
+                        vec![
+                            BeaconCapability::WorkCreateMission,
+                            BeaconCapability::WorkCoordinateMission,
+                        ]
+                    },
                 )
                 .unwrap()
         })
@@ -8563,6 +8605,12 @@ mod candidate_evaluation {
             "artifacts",
             "outcome_manifests",
             "model_invocations",
+            "agents",
+            "resident_lifecycle_decisions",
+            "resident_configuration_decisions",
+            "resident_configuration_bindings",
+            "resident_configuration_capabilities",
+            "local_model_activation_decisions",
         ]
         .iter()
         .map(|table| {
@@ -8573,6 +8621,580 @@ mod candidate_evaluation {
                 .unwrap()
         })
         .collect()
+    }
+
+    #[test]
+    fn current_evaluator_evidence_holds_exact_owner_records_without_authority() {
+        let fixture = admitted_mission_with_reviewer_capabilities(
+            "current-evaluation-context-exact",
+            2,
+            &[BeaconCapability::ArtifactEvaluate],
+        );
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let held_resident =
+            ResidentLifecycleService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|resident| resident.id == fixture.other_resident_id)
+                .unwrap();
+        let held_configuration =
+            ResidentConfigurationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|configuration| configuration.resident_id == fixture.other_resident_id)
+                .unwrap();
+        assert_eq!(held_configuration.id, fixture.other_configuration_id);
+        let held_binding = held_configuration.binding.as_ref().unwrap();
+        assert_eq!(
+            held_binding.capabilities,
+            vec![BeaconCapability::ArtifactEvaluate]
+        );
+        // list() reads recorded decisions only; this endpoint is never inspected or contacted.
+        let held_activation = LocalModelActivationService::new(
+            Arc::clone(&fixture.accounts),
+            fixture.workspace_id,
+            LocalModelEndpoint::new("127.0.0.1:1".parse().unwrap()).unwrap(),
+        )
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|activation| activation.id == held_binding.activation_id)
+        .unwrap();
+        let before = record_counts(&fixture);
+        let context =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .context(&candidate.manifest_digest)
+                .unwrap()
+                .unwrap();
+
+        let evidence = context.current_evaluator_evidence();
+        assert_eq!(evidence.len(), 1, "B15.CURRENT.EXACT_HISTORICAL_SET");
+        assert_eq!(
+            evidence[0].admitted(),
+            &Evaluator {
+                resident_id: fixture.other_resident_id,
+                configuration_id: fixture.other_configuration_id,
+            }
+        );
+        assert_eq!(evidence[0].resident(), &held_resident);
+        assert_eq!(evidence[0].current_configuration(), &held_configuration);
+        let activation = evidence[0]
+            .activation()
+            .expect("configured record holds activation proof");
+        assert_eq!(activation.configured(), &held_activation);
+        assert_eq!(activation.latest_for_resource(), &held_activation);
+        assert!(
+            evidence[0].gaps().is_empty(),
+            "B15.CURRENT.RECORDED_FACTS_MATCH"
+        );
+        assert_eq!(
+            context.current_eligibility(),
+            beacond::CurrentEvaluationEligibility::NotMeasured
+        );
+        assert_eq!(
+            context.source_packet(),
+            beacond::EvaluationSourcePacket::NotCollected
+        );
+        assert_eq!(
+            record_counts(&fixture),
+            before,
+            "B15.CURRENT.READ_WRITES_NOTHING"
+        );
+    }
+
+    #[test]
+    fn current_evaluator_evidence_names_all_recorded_gaps_without_changing_admission() {
+        use beacond::CurrentEvaluatorGap as Gap;
+        let fixture = admitted_mission_with_reviewer_capabilities(
+            "current-evaluation-context-gaps",
+            2,
+            &[BeaconCapability::ArtifactEvaluate],
+        );
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let service =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let before = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        let prior = &before.current_evaluator_evidence()[0];
+        let suspended =
+            ResidentLifecycleService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .suspend(
+                    fixture.other_resident_id,
+                    prior.resident().latest_decision_id,
+                )
+                .unwrap();
+        let configurations =
+            ResidentConfigurationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let activation_id = prior.activation().unwrap().configured().id;
+        let changed_configuration = configurations
+            .configure(
+                fixture.other_resident_id,
+                Some(fixture.other_configuration_id),
+                activation_id,
+                vec![BeaconCapability::ArtifactProduce],
+            )
+            .unwrap();
+        let deactivated = LocalModelActivationService::new(
+            Arc::clone(&fixture.accounts),
+            fixture.workspace_id,
+            LocalModelEndpoint::new("127.0.0.1:1".parse().unwrap()).unwrap(),
+        )
+        .deactivate(activation_id)
+        .unwrap();
+        let changed = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        let evidence = &changed.current_evaluator_evidence()[0];
+        assert_eq!(evidence.resident(), &suspended);
+        assert_eq!(
+            evidence.current_configuration().id,
+            changed_configuration.id
+        );
+        assert_eq!(evidence.admitted(), prior.admitted());
+        assert_eq!(
+            evidence.activation().unwrap().configured(),
+            prior.activation().unwrap().configured()
+        );
+        assert_eq!(
+            evidence.activation().unwrap().latest_for_resource(),
+            &deactivated
+        );
+        assert_eq!(
+            evidence.gaps(),
+            &[
+                Gap::ResidentNotActive,
+                Gap::ConfigurationChanged,
+                Gap::MissingArtifactEvaluate,
+                Gap::ActivationSuperseded,
+                Gap::ActivationInactive,
+            ],
+            "B15.CURRENT.OVERLAPPING_GAPS_KEEP_ALL_FACTS"
+        );
+        let cleared = configurations
+            .clear(fixture.other_resident_id, changed_configuration.id)
+            .unwrap();
+        let after_clear = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        let evidence = &after_clear.current_evaluator_evidence()[0];
+        assert_eq!(evidence.current_configuration(), &cleared);
+        assert!(evidence.activation().is_none());
+        assert_eq!(
+            evidence.gaps(),
+            &[
+                Gap::ResidentNotActive,
+                Gap::ConfigurationCleared,
+                Gap::ConfigurationChanged,
+                Gap::MissingArtifactEvaluate,
+            ],
+            "B15.CURRENT.CLEARED_HAS_NO_ACTIVATION_FACTS"
+        );
+        assert_eq!(
+            after_clear.admitted_non_author_residents(),
+            before.admitted_non_author_residents()
+        );
+        assert_eq!(
+            after_clear.current_eligibility(),
+            beacond::CurrentEvaluationEligibility::NotMeasured
+        );
+    }
+
+    #[test]
+    fn current_evaluator_evidence_refuses_each_missing_owner_event_while_rows_remain() {
+        for owner in ["Resident", "Configuration", "Activation"] {
+            let fixture = admitted_mission_with_reviewer_capabilities(
+                "current-evaluation-owner-event",
+                2,
+                &[BeaconCapability::ArtifactEvaluate],
+            );
+            fixture.classify(ImpactLevel::Ordinary);
+            fixture.complete((fixture.resident_id, fixture.configuration_id));
+            let candidate = fixture
+                .outcomes
+                .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+                .unwrap();
+            let models = LocalModelActivationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+                LocalModelEndpoint::new("127.0.0.1:1".parse().unwrap()).unwrap(),
+            );
+            let activation = models.list().unwrap().remove(0);
+            let (kind, selector, id) = match owner {
+                "Resident" => (
+                    "resident.activated",
+                    "$.decision.residentId",
+                    fixture.other_resident_id,
+                ),
+                "Configuration" => (
+                    "resident.configuration_set",
+                    "$.decision.id",
+                    fixture.other_configuration_id,
+                ),
+                "Activation" => ("local_model.activated", "$.activation.id", activation.id),
+                _ => unreachable!(),
+            };
+            assert_eq!(fixture.store.connect().execute(
+                "DELETE FROM events WHERE kind = ?1 AND json_extract(payload_json, ?2) = ?3",
+                params![kind, selector, id.to_string()],
+            ).unwrap(), 1);
+            assert!(
+                ResidentLifecycleService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .any(|resident| resident.id == fixture.other_resident_id)
+            );
+            assert!(
+                ResidentConfigurationService::new(
+                    Arc::clone(&fixture.accounts),
+                    fixture.workspace_id
+                )
+                .list()
+                .unwrap()
+                .iter()
+                .any(|configuration| configuration.id == fixture.other_configuration_id)
+            );
+            assert_eq!(models.list().unwrap(), vec![activation]);
+            let error = CandidateEvaluationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+            )
+            .context(&candidate.manifest_digest)
+            .expect_err("B15.CURRENT.COMPLETE_OWNER_EVENT_REQUIRED");
+            assert_eq!(error.name(), owner, "B15.CURRENT.BROKEN_OWNER_IS_NOT_A_GAP");
+        }
+    }
+
+    #[test]
+    fn current_evaluator_evidence_bounds_selected_activation_before_owner_decode() {
+        let fixture = admitted_mission_with_reviewer_capabilities(
+            "current-evaluation-owner-cap",
+            2,
+            &[BeaconCapability::ArtifactEvaluate],
+        );
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        with_trigger_down(
+            &fixture.store,
+            "local_model_activation_decisions_no_update",
+            "local_model_activation_decisions",
+            "local model activation decisions are append-only",
+            |connection| {
+                connection
+                    .execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .unwrap();
+                assert_eq!(connection.execute(
+                    "UPDATE local_model_activation_decisions SET unrecognized_features_json = ?1",
+                    [format!("[\"{}\"]", "x".repeat(65_537))],
+                ).unwrap(), 1);
+            },
+        );
+        let error =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                .context(&candidate.manifest_digest)
+                .unwrap_err();
+        assert_eq!(
+            error.name(),
+            "ReadLimit",
+            "B15.CURRENT.BOUND_BEFORE_OWNER_DECODE"
+        );
+    }
+
+    #[test]
+    fn current_evaluator_evidence_requires_each_owner_chain_even_when_events_match_rows() {
+        for owner in ["Resident", "Configuration", "Activation"] {
+            let fixture = admitted_mission_with_reviewer_capabilities(
+                "current-evaluation-owner-chain",
+                2,
+                &[BeaconCapability::ArtifactEvaluate],
+            );
+            fixture.classify(ImpactLevel::Ordinary);
+            fixture.complete((fixture.resident_id, fixture.configuration_id));
+            let candidate = fixture
+                .outcomes
+                .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+                .unwrap();
+            let residents =
+                ResidentLifecycleService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+            let configurations = ResidentConfigurationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+            );
+            let models = LocalModelActivationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+                LocalModelEndpoint::new("127.0.0.1:1".parse().unwrap()).unwrap(),
+            );
+            let prior_resident = residents
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|resident| resident.id == fixture.other_resident_id)
+                .unwrap();
+            let prior_activation = models.list().unwrap().remove(0);
+            let (table, trigger, message, kind, selector, decision_id) = match owner {
+                "Resident" => {
+                    let changed = residents
+                        .suspend(fixture.other_resident_id, prior_resident.latest_decision_id)
+                        .unwrap();
+                    assert_ne!(
+                        changed.latest_decision_id,
+                        prior_resident.latest_decision_id
+                    );
+                    (
+                        "resident_lifecycle_decisions",
+                        "resident_lifecycle_decisions_no_update",
+                        "Resident lifecycle decisions are append-only",
+                        "resident.activated",
+                        "$.decision.id",
+                        prior_resident.latest_decision_id.unwrap(),
+                    )
+                }
+                "Configuration" => {
+                    let changed = configurations
+                        .configure(
+                            fixture.other_resident_id,
+                            Some(fixture.other_configuration_id),
+                            prior_activation.id,
+                            vec![BeaconCapability::ArtifactEvaluate],
+                        )
+                        .unwrap();
+                    assert_ne!(changed.id, fixture.other_configuration_id);
+                    (
+                        "resident_configuration_decisions",
+                        "resident_configuration_decisions_no_update",
+                        "Resident configuration decisions are append-only",
+                        "resident.configuration_set",
+                        "$.decision.id",
+                        fixture.other_configuration_id,
+                    )
+                }
+                "Activation" => {
+                    let changed = models.deactivate(prior_activation.id).unwrap();
+                    assert_ne!(changed.id, prior_activation.id);
+                    (
+                        "local_model_activation_decisions",
+                        "local_model_activation_decisions_no_update",
+                        "local model activation decisions are append-only",
+                        "local_model.activated",
+                        "$.activation.id",
+                        prior_activation.id,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let held_residents = residents.list().unwrap();
+            let held_configurations = configurations.list().unwrap();
+            let held_activations = models.list().unwrap();
+            let missing_predecessor = Uuid::new_v4();
+            with_trigger_down(&fixture.store, trigger, table, message, |connection| {
+                connection
+                    .execute_batch(
+                        "PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON",
+                    )
+                    .unwrap();
+                assert_eq!(
+                    connection
+                        .execute(
+                            &format!("UPDATE {table} SET predecessor_id = ?1 WHERE id = ?2"),
+                            params![missing_predecessor.to_string(), decision_id.to_string()]
+                        )
+                        .unwrap(),
+                    1
+                );
+                // The earlier initial row is corrupt; a valid later/current row still names it.
+                // Replace only the null predecessor field in its canonical payload, preserving
+                // field order and all other bytes so exact Event comparison matches that bad row.
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE events SET payload_json = replace(payload_json, ?1, ?2)
+                     WHERE kind = ?3 AND json_extract(payload_json, ?4) = ?5",
+                            params![
+                                "\"predecessorId\":null",
+                                format!("\"predecessorId\":\"{missing_predecessor}\""),
+                                kind,
+                                selector,
+                                decision_id.to_string()
+                            ],
+                        )
+                        .unwrap(),
+                    1
+                );
+            });
+            assert_eq!(residents.list().unwrap(), held_residents);
+            assert_eq!(configurations.list().unwrap(), held_configurations);
+            assert_eq!(models.list().unwrap(), held_activations);
+            let result = CandidateEvaluationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+            )
+            .context(&candidate.manifest_digest);
+            assert!(result.is_err(), "B15.CURRENT.OWNER_CHAIN_REQUIRED");
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.name(),
+                owner,
+                "B15.CURRENT.CHAIN_FAULT_STAYS_WITH_OWNER"
+            );
+        }
+    }
+
+    #[test]
+    fn current_evaluator_evidence_refuses_nonpositive_owner_order_keys() {
+        for owner in ["Resident", "Configuration", "Activation"] {
+            let fixture = admitted_mission("current-evaluation-order-key");
+            fixture.classify(ImpactLevel::Ordinary);
+            fixture.complete((fixture.resident_id, fixture.configuration_id));
+            let candidate = fixture
+                .outcomes
+                .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+                .unwrap();
+            let (table, trigger, message, id) = match owner {
+                "Resident" => {
+                    let resident = ResidentLifecycleService::new(
+                        Arc::clone(&fixture.accounts),
+                        fixture.workspace_id,
+                    )
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .find(|resident| resident.id == fixture.other_resident_id)
+                    .unwrap();
+                    (
+                        "resident_lifecycle_decisions",
+                        "resident_lifecycle_decisions_no_update",
+                        "Resident lifecycle decisions are append-only",
+                        resident.latest_decision_id.unwrap(),
+                    )
+                }
+                "Configuration" => (
+                    "resident_configuration_decisions",
+                    "resident_configuration_decisions_no_update",
+                    "Resident configuration decisions are append-only",
+                    fixture.other_configuration_id,
+                ),
+                "Activation" => {
+                    let activation = LocalModelActivationService::new(
+                        Arc::clone(&fixture.accounts),
+                        fixture.workspace_id,
+                        LocalModelEndpoint::new("127.0.0.1:1".parse().unwrap()).unwrap(),
+                    )
+                    .list()
+                    .unwrap()
+                    .remove(0);
+                    (
+                        "local_model_activation_decisions",
+                        "local_model_activation_decisions_no_update",
+                        "local model activation decisions are append-only",
+                        activation.id,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            with_trigger_down(&fixture.store, trigger, table, message, |connection| {
+                assert_eq!(
+                    connection
+                        .execute(
+                            &format!("UPDATE {table} SET sequence = 0 WHERE id = ?1"),
+                            [id.to_string()]
+                        )
+                        .unwrap(),
+                    1
+                );
+            });
+            let error = CandidateEvaluationService::new(
+                Arc::clone(&fixture.accounts),
+                fixture.workspace_id,
+            )
+            .context(&candidate.manifest_digest)
+            .expect_err("B15.CURRENT.ORDER_KEY_DOMAIN_REQUIRED");
+            assert_eq!(error.name(), owner);
+        }
+    }
+
+    #[test]
+    fn current_evaluator_evidence_refuses_an_overlong_history_without_truncation() {
+        let fixture = admitted_mission_with_reviewer_capabilities(
+            "current-evaluation-history-bound",
+            2,
+            &[BeaconCapability::ArtifactEvaluate],
+        );
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .unwrap();
+        let configurations =
+            ResidentConfigurationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let mut current = configurations
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|configuration| configuration.resident_id == fixture.other_resident_id)
+            .unwrap();
+        let activation_id = current.binding.as_ref().unwrap().activation_id;
+        // All 256 decisions are ordinary accepted Commands. Alternating clear/set keeps the
+        // binding count below its separate limit, so the history guard has its own witness.
+        for _ in 1..256 {
+            current = if current.binding.is_some() {
+                configurations
+                    .clear(fixture.other_resident_id, current.id)
+                    .unwrap()
+            } else {
+                configurations
+                    .configure(
+                        fixture.other_resident_id,
+                        Some(current.id),
+                        activation_id,
+                        vec![BeaconCapability::ArtifactEvaluate],
+                    )
+                    .unwrap()
+            };
+        }
+        let service =
+            CandidateEvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+        let at_limit = service
+            .context(&candidate.manifest_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            at_limit.current_evaluator_evidence()[0].current_configuration(),
+            &current
+        );
+        configurations
+            .configure(
+                fixture.other_resident_id,
+                Some(current.id),
+                activation_id,
+                vec![BeaconCapability::ArtifactEvaluate],
+            )
+            .unwrap();
+        let error = service
+            .context(&candidate.manifest_digest)
+            .expect_err("B15.CURRENT.COMPLETE_HISTORY_LIMIT_REQUIRED");
+        assert_eq!(error.name(), "ReadLimit");
     }
 
     #[test]
@@ -8814,6 +9436,21 @@ mod candidate_evaluation {
                 "Mission",
                 true,
             ),
+            (
+                Error::Resident(beacond::ResidentLifecycleError::Store(driver())),
+                "Resident",
+                true,
+            ),
+            (
+                Error::Configuration(beacond::ResidentConfigurationError::Store(driver())),
+                "Configuration",
+                true,
+            ),
+            (
+                Error::Activation(beacond::LocalModelActivationError::Store(driver())),
+                "Activation",
+                true,
+            ),
             (Error::MissionAbsent, "MissionAbsent", false),
             (Error::ScopeMismatch, "ScopeMismatch", false),
             (Error::Store(driver()), "Store", true),
@@ -8827,6 +9464,9 @@ mod candidate_evaluation {
                 Error::Artifact(_) => "Artifact",
                 Error::Manifest(_) => "Manifest",
                 Error::Mission(_) => "Mission",
+                Error::Resident(_) => "Resident",
+                Error::Configuration(_) => "Configuration",
+                Error::Activation(_) => "Activation",
                 Error::MissionAbsent => "MissionAbsent",
                 Error::ScopeMismatch => "ScopeMismatch",
                 Error::Store(_) => "Store",

@@ -24,6 +24,19 @@ use crate::outcome_store::{
     candidate_context_read_preflight, verified_candidate_context_within,
 };
 
+use crate::local_model_activation::verified_activation_chain_within;
+use crate::resident_configuration::{
+    configuration_within_context_read_limits, verified_current_configuration_within,
+};
+use crate::resident_lifecycle::{
+    lifecycle_within_context_read_limits, verified_resident_lifecycle_within,
+};
+use crate::{
+    BeaconCapability, LocalModelActivation, LocalModelActivationError, LocalModelActivationState,
+    ResidentAgentView, ResidentConfiguration, ResidentConfigurationError,
+    ResidentConfigurationState, ResidentLifecycle, ResidentLifecycleError,
+};
+
 const RUBRIC_BYTES: &[u8] = include_bytes!("../resources/evaluation/outcome-fidelity-v1.txt");
 
 /// Historical admission and current execution eligibility are different evidence.
@@ -36,6 +49,58 @@ pub enum CurrentEvaluationEligibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvaluationSourcePacket {
     NotCollected,
+}
+
+/// Closed factual mismatches in stable order. An empty set is no availability or authority verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentEvaluatorGap {
+    ResidentNotActive,
+    ConfigurationCleared,
+    ConfigurationChanged,
+    MissingArtifactEvaluate,
+    ActivationSuperseded,
+    ActivationInactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentActivationEvidence {
+    configured: LocalModelActivation,
+    latest_for_resource: LocalModelActivation,
+}
+impl CurrentActivationEvidence {
+    pub fn configured(&self) -> &LocalModelActivation {
+        &self.configured
+    }
+    pub fn latest_for_resource(&self) -> &LocalModelActivation {
+        &self.latest_for_resource
+    }
+}
+
+/// Current owner records beside the frozen admitted identity, never permission to request work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentEvaluatorEvidence {
+    admitted: Evaluator,
+    resident: ResidentAgentView,
+    current_configuration: ResidentConfiguration,
+    activation: Option<CurrentActivationEvidence>,
+    gaps: Vec<CurrentEvaluatorGap>,
+}
+impl CurrentEvaluatorEvidence {
+    pub fn admitted(&self) -> &Evaluator {
+        &self.admitted
+    }
+    pub fn resident(&self) -> &ResidentAgentView {
+        &self.resident
+    }
+    pub fn current_configuration(&self) -> &ResidentConfiguration {
+        &self.current_configuration
+    }
+    pub fn activation(&self) -> Option<&CurrentActivationEvidence> {
+        self.activation.as_ref()
+    }
+    pub fn gaps(&self) -> &[CurrentEvaluatorGap] {
+        &self.gaps
+    }
 }
 
 /// Maintainer-authored draft criteria, supplied as a proposal rather than accepted product Policy.
@@ -69,6 +134,7 @@ pub struct CandidateEvaluationContext {
     candidate: VerifiedArtifactRecord,
     mission_admission: MissionView,
     admitted_non_author_residents: Vec<Evaluator>,
+    current_evaluator_evidence: Vec<CurrentEvaluatorEvidence>,
     rubric: ProposedOutcomeFidelityRubric,
 }
 
@@ -89,6 +155,10 @@ impl CandidateEvaluationContext {
     /// identity. An empty set means that this Mission admitted no other Resident, not absent data.
     pub fn admitted_non_author_residents(&self) -> &[Evaluator] {
         &self.admitted_non_author_residents
+    }
+
+    pub fn current_evaluator_evidence(&self) -> &[CurrentEvaluatorEvidence] {
+        &self.current_evaluator_evidence
     }
 
     pub fn current_eligibility(&self) -> CurrentEvaluationEligibility {
@@ -113,6 +183,9 @@ pub enum CandidateEvaluationError {
     Artifact(ArtifactError),
     Manifest(ManifestStoreRefusal),
     Mission(MissionError),
+    Resident(ResidentLifecycleError),
+    Configuration(ResidentConfigurationError),
+    Activation(LocalModelActivationError),
     MissionAbsent,
     ScopeMismatch,
     Store(rusqlite::Error),
@@ -127,6 +200,9 @@ impl CandidateEvaluationError {
             Self::Artifact(_) => "Artifact",
             Self::Manifest(_) => "Manifest",
             Self::Mission(_) => "Mission",
+            Self::Resident(_) => "Resident",
+            Self::Configuration(_) => "Configuration",
+            Self::Activation(_) => "Activation",
             Self::MissionAbsent => "MissionAbsent",
             Self::ScopeMismatch => "ScopeMismatch",
             Self::Store(_) => "Store",
@@ -147,6 +223,9 @@ impl std::error::Error for CandidateEvaluationError {
             Self::Artifact(error) => Some(error),
             Self::Manifest(error) => Some(error),
             Self::Mission(error) => Some(error),
+            Self::Resident(error) => Some(error),
+            Self::Configuration(error) => Some(error),
+            Self::Activation(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::InvalidManifestDigest
             | Self::ReadLimit
@@ -233,7 +312,7 @@ impl CandidateEvaluationService {
             {
                 return Err(CandidateEvaluationError::ScopeMismatch);
             }
-            let admitted_non_author_residents = mission_admission
+            let admitted_non_author_residents: Vec<Evaluator> = mission_admission
                 .members
                 .iter()
                 .filter(|member| member.resident_id != candidate.payload().accountable_resident_id)
@@ -242,6 +321,50 @@ impl CandidateEvaluationService {
                     configuration_id: member.admission_configuration_id,
                 })
                 .collect();
+            let mut current_evaluator_evidence = Vec::new();
+            for admitted in &admitted_non_author_residents {
+                if !lifecycle_within_context_read_limits(&transaction, self.workspace_id, admitted.resident_id)
+                    .map_err(CandidateEvaluationError::Resident)?
+                    || !configuration_within_context_read_limits(&transaction, self.workspace_id, admitted.resident_id)
+                        .map_err(CandidateEvaluationError::Configuration)? {
+                    return Err(CandidateEvaluationError::ReadLimit);
+                }
+                let resident = verified_resident_lifecycle_within(
+                    &transaction, self.workspace_id, admitted.resident_id,
+                ).map_err(CandidateEvaluationError::Resident)?;
+                let current_configuration = verified_current_configuration_within(
+                    &transaction, self.workspace_id, admitted.resident_id,
+                ).map_err(CandidateEvaluationError::Configuration)?;
+                let mut gaps = Vec::new();
+                if resident.lifecycle != ResidentLifecycle::Active {
+                    gaps.push(CurrentEvaluatorGap::ResidentNotActive);
+                }
+                if current_configuration.state == ResidentConfigurationState::Cleared {
+                    gaps.push(CurrentEvaluatorGap::ConfigurationCleared);
+                }
+                if current_configuration.id != admitted.configuration_id {
+                    gaps.push(CurrentEvaluatorGap::ConfigurationChanged);
+                }
+                if !current_configuration.binding.as_ref().is_some_and(|binding|
+                    binding.capabilities.contains(&BeaconCapability::ArtifactEvaluate)) {
+                    gaps.push(CurrentEvaluatorGap::MissingArtifactEvaluate);
+                }
+                let activation = if let Some(binding) = &current_configuration.binding {
+                    let (configured, latest_for_resource) = verified_activation_chain_within(
+                        &transaction, self.workspace_id, binding.activation_id,
+                    ).map_err(CandidateEvaluationError::Activation)?;
+                    if configured.id != latest_for_resource.id {
+                        gaps.push(CurrentEvaluatorGap::ActivationSuperseded);
+                    }
+                    if latest_for_resource.state == LocalModelActivationState::Inactive {
+                        gaps.push(CurrentEvaluatorGap::ActivationInactive);
+                    }
+                    Some(CurrentActivationEvidence { configured, latest_for_resource })
+                } else { None };
+                current_evaluator_evidence.push(CurrentEvaluatorEvidence {
+                    admitted: *admitted, resident, current_configuration, activation, gaps,
+                });
+            }
             let rubric = ProposedOutcomeFidelityRubric {
                 digest: SourceDigest {
                     algorithm: "sha256".to_owned(),
@@ -255,6 +378,7 @@ impl CandidateEvaluationService {
                 candidate,
                 mission_admission,
                 admitted_non_author_residents,
+                current_evaluator_evidence,
                 rubric,
             }))
         })
