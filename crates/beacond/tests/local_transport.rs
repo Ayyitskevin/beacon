@@ -13,7 +13,8 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
+    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, CompletionPreview,
+    DeclaredCheck, MissionCompletionCommandService, OperatorAccountService,
     DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
     LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
     LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft,
@@ -1100,7 +1101,135 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
         "C4.WIDE.REQUEST_EXCEEDS_THE_OLD_FRAME: {sent_bytes} bytes"
     );
 
+    // ---------------------------------------------------------------------------------------
+    // PREMISE, before any transport claim: the OWNER and its codec accept this exact request.
+    //
+    // Without this the wide bar would prove only that something crossed a socket -- a refusal from
+    // the owner and a refusal from the transport would look alike. A second account service on the
+    // same store, authenticated the same way, calls `preview` directly.
+    // ---------------------------------------------------------------------------------------
+    let direct_accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    direct_accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let owner = MissionCompletionCommandService::new(
+        Arc::clone(&direct_accounts),
+        project.workspace_id,
+    );
+    let direct_preview: CompletionPreview = owner
+        .preview(request.clone())
+        .expect("C4.PREMISE.OWNER_ACCEPTS_THE_WIDE_REQUEST");
+    assert_eq!(
+        direct_preview.intent_sha256.len(),
+        64,
+        "C4.PREMISE.OWNER_TOKEN_IS_HEX64"
+    );
+    assert_eq!(
+        owner.get_intent(admitted.id).unwrap(),
+        None,
+        "C4.PREMISE.PREVIEW_WROTE_NOTHING"
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // The PUBLIC boundary, in bytes. The envelope is assembled here rather than by the client, so
+    // this measures what a caller actually sends and what the supervisor actually answers.
+    //
+    // The auth token is read from its file and never printed: no assertion message, no failure dump
+    // and no log line below carries it.
+    // ---------------------------------------------------------------------------------------
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let request_bytes = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "preview_mission_completion",
+            "request": serde_json::to_value(&request).unwrap(),
+        },
+    }))
+    .unwrap();
+    assert!(
+        request_bytes.len() > 65_536,
+        "C4.RAW.REQUEST_IS_OVER_THE_OLD_FRAME: {} bytes",
+        request_bytes.len()
+    );
+    assert!(
+        request_bytes.len() <= 163_840,
+        "C4.RAW.REQUEST_IS_WITHIN_THE_COMPLETION_CEILING: {} bytes",
+        request_bytes.len()
+    );
+
+    let mut raw = UnixStream::connect(&runtime.socket).unwrap();
+    raw.write_all(&request_bytes).unwrap();
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    raw.read_to_end(&mut answer).unwrap();
+    assert!(
+        answer.len() > 65_536,
+        "C4.RAW.RESPONSE_IS_OVER_THE_OLD_FRAME: {} bytes",
+        answer.len()
+    );
+    assert!(
+        answer.len() <= 196_608,
+        "C4.RAW.RESPONSE_IS_WITHIN_THE_PREVIEW_CEILING: {} bytes",
+        answer.len()
+    );
+
+    // Parsed comparison, not a byte-order promise: JSON field order and whitespace are not a record
+    // identity, and asserting them would invent a contract nobody agreed. The expected object is the
+    // OWNER's own preview from the premise above -- so this compares what the transport delivered
+    // against what the owner produced, not against itself.
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered.get("error"),
+        Some(&serde_json::Value::Null),
+        "C4.RAW.NO_REFUSAL"
+    );
+    assert_eq!(
+        answered
+            .pointer("/result/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("mission_completion_preview"),
+        "C4.RAW.RESULT_KIND"
+    );
+    assert_eq!(
+        answered.pointer("/result/preview"),
+        Some(&serde_json::to_value(&direct_preview).unwrap()),
+        "C4.RAW.PREVIEW_EQUALS_THE_OWNERS_OWN_PREVIEW"
+    );
+
+    // And the literals themselves, in the delivered TEXT BYTES: a differential check alone would
+    // pass if both sides lost the same content.
+    let text = String::from_utf8(answer.clone()).unwrap();
+    for literal in [
+        &"s".repeat(500),
+        &"r".repeat(500),
+        &"n".repeat(500),
+        &"y".repeat(2_000),
+        &format!("{:064x}", 10_000u128),
+        // condition 19, slot 0: an Artifact citation, so this digest is in the record verbatim.
+        &format!("{:064x}", 19u128 * 100),
+        &admitted.id.to_string(),
+        &resident_id.to_string(),
+        &configuration.id.to_string(),
+        &project.workspace_id.to_string(),
+        &project.id.to_string(),
+        &direct_preview.intent_sha256,
+    ] {
+        assert!(
+            text.contains(literal.as_str()),
+            "C4.RAW.LITERAL_SURVIVES_THE_BOUNDARY: {} chars missing",
+            literal.chars().count()
+        );
+    }
+
     let preview = client.preview_mission_completion(request.clone()).unwrap();
+    assert_eq!(
+        preview, direct_preview,
+        "C4.WIDE.CLIENT_AND_OWNER_AGREE"
+    );
 
     // Bindings the client never sent and cannot forge.
     assert_eq!(preview.actor, "operator", "C4.WIDE.ACTOR");
