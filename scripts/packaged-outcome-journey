@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# Drive the packaged AppImage through the Operator's Outcome journey on a DISPOSABLE store and
+# capture the evidence for every step that exists on main today.
+#
+# The clean-host first-run harness proves the package starts. This proves an Operator can walk a
+# Mission from setup to the exact retained candidate bytes, and that what the store reports about
+# those bytes is true.
+#
+# Every decision lives in scripts/packaged_outcome_journey.py behind functions with tests. This
+# file owns argument refusal and the disposable environment, and nothing else.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: scripts/packaged-outcome-journey APPIMAGE EVIDENCE_DIR" >&2
+    exit 2
+fi
+
+appimage="$1"
+evidence_dir="$2"
+
+# An absent or unusable AppImage is an argument refusal, not a journey result. The first-run
+# harness records it as a matrix row because it HAS a matrix; here there is nothing to record it
+# in, and a summary of thirteen unrun rows would say less than this line does.
+if [ ! -e "$appimage" ]; then
+    echo "packaged-outcome-journey: AppImage is absent: $appimage" >&2
+    exit 2
+fi
+if [ -d "$appimage" ]; then
+    echo "packaged-outcome-journey: AppImage path is a directory: $appimage" >&2
+    exit 2
+fi
+if [ ! -x "$appimage" ]; then
+    echo "packaged-outcome-journey: AppImage is not executable: $appimage" >&2
+    exit 2
+fi
+
+if [ -e "$evidence_dir" ]; then
+    echo "packaged-outcome-journey: evidence directory already exists: $evidence_dir" >&2
+    exit 2
+fi
+
+journey="$(pwd)/scripts/packaged_outcome_journey.py"
+if [ ! -r "$journey" ]; then
+    echo "packaged-outcome-journey: journey module is absent or unreadable: $journey" >&2
+    exit 2
+fi
+
+appimage="$(cd "$(dirname "$appimage")" && pwd)/$(basename "$appimage")"
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
+sha256sum "$appimage" > "$evidence_dir/appimage.sha256"
+
+# The store is disposable and dies with this run. A journey that reused a real data directory
+# would be reporting on state it did not create.
+work="$(mktemp -d)"
+data="$work/data"
+mkdir -p "$data"
+display=":97"
+xvfb_pid=""
+app_pid=""
+
+cleanup() {
+    status=$?
+    [ -n "$app_pid" ] && { kill "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true; }
+    [ -n "$xvfb_pid" ] && { kill "$xvfb_pid" 2>/dev/null || true; wait "$xvfb_pid" 2>/dev/null || true; }
+    rm -rf "$work"
+    exit "$status"
+}
+trap cleanup EXIT
+
+Xvfb "$display" -screen 0 1280x800x24 -nolisten tcp > "$work/xvfb.log" 2>&1 &
+xvfb_pid=$!
+
+DISPLAY="$display" XDG_DATA_HOME="$data" HOME="$work" \
+    "$appimage" --appimage-extract-and-run > "$work/app.stdout" 2> "$work/app.stderr" &
+app_pid=$!
+
+# The passphrase is a fixture for a store that is deleted at the end of this run. It is typed
+# into the UI and never written to evidence; the summary carries exits, never bodies of the two
+# credential-bearing responses.
+passphrase='beacon-outcome-journey-passphrase-2026'
+
+set +e
+python3 "$journey" \
+    --appimage "$appimage" \
+    --evidence-dir "$evidence_dir" \
+    --data-dir "$data" \
+    --display "$display" \
+    --passphrase "$passphrase" \
+    --work-dir "$work"
+journey_status=$?
+set -e
+
+# Raw process logs cross the same export boundary as screenshots. Reuse the first-run scanner
+# rather than a second one, and export nothing if it refuses.
+source "$(pwd)/scripts/clean-host-first-run-state"
+if ! first_run_scan_for_secrets "$evidence_dir" "$work/app.stdout" "$work/app.stderr"; then
+    echo "packaged-outcome-journey: refusing evidence export after the secret scan" >&2
+    exit 1
+fi
+install -m 600 "$work/app.stdout" "$evidence_dir/app.stdout"
+install -m 600 "$work/app.stderr" "$evidence_dir/app.stderr"
+: > "$evidence_dir/.export-safe"
+
+if [ "$journey_status" -ne 0 ]; then
+    echo "packaged-outcome-journey: journey incomplete; see $evidence_dir/summary.json" >&2
+    exit "$journey_status"
+fi
+
+echo "packaged-outcome-journey: evidence: $evidence_dir"
