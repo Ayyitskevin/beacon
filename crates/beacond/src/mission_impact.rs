@@ -1964,3 +1964,135 @@ mod display_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// R68/H1: the recording Event, proved
+// ---------------------------------------------------------------------------------------------
+
+/// Why a classification did not prove itself WITH its recording Event.
+///
+/// A distinct type rather than a new arm on [`ClassificationStoreError`]: the existing enum is
+/// matched exhaustively in twenty-six places outside this module, and a new failure mode that only
+/// this reader can raise belongs beside this reader.
+pub(crate) enum ClassificationEventProof {
+    Store(ClassificationStoreError),
+    /// No `mission.impact_classified` Event in this Workspace names this digest, or more than one
+    /// does. Both are refusals: none is a row the ledger does not account for, and two would make
+    /// "when was this classified" a question with two answers.
+    RecordingEventUnaccounted,
+    /// The Event exists, and what it carries disagrees with the verified record.
+    DivergentEvidence,
+}
+
+/// Written out rather than derived, so `name()` and the payload are real reads (R78). Output is
+/// byte-identical to the derived form in both the normal and the alternate mode; the equivalence
+/// test below holds the strings the derived impl produced.
+impl fmt::Debug for ClassificationEventProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(inner) => f.debug_tuple(self.name()).field(inner).finish(),
+            Self::RecordingEventUnaccounted | Self::DivergentEvidence => f.write_str(self.name()),
+        }
+    }
+}
+
+impl ClassificationEventProof {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Store(_) => "Store",
+            Self::RecordingEventUnaccounted => "RecordingEventUnaccounted",
+            Self::DivergentEvidence => "DivergentEvidence",
+        }
+    }
+}
+
+/// The verified classification AND the `mission.impact_classified` Event that recorded it.
+///
+/// `verified_classification_within` proves the bytes, the digest and the projections and returns
+/// without ever asking the ledger about them; even the startup pass calls only that one. For a
+/// packet that calls itself independent owner evidence, a digest is not sufficient provenance
+/// (R68/H1), so this composes the existing reader with its recording Event in the SAME snapshot.
+pub(crate) fn verified_classification_with_event_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<MissionImpactClassification>, ClassificationEventProof> {
+    let Some(record) = verified_classification_within(connection, workspace_id, digest_value)
+        .map_err(ClassificationEventProof::Store)?
+    else {
+        return Ok(None);
+    };
+
+    // EXACTLY ONE Event naming this digest, by identity -- not merely one that matches the digest
+    // we already hold (`mission_completion_store.rs:1220-1232`'s rule, kept).
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json, occurred_at_ms FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.impact_classified'
+               AND json_extract(payload_json, '$.digest.value') = ?2",
+        )
+        .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?;
+    let payloads: Vec<(String, i64)> = statement
+        .query_map(
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ClassificationEventProof::RecordingEventUnaccounted)?;
+    let [(payload_json, occurred_at_ms)] = payloads.as_slice() else {
+        return Err(ClassificationEventProof::RecordingEventUnaccounted);
+    };
+    let occurred_at_ms =
+        u64::try_from(*occurred_at_ms).map_err(|_| ClassificationEventProof::DivergentEvidence)?;
+
+    let payload: MissionImpactClassifiedPayload = serde_json::from_str(payload_json)
+        .map_err(|_| ClassificationEventProof::DivergentEvidence)?;
+    // The bytes the Event carries must be the bytes the row proved, and every redundant selector
+    // must agree. An Event that says something the record does not is a mismatch, never a
+    // correction.
+    if payload.workspace_id != workspace_id.to_string()
+        || payload.digest.algorithm != record.digest().algorithm
+        || payload.digest.value != *digest_value
+        || payload.digest.canonicalizer != record.digest().canonicalizer
+        || payload.classification_id != record.payload().classification_id.to_string()
+        || payload.mission_id != record.payload().mission_id.to_string()
+        || payload.project_id != record.payload().policy.project_id.to_string()
+        || payload.version != record.payload().version
+        || payload.impact != record.payload().impact.as_str()
+        || payload.basis != record.payload().basis.as_str()
+        || payload.policy_revision != record.payload().policy.policy_revision
+        || payload.charter_revision != record.payload().policy.charter_revision
+        || payload.canonical_bytes_base64 != BASE64.encode(record.canonical_bytes())
+        || payload.classified_at_ms != record.payload().classified_at_ms
+        || occurred_at_ms != record.payload().classified_at_ms
+    {
+        return Err(ClassificationEventProof::DivergentEvidence);
+    }
+    Ok(Some(record))
+}
+
+/// R78: Debug equivalence for `ClassificationEventProof`.
+///
+/// The expected strings are the ones the DERIVED impl produced at 7195e8c3, observed by a
+/// throwaway probe before any edit and recorded in the R78 evidence directory. They are literals
+/// here and are NOT recomputed from the formatter under test, so this test can disagree with it.
+#[cfg(test)]
+mod r78_debug_equivalence {
+    use super::{ClassificationEventProof, ClassificationStoreError};
+
+    #[test]
+    fn s4_gate_debug_output_unchanged_for_classification_event_proof() {
+        let payload = ClassificationEventProof::Store(ClassificationStoreError::DigestMismatch);
+        assert_eq!(format!("{payload:?}"), "Store(DigestMismatch)");
+        assert_eq!(format!("{payload:#?}"), "Store(\n    DigestMismatch,\n)");
+
+        let unaccounted = ClassificationEventProof::RecordingEventUnaccounted;
+        assert_eq!(format!("{unaccounted:?}"), "RecordingEventUnaccounted");
+        assert_eq!(format!("{unaccounted:#?}"), "RecordingEventUnaccounted");
+
+        let divergent = ClassificationEventProof::DivergentEvidence;
+        assert_eq!(format!("{divergent:?}"), "DivergentEvidence");
+        assert_eq!(format!("{divergent:#?}"), "DivergentEvidence");
+    }
+}
