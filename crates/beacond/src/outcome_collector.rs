@@ -1626,6 +1626,70 @@ impl<'a> Collector<'a> {
         })
     }
 
+    /// The same citation, WITH the exact stored `receipt_json` bytes, in this same snapshot.
+    ///
+    /// R68/H1: `ReceiptRef` carries a checksum and not the JSON, but the Outcome-fidelity packet
+    /// must carry the bytes themselves. Re-reading them later, outside the snapshot that replayed
+    /// the owning Events, would hand a packet bytes nobody proved -- so the seam returns them from
+    /// inside the read that already did the proving, and never opens a second one.
+    ///
+    /// The owner registry (`RECEIPT_RUN_EVENTS`) covers preflight and execution only. A candidate
+    /// citing a dispatch Receipt therefore refuses here rather than being collected under a
+    /// broadened version range; R59.6 makes that refusal the recorded boundary of F3's first
+    /// subset, not a gap to paper over.
+    pub(crate) fn receipt_with_bytes(
+        &self,
+        run_uuid: Uuid,
+        boundary: Option<u64>,
+    ) -> Result<(ReceiptRef, Vec<u8>), CollectorRefusal> {
+        let reference = self.receipt(run_uuid, boundary)?;
+        let bytes: Vec<u8> = self
+            .connection
+            .query_row(
+                "SELECT CAST(receipt_json AS BLOB) FROM receipts
+                 WHERE workspace_id = ?1 AND run_id = ?2",
+                params![self.workspace_id.to_string(), run_uuid.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| CollectorRefusal::Unverified {
+                kind: "receipt",
+                reason: error.to_string(),
+            })?;
+        // The checksum the citation already carries is what proves these are the same bytes the
+        // verified read hashed: a second query in one snapshot cannot see a different row, and this
+        // says so in a way a test can fail.
+        if HEXLOWER.encode(&sha256(&bytes)) != reference.outcome_checksum {
+            return Err(CollectorRefusal::Unverified {
+                kind: "receipt",
+                reason: "retained receipt bytes disagree with the verified checksum".to_owned(),
+            });
+        }
+        Ok((reference, bytes))
+    }
+
+    /// Whether an otherwise unpositioned Receipt belongs to the dispatch owner this registry does
+    /// not yet replay. Candidate evaluation refuses this case by its ruled public name rather than
+    /// broadening the registered preflight/execution owner set.
+    pub(crate) fn receipt_has_unregistered_dispatch_owner(
+        &self,
+        run_uuid: Uuid,
+    ) -> Result<bool, CollectorRefusal> {
+        let count: i64 = self
+            .connection
+            .query_row(
+                "SELECT count(*) FROM events
+                 WHERE workspace_id = ?1 AND kind = 'proposal.dispatched'
+                   AND json_extract(payload_json, '$.runId') = ?2",
+                params![self.workspace_id.to_string(), run_uuid.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| CollectorRefusal::Unverified {
+                kind: "receipt",
+                reason: error.to_string(),
+            })?;
+        Ok(count > 0)
+    }
+
     /// Every run Event naming this run, replayed through its OWNING module's verifier, and the
     /// latest sequence among them.
     ///
