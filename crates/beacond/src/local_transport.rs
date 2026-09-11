@@ -35,6 +35,42 @@ use crate::{
 const PROTOCOL_VERSION: u16 = 1;
 const AUTH_TOKEN_BYTES: usize = 32;
 const MAX_MESSAGE_BYTES: u64 = 64 * 1024;
+/// The completion family's REQUEST parser ceiling (`C4-transport-decision.md` 2-3).
+///
+/// A finite parser ceiling, not a resource grant: the only two commands that may use it are
+/// `PreviewMissionCompletion` and `RecordMissionCompletion`, whose argument is one
+/// `CompletionIntentRequest`. A conservative upper bound on that request's compact JSON --
+/// `J <= 2*C + (J - 2*C)`, since permitted escaping at most doubles a scalar's UTF-8 bytes and the
+/// owner caps `C` at 65,536 canonical bytes -- is 147,094 plus independently counted envelope
+/// overhead; this constant covers that with margin, and `completion_ceiling_covers_the_grammar`
+/// fails if the grammar ever outgrows it.
+///
+/// Nothing else moves: `MAX_MESSAGE_BYTES` remains every other command's accepted domain, its
+/// refusal, and its refusal ORDER.
+const MAX_COMPLETION_REQUEST_BYTES: u64 = 160 * 1024;
+/// The completion family's RESPONSE parser ceiling, for `PreviewMissionCompletion` ALONE.
+///
+/// `RecordMissionCompletion` answers with one token and `GetMissionCompletionIntent` with a token or
+/// null, so both keep the 64 KiB domain. Only the preview echoes the whole normalized request, plus
+/// its bindings and the Mission's declared condition texts.
+const MAX_COMPLETION_PREVIEW_RESPONSE_BYTES: u64 = 192 * 1024;
+/// The three domains are ordered, and a violation cannot compile: the old domain is the smallest, a
+/// completion request may exceed it, and only a preview response may exceed that.
+const _: () = assert!(MAX_MESSAGE_BYTES < MAX_COMPLETION_REQUEST_BYTES);
+const _: () = assert!(MAX_COMPLETION_REQUEST_BYTES < MAX_COMPLETION_PREVIEW_RESPONSE_BYTES);
+
+/// C7's candidate DOCUMENT response -- the one family that carries stored BYTES.
+///
+/// `4 * ceil(MAX_CONTENT_BYTES / 3)` is 1,398,104 bytes of base64 body for a maximal 1 MiB content,
+/// plus the envelope and the eight keys' own identities, rounded up to a whole KiB. base64 is chosen
+/// because its size is a pure function of the byte count with NO data dependence, so this ceiling is
+/// arithmetic rather than a worst case an adversarial document could approach.
+///
+/// A RESPONSE ceiling only. The request stays in the default domain -- it is one digest -- and no
+/// other family's limit, refusal order or deadline moves.
+const MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES: u64 = 1_403_904;
+const _: () =
+    assert!(MAX_COMPLETION_PREVIEW_RESPONSE_BYTES < MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES);
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -119,6 +155,30 @@ pub enum LocalErrorCode {
     StaleMissionTeam,
     MissionMemberIneligible,
     MissionUnavailable,
+    MissionCompletionUnavailable,
+    CompletionIntentChanged,
+    CompletionAlreadyRecorded,
+    CompletionResidentNotInAdmissionRoster,
+    CompletionConditionCoverageIncomplete,
+    CompletionSupportOverLimit,
+    CompletionTextOverLimit,
+    CompletionSpendReasonRequired,
+    CompletionInvalidDetails,
+    ClassificationStalePolicyRevision,
+    ClassificationNoPolicyPublished,
+    ClassificationAlreadyClassified,
+    ClassificationPredecessorNotLatest,
+    ClassificationPredecessorUnproven,
+    ClassificationVersionCeilingReached,
+    ClassificationTextOverLimit,
+    ClassificationInvalidDetails,
+    MissionClassificationUnavailable,
+    OutcomeNotCompleted,
+    OutcomeNotClassified,
+    OutcomeNoClassificationAtCompletion,
+    OutcomePreparationUnavailable,
+    OutcomeCandidateNotFound,
+    OutcomeCandidateUnavailable,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -157,6 +217,19 @@ pub enum LocalTransportError {
     SampleProject(SampleProjectError),
     Team(TeamError),
     Mission(MissionError),
+    MissionCompletionRead(crate::MissionCompletionReadError),
+    MissionCompletionCommand(crate::CompletionCommandError),
+    MissionImpactClassification(crate::ClassificationCommandError),
+    /// A preparation refusal from BEFORE the owner committed. Nothing was written, so the three
+    /// absence/cut codes and the account recursion are all truthful.
+    OutcomePreparation(crate::PrepareRefusal),
+    /// A failure from AFTER `prepare_for_mission` returned. The candidate may already exist, so every
+    /// arm here -- `Account` included -- is `outcome_preparation_unavailable`.
+    OutcomePreparationAfterCommit(PostPreparationFault),
+    /// A refusal from the READ-ONLY candidate document read. Two stages, named rather than merged:
+    /// see `CandidateDocumentFault`. A read has no post-write uncertainty phase, so account refusals
+    /// keep their own codes at either stage.
+    OutcomeCandidateDocument(CandidateDocumentFault),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -200,6 +273,111 @@ fn invalid_draft_tag(reason: &crate::InvalidRepositoryDraft) -> &'static str {
         crate::InvalidRepositoryDraft::Source => "Source",
         crate::InvalidRepositoryDraft::BaseRevision => "BaseRevision",
         crate::InvalidRepositoryDraft::DeclaredChecks => "DeclaredChecks",
+    }
+}
+
+/// `MissionCompletionReadError::name()` is a closed TWO-token vocabulary -- `Account` and
+/// `Unavailable` -- so the account child it wraps never reached this caller line, while
+/// `expected_completion_read` has always said `Account.<child>`. Projected here, in the same shape
+/// as `recent_receipt_tag` below, so the owner keeps its own closed name and the wire mapping in
+/// `wire_error_from_mission_completion` is untouched.
+fn completion_read_tag(error: &crate::MissionCompletionReadError) -> String {
+    match error {
+        crate::MissionCompletionReadError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        crate::MissionCompletionReadError::Unavailable(_) => "Unavailable".to_owned(),
+    }
+}
+
+/// The preparation refusal's NAME for a transport caller, account child included.
+///
+/// Same shape and same reason as its siblings: the owner's `PrepareRefusal` has no `name()`, and its
+/// `Display` is written for whoever owns that row. Every payload -- driver text, paths, digests, the
+/// assembler's and collector's own sentences -- stays in `Debug` and `source`.
+fn prepare_refusal_tag(error: &crate::PrepareRefusal) -> String {
+    match error {
+        crate::PrepareRefusal::Account(cause) => format!("Account.{}", account_tag(cause)),
+        crate::PrepareRefusal::CrossWorkspace => "CrossWorkspace".to_owned(),
+        crate::PrepareRefusal::Manifest(_) => "Manifest".to_owned(),
+        crate::PrepareRefusal::Completion(_) => "Completion".to_owned(),
+        crate::PrepareRefusal::Classification(_) => "Classification".to_owned(),
+        crate::PrepareRefusal::ClassificationAbsent => "ClassificationAbsent".to_owned(),
+        crate::PrepareRefusal::Irreconcilable { .. } => "Irreconcilable".to_owned(),
+        crate::PrepareRefusal::Render(_) => "Render".to_owned(),
+        crate::PrepareRefusal::Artifact(_) => "Artifact".to_owned(),
+        crate::PrepareRefusal::MissionNotCompleted { .. } => "MissionNotCompleted".to_owned(),
+        crate::PrepareRefusal::MissionNotClassified { .. } => "MissionNotClassified".to_owned(),
+        crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. } => {
+            "MissionNotClassifiedAtBoundary".to_owned()
+        }
+        crate::PrepareRefusal::Collector(_) => "Collector".to_owned(),
+        crate::PrepareRefusal::Assembly(_) => "Assembly".to_owned(),
+        crate::PrepareRefusal::Sources(_) => "Sources".to_owned(),
+    }
+}
+
+/// The identity labels this transport's own re-read supplies, and the whole outward vocabulary of
+/// `PostPreparationFault::Identity`.
+///
+/// `Identity.field` is a public `&'static str`, so the type permits a construction carrying any
+/// static text at all -- a path, a column name, a CR/LF. An outward line must never interpolate
+/// what it has not named, so the projection below is closed against THIS list and falls back to the
+/// bare arm. R42's static-field lesson: a `&'static str` is still caller-supplied.
+const IDENTITY_FIELD_LABELS: [&str; 5] = [
+    "manifestId",
+    "manifestDigest",
+    "candidateArtifactDigest",
+    "missionId",
+    "appendixRequest",
+];
+
+/// The post-commit fault's NAME. The phase is part of the name, because the phase is the fact that
+/// decides what a caller may conclude.
+fn post_preparation_tag(fault: &PostPreparationFault) -> String {
+    match fault {
+        PostPreparationFault::Read(refusal) => format!("Read.{}", prepare_refusal_tag(refusal)),
+        PostPreparationFault::Identity { field, .. } => {
+            match IDENTITY_FIELD_LABELS.iter().find(|named| *named == field) {
+                Some(named) => format!("Identity.{named}"),
+                None => "Identity".to_owned(),
+            }
+        }
+    }
+}
+
+/// The classification command fault's NAME for a transport caller, account child included.
+///
+/// Same shape and same reason as `completion_command_tag`: the owner's `name()` answers a bare
+/// `"Account"`, which is right for its own closed vocabulary and too coarse for this line. The
+/// field inside `MalformedRequest` and every string inside `ClassificationCommandUnavailable` stay
+/// in `Debug` and `source`.
+fn classification_command_tag(error: &crate::ClassificationCommandError) -> String {
+    match error {
+        crate::ClassificationCommandError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        named => named.name().to_owned(),
+    }
+}
+
+/// The completion command fault's NAME for a transport caller, with its account child named too.
+///
+/// `CompletionCommandError::name()` answers a bare `"Account"`, which is right for the owner's own
+/// closed vocabulary and wrong for this line: every other wrapper here -- `recent_receipt_tag`,
+/// `resource_discovery_tag`, `starter_organization_tag` -- names the account fault beneath it, and a
+/// transport line that says only "Account" cannot tell a reader whether the session was locked or
+/// the store was unreadable. Recursing HERE keeps the owner's vocabulary untouched (its file is not
+/// this slice's to edit) while this caller's line stays as specific as its siblings'.
+///
+/// `MalformedRequest` and `DuplicateSetEntry` carry the refused FIELD; it stays in `Debug` and
+/// `source` and never reaches this line.
+fn completion_command_tag(error: &crate::CompletionCommandError) -> String {
+    match error {
+        crate::CompletionCommandError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        named => named.name().to_owned(),
     }
 }
 
@@ -500,6 +678,53 @@ impl fmt::Display for LocalTransportError {
                 )
             }
             Self::Team(error) => write!(formatter, "Team operation failed: {}", team_tag(error)),
+            // ONE closed literal, and the account child is part of it: nothing beneath the
+            // child -- driver text, a path, a note an operator wrote -- is allowed onto this line.
+            Self::MissionCompletionRead(error) => {
+                write!(
+                    formatter,
+                    "Mission completion read failed: {}",
+                    completion_read_tag(error)
+                )
+            }
+            // ONE closed literal, the owner's own outward token. `MalformedRequest` and
+            // `DuplicateSetEntry` each carry the field they refused; that field stays in the derived
+            // `Debug`, never on this line and never in the wire code.
+            Self::MissionCompletionCommand(error) => {
+                write!(
+                    formatter,
+                    "Mission completion command failed: {}",
+                    completion_command_tag(error)
+                )
+            }
+            Self::MissionImpactClassification(error) => {
+                write!(
+                    formatter,
+                    "Mission impact classification failed: {}",
+                    classification_command_tag(error)
+                )
+            }
+            Self::OutcomePreparation(error) => {
+                write!(
+                    formatter,
+                    "Outcome preparation failed: {}",
+                    prepare_refusal_tag(error)
+                )
+            }
+            Self::OutcomePreparationAfterCommit(fault) => {
+                write!(
+                    formatter,
+                    "Outcome preparation failed after the candidate was written: {}",
+                    post_preparation_tag(fault)
+                )
+            }
+            Self::OutcomeCandidateDocument(fault) => {
+                write!(
+                    formatter,
+                    "Outcome candidate document read failed: {}",
+                    candidate_document_tag(fault)
+                )
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -613,6 +838,24 @@ impl From<SampleProjectError> for LocalTransportError {
 impl From<TeamError> for LocalTransportError {
     fn from(error: TeamError) -> Self {
         Self::Team(error)
+    }
+}
+
+impl From<crate::MissionCompletionReadError> for LocalTransportError {
+    fn from(error: crate::MissionCompletionReadError) -> Self {
+        Self::MissionCompletionRead(error)
+    }
+}
+
+impl From<crate::CompletionCommandError> for LocalTransportError {
+    fn from(error: crate::CompletionCommandError) -> Self {
+        Self::MissionCompletionCommand(error)
+    }
+}
+
+impl From<crate::ClassificationCommandError> for LocalTransportError {
+    fn from(error: crate::ClassificationCommandError) -> Self {
+        Self::MissionImpactClassification(error)
     }
 }
 
@@ -770,6 +1013,204 @@ mod zeroizing_string {
     }
 }
 
+/// Which commands may exceed `MAX_MESSAGE_BYTES` as a REQUEST.
+///
+/// Exactly the two that carry a `CompletionIntentRequest`. `GetMissionCompletionIntent` is
+/// deliberately absent: its argument is one UUID, so granting it the larger domain would widen a
+/// parser ceiling for a command that cannot need it.
+fn accepts_completion_sized_request(command: &LocalCommand) -> bool {
+    matches!(
+        command,
+        LocalCommand::PreviewMissionCompletion { .. }
+            | LocalCommand::RecordMissionCompletion { .. }
+    )
+}
+
+/// The Operator's appendix choice, as a closed pair. There is deliberately no `omit`, no `default`
+/// and no third arm: the owner's `AppendixRequest` has exactly two (`outcome.rs:541-544`), and a wire
+/// vocabulary that admitted more would be offering a choice nothing can honour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppendixRequestDto {
+    PolicyDefault,
+    Include,
+}
+
+impl AppendixRequestDto {
+    fn into_owner(self) -> crate::AppendixRequest {
+        match self {
+            Self::PolicyDefault => crate::AppendixRequest::PolicyDefault,
+            Self::Include => crate::AppendixRequest::Include,
+        }
+    }
+
+    /// The OTHER direction, read from the verified manifest rather than echoed from the request: the
+    /// receipt says what the stored manifest holds, not what the caller asked for.
+    fn from_owner(value: crate::AppendixRequest) -> Self {
+        match value {
+            crate::AppendixRequest::PolicyDefault => Self::PolicyDefault,
+            crate::AppendixRequest::Include => Self::Include,
+        }
+    }
+}
+
+/// The resolved appendix mode, derived by the verified manifest's own `appendix_mode()`
+/// (`outcome.rs:640-646`) and never stored. Mapped explicitly in both directions, so a new owner arm
+/// is a compile error here rather than a silent gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppendixModeDto {
+    Included,
+    PolicyStateNotHighImpact,
+}
+
+impl AppendixModeDto {
+    fn from_owner(value: crate::AppendixMode) -> Self {
+        match value {
+            crate::AppendixMode::Included => Self::Included,
+            crate::AppendixMode::PolicyStateNotHighImpact => Self::PolicyStateNotHighImpact,
+        }
+    }
+}
+
+/// A digest envelope, whole. Never a bare hex string: a value without its algorithm and canonicalizer
+/// is not an identity, and the two digests in this receipt are under DIFFERENT canonicalizers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DigestEnvelopeDto {
+    pub algorithm: String,
+    pub canonicalizer: String,
+    pub value: String,
+}
+
+/// What ONE preparation produced, read back through the owner's own verified readers.
+///
+/// Nine fields and nothing else: no bytes, no status, no evaluation or publication flag, no authority
+/// and no generated support. The result arm itself means "prepared"; preparing does not evaluate or
+/// publish, and this receipt says nothing about whether anything later did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparedOutcomeCandidateDto {
+    pub mission_id: uuid::Uuid,
+    pub appendix_request: AppendixRequestDto,
+    pub appendix_mode: AppendixModeDto,
+    pub manifest_id: uuid::Uuid,
+    pub manifest_digest: DigestEnvelopeDto,
+    pub candidate_artifact_digest: DigestEnvelopeDto,
+    pub candidate_content_digest: DigestEnvelopeDto,
+    pub candidate_content_bytes: u64,
+    pub media_type: String,
+}
+
+/// Why a preparation failed AFTER `prepare_for_mission` returned.
+///
+/// A phase marker, not a second owner. Both arms retain the real cause for `Debug` and `source`, and
+/// both project to one outward code: once the owner has committed, nothing this transport learns
+/// afterwards can say whether the candidate exists.
+#[derive(Debug)]
+pub enum PostPreparationFault {
+    /// One of the two verified re-reads refused. Its own refusal, carried whole -- including an
+    /// `Account` refusal, which is NOT definite at this phase even though it is before the commit.
+    Read(PublishOrPrepare),
+    /// A re-read succeeded and disagreed with what `prepare_for_mission` returned. Not an owner
+    /// refusal at all, so it gets its own value rather than borrowing one that never happened.
+    Identity {
+        field: &'static str,
+        expected: String,
+        observed: String,
+    },
+}
+
+/// The owner refusal type the preparation readers answer with, named here so
+/// `PostPreparationFault::Read` reads as what it is.
+pub type PublishOrPrepare = crate::PrepareRefusal;
+
+/// Why reading one candidate's document failed, WITH the stage it failed at.
+///
+/// The stage is the fact that decides what the caller may conclude, because the two owner calls are
+/// independent: `OutcomeService::manifest` verifies the manifest once (`outcome_store.rs:1078-1086`),
+/// and `OutcomeService::candidate` verifies it AGAIN before following its Artifact
+/// (`:1089-1101`). They do not share a transaction or a snapshot, and nothing here claims they do.
+///
+/// So "this Workspace holds no such manifest" is answerable ONLY at the first read. Once a manifest
+/// has been held, a later absence -- of the manifest or of the Artifact behind it -- means the store
+/// disagreed with itself between two reads, which is not an absence a caller may act on.
+#[derive(Debug)]
+pub enum CandidateDocumentFault {
+    /// The INITIAL manifest read. `Absent` and `CrossWorkspace` here are the only absence this
+    /// command reports, and they report it as the SAME answer.
+    Manifest(crate::PrepareRefusal),
+    /// `candidate()`, including its own repeated manifest verification and the Artifact behind it.
+    /// Every non-account refusal here is unavailable, absence-shaped ones included.
+    Candidate(crate::PrepareRefusal),
+    /// Both reads succeeded and disagreed about the binding between them. Not an owner refusal at
+    /// all, so it gets its own value rather than borrowing one that never happened.
+    Identity {
+        field: &'static str,
+        expected: String,
+        observed: String,
+    },
+    /// The verified content bytes are not UTF-8. The write path can only store a rendered `String`,
+    /// so reaching this is a corruption signal -- and it must never be silently repaired.
+    Content {
+        bytes: u64,
+        error: std::str::Utf8Error,
+    },
+}
+
+/// The identity labels this command's binding comparison supplies, and the whole outward vocabulary
+/// of `CandidateDocumentFault::Identity`.
+///
+/// Closed from the start, for the reason C6 learned the hard way: `field` is a public `&'static str`,
+/// so the type permits any static text at all, and an outward line must never interpolate what it has
+/// not named.
+const CANDIDATE_DOCUMENT_FIELD_LABELS: [&str; 3] = [
+    "manifestDigest",
+    "candidateArtifactDigest",
+    "candidateContentBytes",
+];
+
+/// The candidate-read fault's NAME, stage first. The stage is part of the name because it is the
+/// fact that decides what a caller may conclude.
+fn candidate_document_tag(fault: &CandidateDocumentFault) -> String {
+    match fault {
+        CandidateDocumentFault::Manifest(refusal) => {
+            format!("Manifest.{}", prepare_refusal_tag(refusal))
+        }
+        CandidateDocumentFault::Candidate(refusal) => {
+            format!("Candidate.{}", prepare_refusal_tag(refusal))
+        }
+        CandidateDocumentFault::Identity { field, .. } => {
+            match CANDIDATE_DOCUMENT_FIELD_LABELS
+                .iter()
+                .find(|named| *named == field)
+            {
+                Some(named) => format!("Identity.{named}"),
+                None => "Identity".to_owned(),
+            }
+        }
+        CandidateDocumentFault::Content { .. } => "Content".to_owned(),
+    }
+}
+
+/// One candidate's stored document, read back through the owner's own verified readers.
+///
+/// Eight fields and nothing else: no evaluation, no publication, no "current" flag, no summary and no
+/// status. The bytes travel as base64 of the EXACT retained content -- never a re-rendered string --
+/// because the document's identity is its byte sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutcomeCandidateDocumentDto {
+    pub mission_id: uuid::Uuid,
+    pub manifest_id: uuid::Uuid,
+    pub manifest_digest: DigestEnvelopeDto,
+    pub candidate_artifact_digest: DigestEnvelopeDto,
+    pub candidate_content_digest: DigestEnvelopeDto,
+    pub candidate_content_bytes: u64,
+    pub media_type: String,
+    pub candidate_content_base64: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope {
@@ -912,6 +1353,42 @@ enum LocalCommand {
     Mission {
         mission_id: uuid::Uuid,
     },
+    MissionCompletion {
+        mission_id: uuid::Uuid,
+    },
+    /// Derive the whole intended record and its reviewed-intent token. Writes nothing.
+    PreviewMissionCompletion {
+        request: crate::CompletionIntentRequest,
+    },
+    /// Record the reviewed completion. The token is what the Operator reviewed, not a fresh one.
+    RecordMissionCompletion {
+        request: crate::CompletionIntentRequest,
+        reviewed_intent_sha256: String,
+    },
+    /// The token of the completion visible for this Mission in one snapshot, or null.
+    GetMissionCompletionIntent {
+        mission_id: uuid::Uuid,
+    },
+    /// Record one Mission impact classification. The Operator's five keys, and nothing derived.
+    ClassifyMissionImpact {
+        request: crate::ClassificationIntentRequest,
+    },
+    /// One bounded snapshot of a Mission's classification state: cursor, published Policy, latest.
+    GetMissionClassification {
+        mission_id: uuid::Uuid,
+    },
+    /// Prepare one Outcome candidate from a Mission's recorded completion and evidence. A mutating
+    /// owner action; it does not evaluate and does not publish.
+    PrepareOutcomeCandidate {
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    },
+    /// Read one prepared candidate's stored document. READ-ONLY: it writes nothing, prepares nothing
+    /// and evaluates nothing. Keyed by the manifest digest the caller already holds -- there is no
+    /// Mission-to-candidate reader to key it by.
+    ReadOutcomeCandidateDocument {
+        manifest_digest: String,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1020,6 +1497,30 @@ enum LocalResult {
     Missions {
         missions: Vec<MissionView>,
     },
+    MissionCompletion {
+        completion: Option<crate::CompletionView>,
+    },
+    MissionCompletionPreview {
+        preview: crate::CompletionPreview,
+    },
+    MissionCompletionAcknowledgement {
+        intent: crate::ReviewedIntent,
+    },
+    MissionCompletionIntent {
+        intent: Option<crate::ReviewedIntent>,
+    },
+    MissionClassification {
+        classification: crate::ClassificationView,
+    },
+    MissionClassificationObservation {
+        observation: crate::ClassificationObservation,
+    },
+    PreparedOutcomeCandidate {
+        candidate: PreparedOutcomeCandidateDto,
+    },
+    OutcomeCandidateDocument {
+        document: OutcomeCandidateDocumentDto,
+    },
     Mission {
         mission: MissionView,
     },
@@ -1065,6 +1566,9 @@ pub struct LocalSupervisorServer {
     recent_receipts: crate::RecentReceiptService,
     teams: TeamService,
     missions: MissionService,
+    mission_completions: crate::MissionCompletionReadService,
+    completion_commands: crate::MissionCompletionCommandService,
+    impact_classifications: crate::MissionImpactCommandService,
     outcomes: OutcomeService,
     resource_discovery: ResourceDiscoveryService,
     disk_encryption: DiskEncryptionService,
@@ -1111,6 +1615,12 @@ impl LocalSupervisorServer {
             crate::RecentReceiptService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
+        let mission_completions =
+            crate::MissionCompletionReadService::new(Arc::clone(&accounts), report.workspace.id);
+        let completion_commands =
+            crate::MissionCompletionCommandService::new(Arc::clone(&accounts), report.workspace.id);
+        let impact_classifications =
+            crate::MissionImpactCommandService::new(Arc::clone(&accounts), report.workspace.id);
         let outcomes = OutcomeService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -1145,6 +1655,9 @@ impl LocalSupervisorServer {
             recent_receipts,
             teams,
             missions,
+            mission_completions,
+            completion_commands,
+            impact_classifications,
             outcomes,
             resource_discovery,
             disk_encryption,
@@ -1186,13 +1699,45 @@ impl LocalSupervisorServer {
         }
     }
 
+    /// Read one request, refusing by SIZE before anything else and by FAMILY before anything but the
+    /// parse.
+    ///
+    /// The command name lives inside the JSON (`RequestEnvelope` is parsed as a whole), so the size
+    /// decision cannot be made per command before reading. The order below is what keeps every old
+    /// command's behaviour identical anyway:
+    ///
+    /// 1. over the completion ceiling -> `Protocol`, before any parse, as today;
+    /// 2. parse ONCE; a parse failure on a body over the OLD ceiling is `Protocol` -- that body
+    ///    could not be read at all before, so its refusal must not become `Json`; an old-size parse
+    ///    failure stays `Json`;
+    /// 3. a successfully parsed NON-completion command over the old ceiling -> `Protocol`, BEFORE
+    ///    the protocol-version and token checks, which is exactly where it was refused before;
+    /// 4. then the original checks, unchanged.
+    ///
+    /// Disclosed consequence (`C4-transport-decision.md` 2, 4): an oversized valid old body now
+    /// costs one parse, and an unauthenticated peer can make this read up to
+    /// `MAX_COMPLETION_REQUEST_BYTES + 1` bytes and parse up to `MAX_COMPLETION_REQUEST_BYTES` of
+    /// them before the token check, where the old ceiling was 65,537/65,536. Kevin gates that before
+    /// publication.
     fn read_request(&self, stream: &mut UnixStream) -> Result<LocalCommand, LocalTransportError> {
         let mut bytes = Zeroizing::new(Vec::new());
-        stream.take(MAX_MESSAGE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+        stream
+            .take(MAX_COMPLETION_REQUEST_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        let received = bytes.len() as u64;
+        if received > MAX_COMPLETION_REQUEST_BYTES {
             return Err(LocalTransportError::Protocol);
         }
-        let request: RequestEnvelope = serde_json::from_slice(&bytes)?;
+        let request: RequestEnvelope = match serde_json::from_slice(&bytes) {
+            Ok(request) => request,
+            Err(_) if received > MAX_MESSAGE_BYTES => {
+                return Err(LocalTransportError::Protocol);
+            }
+            Err(error) => return Err(LocalTransportError::Json(error)),
+        };
+        if received > MAX_MESSAGE_BYTES && !accepts_completion_sized_request(&request.command) {
+            return Err(LocalTransportError::Protocol);
+        }
         if request.protocol != PROTOCOL_VERSION {
             return Err(LocalTransportError::Protocol);
         }
@@ -1203,6 +1748,242 @@ impl LocalSupervisorServer {
             });
         }
         Ok(request.command)
+    }
+
+    /// Read one prepared candidate's document through the owner's two verified readers.
+    ///
+    /// READ-ONLY, and literally so: neither `prepare_for_mission` nor `prepare_outcome_candidate` is
+    /// called here, not even through a shared helper. A write command used as a lookup would make
+    /// "show me what was prepared" capable of preparing.
+    ///
+    /// The two owner calls authenticate and verify INDEPENDENTLY -- `candidate` repeats the manifest
+    /// verification internally (`outcome_store.rs:1089-1101`) -- so there is no shared transaction to
+    /// claim. What makes the pair coherent is not a snapshot but immutable content addressing plus one
+    /// explicit comparison: the record this manifest binds is identified by a digest, and a digest
+    /// names the same bytes in both reads or the comparison fails.
+    ///
+    /// Every field comes from the verified records. Nothing comes from the request except the digest
+    /// that selects them, and on any failure the answer is a refusal rather than a partial document.
+    fn read_outcome_candidate_document(
+        &self,
+        manifest_digest: &str,
+    ) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+        let fault =
+            |fault: CandidateDocumentFault| LocalTransportError::OutcomeCandidateDocument(fault);
+        // STAGE 1. The only stage at which "this Workspace holds no such manifest" is answerable.
+        let stored = self
+            .outcomes
+            .manifest(manifest_digest)
+            .map_err(|refusal| fault(CandidateDocumentFault::Manifest(refusal)))?;
+        // STAGE 2. A separate authenticated read, with its own repeated manifest verification. `?` is
+        // deliberately not shared with stage 1: the same refusal means different things here.
+        let record = self
+            .outcomes
+            .candidate(manifest_digest)
+            .map_err(|refusal| fault(CandidateDocumentFault::Candidate(refusal)))?;
+
+        let mismatch = |field: &'static str, expected: String, observed: String| {
+            fault(CandidateDocumentFault::Identity {
+                field,
+                expected,
+                observed,
+            })
+        };
+        // The manifest answered for the digest that was asked for.
+        if stored.digest().value != manifest_digest {
+            return Err(mismatch(
+                "manifestDigest",
+                manifest_digest.to_owned(),
+                stored.digest().value.clone(),
+            ));
+        }
+        // And the record returned is the one THIS manifest binds. Immutable content addressing makes
+        // this comparison sufficient; it is not a substitute for a transaction, it is a different
+        // guarantee.
+        if record.digest().value != stored.candidate_artifact_digest() {
+            return Err(mismatch(
+                "candidateArtifactDigest",
+                stored.candidate_artifact_digest().to_owned(),
+                record.digest().value.clone(),
+            ));
+        }
+
+        let payload = record.payload();
+        let content = record.content();
+        // The declared count and the bytes actually returned. The owner proves the stored blob's
+        // length against its record; this compares what crossed into this function.
+        let observed_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+        if payload.content_bytes != observed_bytes {
+            return Err(mismatch(
+                "candidateContentBytes",
+                payload.content_bytes.to_string(),
+                observed_bytes.to_string(),
+            ));
+        }
+        // DEFENSIVE, and named as defensive rather than as the only proof. The owner already decodes
+        // this content: `candidate_proves_manifest` calls `std::str::from_utf8` and returns false when
+        // it fails (`outcome_store.rs:529-537`), and `verified_manifest_within` calls that as part of
+        // accounting the manifest against its candidate -- so content that is not UTF-8 makes the
+        // FIRST read refuse, before this line is ever reached. An earlier version of this comment said
+        // no reader proves UTF-8, which was false.
+        //
+        // The check stays because this transport must not depend on a proof it does not perform for a
+        // guarantee it states in its own DTO, and because the two could drift apart. It is never a
+        // repair: a replacement character would be a byte this transport invented.
+        if let Err(error) = std::str::from_utf8(content) {
+            return Err(fault(CandidateDocumentFault::Content {
+                bytes: observed_bytes,
+                error,
+            }));
+        }
+
+        let envelope = |algorithm: &str, canonicalizer: &str, value: &str| DigestEnvelopeDto {
+            algorithm: algorithm.to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: value.to_owned(),
+        };
+        Ok(OutcomeCandidateDocumentDto {
+            mission_id: stored.manifest().mission_id,
+            manifest_id: stored.manifest_id(),
+            manifest_digest: envelope(
+                &stored.digest().algorithm,
+                &stored.digest().canonicalizer,
+                &stored.digest().value,
+            ),
+            // The RECORD's identity, under the record canonicalizer.
+            candidate_artifact_digest: envelope(
+                &record.digest().algorithm,
+                &record.digest().canonicalizer,
+                &record.digest().value,
+            ),
+            // And the CONTENT's digest, under the raw canonicalizer. Two envelopes over two different
+            // things; confusing them would make a caller verify the wrong bytes.
+            candidate_content_digest: envelope(
+                &payload.content_digest.algorithm,
+                &payload.content_digest.canonicalizer,
+                &payload.content_digest.value,
+            ),
+            candidate_content_bytes: payload.content_bytes,
+            media_type: payload.media_type.clone(),
+            // base64 of the ORIGINAL byte slice -- not of the decoded string, and with no
+            // normalisation, newline translation or BOM handling of any kind.
+            candidate_content_base64: data_encoding::BASE64.encode(content),
+        })
+    }
+
+    /// Prepare one candidate, then PROVE the receipt against the owner's own verified readers.
+    ///
+    /// `prepare_for_mission` is called exactly ONCE, with the values the caller supplied. Its three
+    /// identities are then re-read through `manifest` and `candidate`, and every field of the receipt
+    /// is taken from those verified reads -- never from the request, never from a column, never from a
+    /// constant assembled around an unverified string.
+    ///
+    /// The phase distinction is the point of the two error arms. Before the commit, a refusal is
+    /// definite and keeps its own meaning, account refusals included. After it, NOTHING is definite:
+    /// the candidate may already exist, so a failed re-read or a disagreeing identity both answer
+    /// `outcome_preparation_unavailable` with the cause retained in `Debug`. No receipt, no rollback
+    /// claim, no automatic repeat -- the owner's own idempotence is the only repeat mechanism.
+    fn prepare_outcome_candidate(
+        &self,
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    ) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+        let prepared = self
+            .outcomes
+            .prepare_for_mission(mission_id, appendix_request.into_owner())
+            .map_err(LocalTransportError::OutcomePreparation)?;
+
+        // Everything below is AFTER the commit. `?` is deliberately not used on these reads.
+        let after =
+            |fault: PostPreparationFault| LocalTransportError::OutcomePreparationAfterCommit(fault);
+        let stored = self
+            .outcomes
+            .manifest(&prepared.manifest_digest)
+            .map_err(|refusal| after(PostPreparationFault::Read(refusal)))?;
+        let record = self
+            .outcomes
+            .candidate(&prepared.manifest_digest)
+            .map_err(|refusal| after(PostPreparationFault::Read(refusal)))?;
+
+        let mismatch = |field: &'static str, expected: String, observed: String| {
+            after(PostPreparationFault::Identity {
+                field,
+                expected,
+                observed,
+            })
+        };
+        if stored.manifest_id() != prepared.manifest_id {
+            return Err(mismatch(
+                "manifestId",
+                prepared.manifest_id.to_string(),
+                stored.manifest_id().to_string(),
+            ));
+        }
+        if stored.digest().value != prepared.manifest_digest {
+            return Err(mismatch(
+                "manifestDigest",
+                prepared.manifest_digest.clone(),
+                stored.digest().value.clone(),
+            ));
+        }
+        if stored.candidate_artifact_digest() != prepared.candidate_artifact_digest
+            || record.digest().value != prepared.candidate_artifact_digest
+        {
+            return Err(mismatch(
+                "candidateArtifactDigest",
+                prepared.candidate_artifact_digest.clone(),
+                record.digest().value.clone(),
+            ));
+        }
+        let manifest = stored.manifest();
+        if manifest.mission_id != mission_id {
+            return Err(mismatch(
+                "missionId",
+                mission_id.to_string(),
+                manifest.mission_id.to_string(),
+            ));
+        }
+        if manifest.appendix_request != appendix_request.into_owner() {
+            return Err(mismatch(
+                "appendixRequest",
+                format!("{:?}", appendix_request.into_owner()),
+                format!("{:?}", manifest.appendix_request),
+            ));
+        }
+
+        let envelope = |algorithm: &str, canonicalizer: &str, value: &str| DigestEnvelopeDto {
+            algorithm: algorithm.to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: value.to_owned(),
+        };
+        let payload = record.payload();
+        Ok(PreparedOutcomeCandidateDto {
+            mission_id: manifest.mission_id,
+            // From the VERIFIED manifest, not the request: the receipt reports what was stored.
+            appendix_request: AppendixRequestDto::from_owner(manifest.appendix_request),
+            appendix_mode: AppendixModeDto::from_owner(manifest.appendix_mode()),
+            manifest_id: stored.manifest_id(),
+            manifest_digest: envelope(
+                &stored.digest().algorithm,
+                &stored.digest().canonicalizer,
+                &stored.digest().value,
+            ),
+            // The Artifact RECORD's identity, under the record canonicalizer.
+            candidate_artifact_digest: envelope(
+                &record.digest().algorithm,
+                &record.digest().canonicalizer,
+                &record.digest().value,
+            ),
+            // And the CONTENT's digest, under the raw canonicalizer. Two different envelopes over two
+            // different things; confusing them would make a caller verify the wrong bytes.
+            candidate_content_digest: envelope(
+                &payload.content_digest.algorithm,
+                &payload.content_digest.canonicalizer,
+                &payload.content_digest.value,
+            ),
+            candidate_content_bytes: payload.content_bytes,
+            media_type: payload.media_type.clone(),
+        })
     }
 
     fn dispatch(&self, command: LocalCommand) -> Result<ResponseEnvelope, LocalTransportError> {
@@ -1450,6 +2231,46 @@ impl LocalSupervisorServer {
             LocalCommand::Mission { mission_id } => LocalResult::Mission {
                 mission: self.missions.get(mission_id)?,
             },
+            LocalCommand::MissionCompletion { mission_id } => LocalResult::MissionCompletion {
+                completion: self.mission_completions.get(mission_id)?,
+            },
+            LocalCommand::PreviewMissionCompletion { request } => {
+                LocalResult::MissionCompletionPreview {
+                    preview: self.completion_commands.preview(request)?,
+                }
+            }
+            LocalCommand::RecordMissionCompletion {
+                request,
+                reviewed_intent_sha256,
+            } => LocalResult::MissionCompletionAcknowledgement {
+                intent: self
+                    .completion_commands
+                    .record(request, &reviewed_intent_sha256)?,
+            },
+            LocalCommand::GetMissionCompletionIntent { mission_id } => {
+                LocalResult::MissionCompletionIntent {
+                    intent: self.completion_commands.get_intent(mission_id)?,
+                }
+            }
+            LocalCommand::ClassifyMissionImpact { request } => LocalResult::MissionClassification {
+                classification: self.impact_classifications.classify(request)?,
+            },
+            LocalCommand::GetMissionClassification { mission_id } => {
+                LocalResult::MissionClassificationObservation {
+                    observation: self.impact_classifications.observe(mission_id)?,
+                }
+            }
+            LocalCommand::PrepareOutcomeCandidate {
+                mission_id,
+                appendix_request,
+            } => LocalResult::PreparedOutcomeCandidate {
+                candidate: self.prepare_outcome_candidate(mission_id, appendix_request)?,
+            },
+            LocalCommand::ReadOutcomeCandidateDocument { manifest_digest } => {
+                LocalResult::OutcomeCandidateDocument {
+                    document: self.read_outcome_candidate_document(&manifest_digest)?,
+                }
+            }
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
                 mission: self.missions.admit(draft)?,
             },
@@ -1890,6 +2711,99 @@ impl LocalSupervisorClient {
         expect_missions(self.send(LocalCommand::Missions { project_id })?)
     }
 
+    /// The verified completion of one Mission, or an honest absence. Absence is `None`; a read that
+    /// could not be verified is an error and is never converted into `None`.
+    pub fn mission_completion(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<Option<crate::CompletionView>, LocalTransportError> {
+        expect_mission_completion(self.send(LocalCommand::MissionCompletion { mission_id })?)
+    }
+
+    /// Derive the completion the Operator would record, and its reviewed-intent token.
+    ///
+    /// The EXACT owner DTO crosses the socket in both directions: this method builds no record,
+    /// re-validates no field the owner owns, and reads nothing back out of the preview.
+    pub fn preview_mission_completion(
+        &self,
+        request: crate::CompletionIntentRequest,
+    ) -> Result<crate::CompletionPreview, LocalTransportError> {
+        expect_mission_completion_preview(
+            self.send(LocalCommand::PreviewMissionCompletion { request })?,
+        )
+    }
+
+    /// Record the reviewed completion. `reviewed_intent_sha256` is the token the Operator reviewed;
+    /// it is forwarded unchanged, never recomputed here.
+    pub fn record_mission_completion(
+        &self,
+        request: crate::CompletionIntentRequest,
+        reviewed_intent_sha256: String,
+    ) -> Result<crate::ReviewedIntent, LocalTransportError> {
+        expect_mission_completion_acknowledgement(self.send(
+            LocalCommand::RecordMissionCompletion {
+                request,
+                reviewed_intent_sha256,
+            },
+        )?)
+    }
+
+    /// The token of the completion visible for this Mission in one snapshot, or `None`.
+    pub fn get_mission_completion_intent(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<Option<crate::ReviewedIntent>, LocalTransportError> {
+        expect_mission_completion_intent(
+            self.send(LocalCommand::GetMissionCompletionIntent { mission_id })?,
+        )
+    }
+
+    /// Prepare one Outcome candidate. A mutating owner action: it does not evaluate and does not
+    /// publish, and the receipt it returns says nothing about whether anything later did.
+    pub fn prepare_outcome_candidate(
+        &self,
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    ) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+        expect_prepared_outcome_candidate(self.send(LocalCommand::PrepareOutcomeCandidate {
+            mission_id,
+            appendix_request,
+        })?)
+    }
+
+    /// Read one prepared candidate's stored document. A READ: it writes nothing and evaluates
+    /// nothing, and the bytes it returns are the exact stored content, base64-encoded.
+    pub fn read_outcome_candidate_document(
+        &self,
+        manifest_digest: &str,
+    ) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+        expect_outcome_candidate_document(self.send(
+            LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: manifest_digest.to_owned(),
+            },
+        )?)
+    }
+
+    /// Record one Mission impact classification. The Operator's five keys cross unchanged; the owner
+    /// derives identity, version, the Policy citation, the actor and the clock.
+    pub fn classify_mission_impact(
+        &self,
+        request: crate::ClassificationIntentRequest,
+    ) -> Result<crate::ClassificationView, LocalTransportError> {
+        expect_mission_classification(self.send(LocalCommand::ClassifyMissionImpact { request })?)
+    }
+
+    /// One bounded snapshot: the cursor it was taken at, the Policy a new classification would cite,
+    /// and the highest proven record. Never a history and never a "current impact" verdict.
+    pub fn get_mission_classification(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<crate::ClassificationObservation, LocalTransportError> {
+        expect_mission_classification_observation(
+            self.send(LocalCommand::GetMissionClassification { mission_id })?,
+        )
+    }
+
     pub fn mission(&self, mission_id: uuid::Uuid) -> Result<MissionView, LocalTransportError> {
         expect_mission(self.send(LocalCommand::Mission { mission_id })?)
     }
@@ -1957,6 +2871,9 @@ impl LocalSupervisorClient {
         response_timeout: Duration,
     ) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
+        // Chosen from the command while it is still ours to read; moving it into the envelope first
+        // would leave the ceiling to be guessed from something else.
+        let response_ceiling = response_max(&command);
         let request = RequestEnvelope {
             protocol: PROTOCOL_VERSION,
             token: WireSecret(token.encode()),
@@ -1968,8 +2885,8 @@ impl LocalSupervisorClient {
         stream.write_all(&serialized)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         let mut bytes = Zeroizing::new(Vec::new());
-        stream.take(MAX_MESSAGE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_MESSAGE_BYTES {
+        stream.take(response_ceiling + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > response_ceiling {
             return Err(LocalTransportError::Protocol);
         }
         let response: ResponseEnvelope = serde_json::from_slice(&bytes)?;
@@ -1984,6 +2901,83 @@ impl LocalSupervisorClient {
             }),
             _ => Err(LocalTransportError::Protocol),
         }
+    }
+}
+
+/// The RESPONSE ceiling for one outgoing command, chosen from the command BEFORE it is moved into
+/// the envelope.
+///
+/// Exhaustive and named, with no catch-all: a new `LocalCommand` arm does not compile until someone
+/// states its response domain, so a command cannot inherit a widened ceiling by being forgotten.
+/// Only the preview echoes a whole normalized request; `RecordMissionCompletion` answers with one
+/// token and `GetMissionCompletionIntent` with a token or null, so both stay at the old domain.
+fn response_max(command: &LocalCommand) -> u64 {
+    match command {
+        LocalCommand::PreviewMissionCompletion { .. } => MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        // The ONE family that carries stored bytes, and the only reason this ceiling exists.
+        LocalCommand::ReadOutcomeCandidateDocument { .. } => MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+        // Both C5 commands stay in the OLD domain: the widest classification view is ~8.7 KB and the
+        // widest observation ~9.0 KB (measured, tools/c5/opus2/transport/c5-wire-bytes.json), so
+        // neither needs a larger frame and neither widens one.
+        LocalCommand::ClassifyMissionImpact { .. }
+        | LocalCommand::GetMissionClassification { .. }
+        // C6's receipt is fixed-size metadata -- nine fields, two digest envelopes, no bytes -- so it
+        // stays in the old domain. A 1 MiB candidate's CONTENT deliberately does not cross here.
+        | LocalCommand::PrepareOutcomeCandidate { .. }
+        | LocalCommand::Status
+        | LocalCommand::SessionPolicy
+        | LocalCommand::SetSessionTimeout { .. }
+        | LocalCommand::PlatformSessionMonitorStatus
+        | LocalCommand::BeginPasswordSetup { .. }
+        | LocalCommand::CompleteOperatorSetup { .. }
+        | LocalCommand::AuthenticatePassword { .. }
+        | LocalCommand::RecoverWithKey { .. }
+        | LocalCommand::Lock
+        | LocalCommand::RecordOperatorActivity
+        | LocalCommand::StarterOrganization
+        | LocalCommand::AcceptStarterOrganization { .. }
+        | LocalCommand::DiscardStarterOrganization { .. }
+        | LocalCommand::Residents
+        | LocalCommand::ActivateResident { .. }
+        | LocalCommand::SuspendResident { .. }
+        | LocalCommand::ReactivateResident { .. }
+        | LocalCommand::RetireResident { .. }
+        | LocalCommand::ResidentCapabilityCatalog
+        | LocalCommand::ResidentConfigurations
+        | LocalCommand::ConfigureResident { .. }
+        | LocalCommand::ClearResidentConfiguration { .. }
+        | LocalCommand::Projects
+        | LocalCommand::SampleProjectStatus
+        | LocalCommand::InstallSampleProject
+        | LocalCommand::Project { .. }
+        | LocalCommand::ProjectCharterHistory { .. }
+        | LocalCommand::CreateProject { .. }
+        | LocalCommand::ReviseProjectCharter { .. }
+        | LocalCommand::ProjectPolicy { .. }
+        | LocalCommand::ProjectPolicyHistory { .. }
+        | LocalCommand::MissionPublications { .. }
+        | LocalCommand::OutcomeDocument { .. }
+        | LocalCommand::PublishProjectPolicy { .. }
+        | LocalCommand::CurrentProjectRepository { .. }
+        | LocalCommand::ProjectRepositoryHistory { .. }
+        | LocalCommand::BindProjectRepository { .. }
+        | LocalCommand::PreflightProjectChecks { .. }
+        | LocalCommand::RecentReceipts { .. }
+        | LocalCommand::Teams { .. }
+        | LocalCommand::Team { .. }
+        | LocalCommand::FormTeam { .. }
+        | LocalCommand::Missions { .. }
+        | LocalCommand::Mission { .. }
+        | LocalCommand::MissionCompletion { .. }
+        | LocalCommand::RecordMissionCompletion { .. }
+        | LocalCommand::GetMissionCompletionIntent { .. }
+        | LocalCommand::AdmitMission { .. }
+        | LocalCommand::DiscoverLocalModels
+        | LocalCommand::LiveDataEncryptionStatus
+        | LocalCommand::InspectLocalModel { .. }
+        | LocalCommand::ActivateLocalModel { .. }
+        | LocalCommand::LocalModelActivations
+        | LocalCommand::DeactivateLocalModel { .. } => MAX_MESSAGE_BYTES,
     }
 }
 
@@ -2190,6 +3184,78 @@ fn expect_team(result: LocalResult) -> Result<TeamView, LocalTransportError> {
     }
 }
 
+fn expect_mission_completion(
+    result: LocalResult,
+) -> Result<Option<crate::CompletionView>, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletion { completion } => Ok(completion),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_prepared_outcome_candidate(
+    result: LocalResult,
+) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+    match result {
+        LocalResult::PreparedOutcomeCandidate { candidate } => Ok(candidate),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_outcome_candidate_document(
+    result: LocalResult,
+) -> Result<OutcomeCandidateDocumentDto, LocalTransportError> {
+    match result {
+        LocalResult::OutcomeCandidateDocument { document } => Ok(document),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_classification(
+    result: LocalResult,
+) -> Result<crate::ClassificationView, LocalTransportError> {
+    match result {
+        LocalResult::MissionClassification { classification } => Ok(classification),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_classification_observation(
+    result: LocalResult,
+) -> Result<crate::ClassificationObservation, LocalTransportError> {
+    match result {
+        LocalResult::MissionClassificationObservation { observation } => Ok(observation),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_completion_preview(
+    result: LocalResult,
+) -> Result<crate::CompletionPreview, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionPreview { preview } => Ok(preview),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_completion_acknowledgement(
+    result: LocalResult,
+) -> Result<crate::ReviewedIntent, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionAcknowledgement { intent } => Ok(intent),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission_completion_intent(
+    result: LocalResult,
+) -> Result<Option<crate::ReviewedIntent>, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletionIntent { intent } => Ok(intent),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_missions(result: LocalResult) -> Result<Vec<MissionView>, LocalTransportError> {
     match result {
         LocalResult::Missions { missions } => Ok(missions),
@@ -2266,6 +3332,22 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::RecentReceipt(error) => wire_error_from_recent_receipt(error),
         LocalTransportError::SampleProject(error) => wire_error_from_sample_project(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
+        LocalTransportError::MissionCompletionRead(error) => {
+            wire_error_from_mission_completion(error)
+        }
+        LocalTransportError::MissionCompletionCommand(error) => {
+            wire_error_from_completion_command(error)
+        }
+        LocalTransportError::MissionImpactClassification(error) => {
+            wire_error_from_classification(error)
+        }
+        LocalTransportError::OutcomePreparation(error) => wire_error_from_preparation(error),
+        LocalTransportError::OutcomePreparationAfterCommit(fault) => {
+            wire_error_from_post_preparation(fault)
+        }
+        LocalTransportError::OutcomeCandidateDocument(fault) => {
+            wire_error_from_candidate_document(fault)
+        }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
         }
@@ -2544,6 +3626,185 @@ fn wire_error_from_team(error: TeamError) -> WireError {
     }
 }
 
+/// One closed outward answer for every verification failure, and the account's own semantics kept.
+///
+/// The real cause never reaches this projection: it stays in the error's `Debug` and `source`, which
+/// is where R42 puts driver text, paths and user data.
+fn wire_error_from_mission_completion(error: crate::MissionCompletionReadError) -> WireError {
+    match error {
+        crate::MissionCompletionReadError::Account(error) => wire_error_from_account(error),
+        crate::MissionCompletionReadError::Unavailable(_) => WireError {
+            code: LocalErrorCode::MissionCompletionUnavailable,
+            retry_after_ms: None,
+        },
+    }
+}
+
+/// The completion family's closed outward answer.
+///
+/// Every arm names a code the caller already has fixed copy for. Two things this deliberately does
+/// NOT do: it never forwards the field name inside `MalformedRequest`/`DuplicateSetEntry` (that
+/// stays in `Debug` and `source`, R42), and it never calls a malformed identity, digest, tag,
+/// integer or duplicated set entry "text over limit" -- a grammar failure disguised as a length
+/// failure would send the Operator to shorten text that was never the problem.
+fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> WireError {
+    let code = match error {
+        crate::CompletionCommandError::Account(error) => return wire_error_from_account(error),
+        crate::CompletionCommandError::IntentChanged => LocalErrorCode::CompletionIntentChanged,
+        crate::CompletionCommandError::AlreadyRecorded => LocalErrorCode::CompletionAlreadyRecorded,
+        crate::CompletionCommandError::ResidentNotInAdmissionRoster => {
+            LocalErrorCode::CompletionResidentNotInAdmissionRoster
+        }
+        crate::CompletionCommandError::ConditionCoverageIncomplete => {
+            LocalErrorCode::CompletionConditionCoverageIncomplete
+        }
+        crate::CompletionCommandError::SupportOverLimit => {
+            LocalErrorCode::CompletionSupportOverLimit
+        }
+        crate::CompletionCommandError::TextOverLimit => LocalErrorCode::CompletionTextOverLimit,
+        crate::CompletionCommandError::SpendReasonRequired => {
+            LocalErrorCode::CompletionSpendReasonRequired
+        }
+        crate::CompletionCommandError::MalformedRequest(_)
+        | crate::CompletionCommandError::DuplicateSetEntry(_) => {
+            LocalErrorCode::CompletionInvalidDetails
+        }
+        // The same code C3's read already uses, with C3's exact sentence: an unverifiable Mission
+        // completion is one condition, and the caller knows which operation it asked for.
+        crate::CompletionCommandError::Unavailable(_) => {
+            LocalErrorCode::MissionCompletionUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// The classification family's closed outward answer.
+///
+/// Nine codes plus the account recursion. `MalformedRequest` carries the refused FIELD and
+/// `Unavailable` carries the store's own words; neither reaches a caller, and an unreadable ladder is
+/// never projected as an absence.
+fn wire_error_from_classification(error: crate::ClassificationCommandError) -> WireError {
+    let code = match error {
+        crate::ClassificationCommandError::Account(error) => return wire_error_from_account(error),
+        crate::ClassificationCommandError::StalePolicyRevision => {
+            LocalErrorCode::ClassificationStalePolicyRevision
+        }
+        crate::ClassificationCommandError::NoPolicyPublished => {
+            LocalErrorCode::ClassificationNoPolicyPublished
+        }
+        crate::ClassificationCommandError::AlreadyClassified => {
+            LocalErrorCode::ClassificationAlreadyClassified
+        }
+        crate::ClassificationCommandError::PredecessorNotLatest => {
+            LocalErrorCode::ClassificationPredecessorNotLatest
+        }
+        crate::ClassificationCommandError::PredecessorUnproven => {
+            LocalErrorCode::ClassificationPredecessorUnproven
+        }
+        crate::ClassificationCommandError::VersionCeilingReached => {
+            LocalErrorCode::ClassificationVersionCeilingReached
+        }
+        crate::ClassificationCommandError::TextOverLimit => {
+            LocalErrorCode::ClassificationTextOverLimit
+        }
+        crate::ClassificationCommandError::MalformedRequest(_) => {
+            LocalErrorCode::ClassificationInvalidDetails
+        }
+        crate::ClassificationCommandError::Unavailable(_) => {
+            LocalErrorCode::MissionClassificationUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// The preparation family's closed outward answer, BEFORE the commit.
+///
+/// Only the three actual owner variants reach a definite code. Everything else -- broken, unverified,
+/// irreconcilable, render, store, Artifact, collector, assembler, sources -- is unavailable, because
+/// broken evidence is not absence. A cross-Workspace or absent Mission is opaque: it reaches
+/// `MissionNotCompleted` at the owner's own query and gets that code, which confirms nothing about
+/// existence.
+fn wire_error_from_preparation(error: crate::PrepareRefusal) -> WireError {
+    let code = match error {
+        crate::PrepareRefusal::Account(error) => return wire_error_from_account(error),
+        crate::PrepareRefusal::MissionNotCompleted { .. } => LocalErrorCode::OutcomeNotCompleted,
+        crate::PrepareRefusal::MissionNotClassified { .. } => LocalErrorCode::OutcomeNotClassified,
+        crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. } => {
+            LocalErrorCode::OutcomeNoClassificationAtCompletion
+        }
+        crate::PrepareRefusal::CrossWorkspace
+        | crate::PrepareRefusal::Manifest(_)
+        | crate::PrepareRefusal::Completion(_)
+        | crate::PrepareRefusal::Classification(_)
+        | crate::PrepareRefusal::ClassificationAbsent
+        | crate::PrepareRefusal::Irreconcilable { .. }
+        | crate::PrepareRefusal::Render(_)
+        | crate::PrepareRefusal::Artifact(_)
+        | crate::PrepareRefusal::Collector(_)
+        | crate::PrepareRefusal::Assembly(_)
+        | crate::PrepareRefusal::Sources(_) => LocalErrorCode::OutcomePreparationUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// And AFTER the commit: one code for everything, including an account refusal.
+///
+/// The account recursion is deliberately NOT taken here. A session refusal before the owner ran is a
+/// definite answer a caller may act on; the same refusal from a re-read, after the candidate may
+/// already have been written, is not. Collapsing it is the honest projection, and the cause survives
+/// in the retained fault's `Debug`.
+fn wire_error_from_post_preparation(_fault: PostPreparationFault) -> WireError {
+    WireError {
+        code: LocalErrorCode::OutcomePreparationUnavailable,
+        retry_after_ms: None,
+    }
+}
+
+/// The candidate document read: absence is answerable at the FIRST manifest read and nowhere else.
+///
+/// `Absent` and `CrossWorkspace` at that first read are ONE answer, deliberately. The owner's
+/// `verified_manifest_within` selects on the digest alone and only then compares the stored Workspace
+/// (`outcome_store.rs:549-584`), so it returns two DISTINCT refusals -- opacity here is NOT a property
+/// of the SQL, and an implementation that let `CrossWorkspace` fall through to `unavailable` would
+/// answer a different code for a foreign Workspace's real manifest than for a digest that never
+/// existed. That difference is a probeable disclosure that a manifest exists somewhere in this
+/// installation, so this transport collapses it. Which one actually happened survives in `Debug`.
+///
+/// Everything at the `candidate()` stage is unavailable, absence-shaped refusals included: a manifest
+/// that vanished between two independent reads, or an Artifact missing behind a verified manifest, is
+/// a store disagreeing with itself rather than an absence a caller may act on.
+///
+/// Account refusals keep their own codes at EITHER stage. This is a read: nothing was written, so
+/// there is no post-write uncertainty to collapse them into.
+fn wire_error_from_candidate_document(fault: CandidateDocumentFault) -> WireError {
+    let code = match fault {
+        CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(error))
+        | CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(error)) => {
+            return wire_error_from_account(error);
+        }
+        CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+            crate::ManifestStoreRefusal::Absent | crate::ManifestStoreRefusal::CrossWorkspace,
+        )) => LocalErrorCode::OutcomeCandidateNotFound,
+        CandidateDocumentFault::Manifest(_)
+        | CandidateDocumentFault::Candidate(_)
+        | CandidateDocumentFault::Identity { .. }
+        | CandidateDocumentFault::Content { .. } => LocalErrorCode::OutcomeCandidateUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_mission(error: MissionError) -> WireError {
     let code = match error {
         MissionError::Account(error) => return wire_error_from_account(error),
@@ -2642,11 +3903,17 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-        LocalTransportError, ResponseEnvelope, WireError, initialize_local_auth_token,
-        response_from_transport_error,
+        CandidateDocumentFault, DigestEnvelopeDto, LocalCommand, LocalErrorCode, LocalResult,
+        LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+        MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OutcomeCandidateDocumentDto,
+        PostPreparationFault, PreparedOutcomeCandidateDto, ResponseEnvelope, WireError,
+        accepts_completion_sized_request, initialize_local_auth_token,
+        response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
+    use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal};
+    use crate::outcome_collector::CollectorRefusal;
     use crate::outcome_pdf::PdfRefusal;
     use crate::outcome_store::ManifestStoreRefusal;
     use crate::outcome_typst::TypstRefusal;
@@ -2904,6 +4171,24 @@ mod tests {
     /// Two fixed synthetic markers, each placed before any newline so that "is it in the line"
     /// is a substring question and never an escaping question.
     const NEEDLE_A: &str = "R42S2_PRIVATE_A";
+    /// The field name a malformed/duplicate completion refusal carries. A needle, not a message: an
+    /// outward line or wire code containing it would be the owner's private diagnostic escaping.
+    const NEEDLE_FIELD: &str = "R42S2_PRIVATE_FIELD";
+
+    /// A real `Utf8Error` from a real failed decode. The bytes are assembled at run time because an
+    /// invalid literal is a clippy error -- and because a literal would read as a constant rather than
+    /// as what this is: the outcome of actually trying to decode something that is not text.
+    fn not_utf8() -> std::str::Utf8Error {
+        let bytes = vec![0x66_u8, 0xff];
+        std::str::from_utf8(&bytes).expect_err("the fixture bytes are not UTF-8")
+    }
+
+    /// A post-commit read that refused on the ACCOUNT. Test scaffolding: the closed tables use it so
+    /// the eighteen account children are exercised THROUGH the post-commit arm rather than asserted
+    /// once, and production has no reason to construct one.
+    fn post_read_account(cause: OperatorAccountError) -> PostPreparationFault {
+        PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
+    }
     const NEEDLE_B: &str = "R42S2_PRIVATE_B";
 
     /// Approved numeric context, chosen here before any error is built and pairwise distinct so a
@@ -3333,6 +4618,213 @@ mod tests {
     }
 
     closed_table! {
+        expected_completion_read / completion_read_rows: crate::MissionCompletionReadError,
+        "Account" | crate::MissionCompletionReadError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::MissionCompletionReadError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "Unavailable" | crate::MissionCompletionReadError::Unavailable(_)
+            => "Unavailable",
+            crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_preparation / preparation_rows: crate::PrepareRefusal,
+        "Account" | crate::PrepareRefusal::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::PrepareRefusal::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "CrossWorkspace" | crate::PrepareRefusal::CrossWorkspace
+            => "CrossWorkspace", crate::PrepareRefusal::CrossWorkspace, &[];
+        "Manifest" | crate::PrepareRefusal::Manifest(_)
+            => "Manifest",
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Store(payload_a())), &[NEEDLE_A];
+        "Completion" | crate::PrepareRefusal::Completion(_)
+            => "Completion",
+            crate::PrepareRefusal::Completion(CompletionReadRefusal::Store(payload_a())), &[NEEDLE_A];
+        "Classification" | crate::PrepareRefusal::Classification(_)
+            => "Classification",
+            crate::PrepareRefusal::Classification(ClassificationStoreError::Store(payload_a())), &[NEEDLE_A];
+        "ClassificationAbsent" | crate::PrepareRefusal::ClassificationAbsent
+            => "ClassificationAbsent", crate::PrepareRefusal::ClassificationAbsent, &[];
+        "Irreconcilable" | crate::PrepareRefusal::Irreconcilable { .. }
+            => "Irreconcilable",
+            crate::PrepareRefusal::Irreconcilable { detail: payload_a() }, &[NEEDLE_A];
+        "Render" | crate::PrepareRefusal::Render(_)
+            => "Render", crate::PrepareRefusal::Render(payload_a()), &[NEEDLE_A];
+        "Artifact" | crate::PrepareRefusal::Artifact(_)
+            => "Artifact",
+            crate::PrepareRefusal::Artifact(ArtifactError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "MissionNotCompleted" | crate::PrepareRefusal::MissionNotCompleted { .. }
+            => "MissionNotCompleted",
+            crate::PrepareRefusal::MissionNotCompleted { mission_id: Uuid::nil() }, &[];
+        "MissionNotClassified" | crate::PrepareRefusal::MissionNotClassified { .. }
+            => "MissionNotClassified",
+            crate::PrepareRefusal::MissionNotClassified { mission_id: Uuid::nil() }, &[];
+        "MissionNotClassifiedAtBoundary" | crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. }
+            => "MissionNotClassifiedAtBoundary",
+            crate::PrepareRefusal::MissionNotClassifiedAtBoundary {
+                mission_id: Uuid::nil(),
+                boundary_event_seq: 7,
+                classifications_after: 1,
+            }, &[];
+        "Collector" | crate::PrepareRefusal::Collector(_)
+            => "Collector",
+            crate::PrepareRefusal::Collector(CollectorRefusal::Absent {
+                kind: "classification",
+                id: payload_a(),
+            }), &[NEEDLE_A];
+        "Assembly" | crate::PrepareRefusal::Assembly(_)
+            => "Assembly",
+            crate::PrepareRefusal::Assembly(AssemblyRefusal::NoCompletion), &[];
+        "Sources" | crate::PrepareRefusal::Sources(_)
+            => "Sources",
+            crate::PrepareRefusal::Sources(SourcesRefusal::MissionNotAdmitted), &[];
+    }
+
+    // The post-commit vocabulary. `Read.*` repeats the whole pre-commit set under a phase prefix, and
+    // `Identity` is the transport's own: a re-read that disagreed is not an owner refusal.
+    closed_table! {
+        expected_post_preparation / post_preparation_rows: PostPreparationFault,
+        "Account" | PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
+            => format!("Read.Account.{}", expected_account(cause).1),
+            post_read_account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "Read" | PostPreparationFault::Read(refusal)
+            => format!("Read.{}", expected_preparation(refusal).1),
+            PostPreparationFault::Read(crate::PrepareRefusal::ClassificationAbsent), &[];
+        // Each label spelled out, and a closed fallback -- NOT a repeat of the production
+        // interpolation. The five are transcribed from the dispatch at `prepare_outcome_candidate`;
+        // anything else is the bare arm, so an unnamed static label can never reach a line.
+        // `the_identity_label_is_a_closed_vocabulary_on_the_line` drives every one of these.
+        "Identity" | PostPreparationFault::Identity { field, .. }
+            => match *field {
+                "manifestId" => "Identity.manifestId",
+                "manifestDigest" => "Identity.manifestDigest",
+                "candidateArtifactDigest" => "Identity.candidateArtifactDigest",
+                "missionId" => "Identity.missionId",
+                "appendixRequest" => "Identity.appendixRequest",
+                _ => "Identity",
+            },
+            PostPreparationFault::Identity {
+                field: "manifestId",
+                expected: payload_a(),
+                observed: payload_a(),
+            }, &[NEEDLE_A];
+    }
+
+    // C7's read vocabulary. The STAGE leads every name, because the stage is what decides whether an
+    // absence is an answer. Note the two `Account` rows: a read has no post-write uncertainty, so an
+    // account refusal keeps its own code at BOTH stages -- unlike C6's post-commit domain.
+    closed_table! {
+        expected_candidate_document / candidate_document_rows: CandidateDocumentFault,
+        "ManifestAccount" | CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(cause))
+            => format!("Manifest.Account.{}", expected_account(cause).1),
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Account(
+                OperatorAccountError::Store(driver_error(NEEDLE_A)),
+            )), &[NEEDLE_A];
+        "ManifestNotFound" | CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+            ManifestStoreRefusal::Absent | ManifestStoreRefusal::CrossWorkspace,
+        ))
+            => "Manifest.Manifest",
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+                ManifestStoreRefusal::Absent,
+            )), &[];
+        "Manifest" | CandidateDocumentFault::Manifest(refusal)
+            => format!("Manifest.{}", expected_preparation(refusal).1),
+            CandidateDocumentFault::Manifest(crate::PrepareRefusal::Manifest(
+                ManifestStoreRefusal::Store(payload_a()),
+            )), &[NEEDLE_A];
+        "CandidateAccount" | CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(cause))
+            => format!("Candidate.Account.{}", expected_account(cause).1),
+            CandidateDocumentFault::Candidate(crate::PrepareRefusal::Account(
+                OperatorAccountError::Store(driver_error(NEEDLE_A)),
+            )), &[NEEDLE_A];
+        "Candidate" | CandidateDocumentFault::Candidate(refusal)
+            => format!("Candidate.{}", expected_preparation(refusal).1),
+            CandidateDocumentFault::Candidate(crate::PrepareRefusal::Artifact(
+                ArtifactError::NotFound,
+            )), &[];
+        // Three labels spelled out and a closed fallback -- never a repeat of the production
+        // interpolation, and never the production guard's own name.
+        "Identity" | CandidateDocumentFault::Identity { field, .. }
+            => match *field {
+                "manifestDigest" => "Identity.manifestDigest",
+                "candidateArtifactDigest" => "Identity.candidateArtifactDigest",
+                "candidateContentBytes" => "Identity.candidateContentBytes",
+                _ => "Identity",
+            },
+            CandidateDocumentFault::Identity {
+                field: "manifestDigest",
+                expected: payload_a(),
+                observed: payload_b(),
+            }, &[NEEDLE_A];
+        // The byte count is a fact about private content: it names itself and carries no number.
+        "Content" | CandidateDocumentFault::Content { .. }
+            => "Content",
+            CandidateDocumentFault::Content {
+                bytes: 7,
+                error: not_utf8(),
+            }, &[];
+    }
+
+    closed_table! {
+        expected_impact_classification / impact_classification_rows: crate::ClassificationCommandError,
+        "Account" | crate::ClassificationCommandError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::ClassificationCommandError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "StalePolicyRevision" | crate::ClassificationCommandError::StalePolicyRevision
+            => "StalePolicyRevision", crate::ClassificationCommandError::StalePolicyRevision, &[];
+        "NoPolicyPublished" | crate::ClassificationCommandError::NoPolicyPublished
+            => "NoPolicyPublished", crate::ClassificationCommandError::NoPolicyPublished, &[];
+        "AlreadyClassified" | crate::ClassificationCommandError::AlreadyClassified
+            => "AlreadyClassified", crate::ClassificationCommandError::AlreadyClassified, &[];
+        "PredecessorNotLatest" | crate::ClassificationCommandError::PredecessorNotLatest
+            => "PredecessorNotLatest", crate::ClassificationCommandError::PredecessorNotLatest, &[];
+        "PredecessorUnproven" | crate::ClassificationCommandError::PredecessorUnproven
+            => "PredecessorUnproven", crate::ClassificationCommandError::PredecessorUnproven, &[];
+        "VersionCeilingReached" | crate::ClassificationCommandError::VersionCeilingReached
+            => "VersionCeilingReached", crate::ClassificationCommandError::VersionCeilingReached, &[];
+        "TextOverLimit" | crate::ClassificationCommandError::TextOverLimit
+            => "TextOverLimit", crate::ClassificationCommandError::TextOverLimit, &[];
+        "MalformedRequest" | crate::ClassificationCommandError::MalformedRequest(_)
+            => "MalformedRequest",
+            crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "Unavailable" | crate::ClassificationCommandError::Unavailable(_)
+            => "Unavailable",
+            crate::ClassificationCommandError::Unavailable(crate::ClassificationCommandUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_completion_command / completion_command_rows: crate::CompletionCommandError,
+        "Account" | crate::CompletionCommandError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::CompletionCommandError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "IntentChanged" | crate::CompletionCommandError::IntentChanged
+            => "IntentChanged", crate::CompletionCommandError::IntentChanged, &[];
+        "AlreadyRecorded" | crate::CompletionCommandError::AlreadyRecorded
+            => "AlreadyRecorded", crate::CompletionCommandError::AlreadyRecorded, &[];
+        "ResidentNotInAdmissionRoster" | crate::CompletionCommandError::ResidentNotInAdmissionRoster
+            => "ResidentNotInAdmissionRoster",
+            crate::CompletionCommandError::ResidentNotInAdmissionRoster, &[];
+        "ConditionCoverageIncomplete" | crate::CompletionCommandError::ConditionCoverageIncomplete
+            => "ConditionCoverageIncomplete",
+            crate::CompletionCommandError::ConditionCoverageIncomplete, &[];
+        "SupportOverLimit" | crate::CompletionCommandError::SupportOverLimit
+            => "SupportOverLimit", crate::CompletionCommandError::SupportOverLimit, &[];
+        "TextOverLimit" | crate::CompletionCommandError::TextOverLimit
+            => "TextOverLimit", crate::CompletionCommandError::TextOverLimit, &[];
+        "SpendReasonRequired" | crate::CompletionCommandError::SpendReasonRequired
+            => "SpendReasonRequired", crate::CompletionCommandError::SpendReasonRequired, &[];
+        "MalformedRequest" | crate::CompletionCommandError::MalformedRequest(_)
+            => "MalformedRequest",
+            crate::CompletionCommandError::MalformedRequest(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "DuplicateSetEntry" | crate::CompletionCommandError::DuplicateSetEntry(_)
+            => "DuplicateSetEntry",
+            crate::CompletionCommandError::DuplicateSetEntry(NEEDLE_FIELD), &[NEEDLE_FIELD];
+        "Unavailable" | crate::CompletionCommandError::Unavailable(_)
+            => "Unavailable",
+            crate::CompletionCommandError::Unavailable(crate::CompletionCommandUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
         expected_mission / mission_rows: MissionError,
         "Account" | MissionError::Account(cause)
             => format!("Account.{}", expected_account(cause).1),
@@ -3483,6 +4975,30 @@ mod tests {
         "StaleMissionTeam" | LocalErrorCode::StaleMissionTeam => "StaleMissionTeam", LocalErrorCode::StaleMissionTeam, &[];
         "MissionMemberIneligible" | LocalErrorCode::MissionMemberIneligible => "MissionMemberIneligible", LocalErrorCode::MissionMemberIneligible, &[];
         "MissionUnavailable" | LocalErrorCode::MissionUnavailable => "MissionUnavailable", LocalErrorCode::MissionUnavailable, &[];
+        "MissionCompletionUnavailable" | LocalErrorCode::MissionCompletionUnavailable => "MissionCompletionUnavailable", LocalErrorCode::MissionCompletionUnavailable, &[];
+        "CompletionIntentChanged" | LocalErrorCode::CompletionIntentChanged => "CompletionIntentChanged", LocalErrorCode::CompletionIntentChanged, &[];
+        "CompletionAlreadyRecorded" | LocalErrorCode::CompletionAlreadyRecorded => "CompletionAlreadyRecorded", LocalErrorCode::CompletionAlreadyRecorded, &[];
+        "CompletionResidentNotInAdmissionRoster" | LocalErrorCode::CompletionResidentNotInAdmissionRoster => "CompletionResidentNotInAdmissionRoster", LocalErrorCode::CompletionResidentNotInAdmissionRoster, &[];
+        "CompletionConditionCoverageIncomplete" | LocalErrorCode::CompletionConditionCoverageIncomplete => "CompletionConditionCoverageIncomplete", LocalErrorCode::CompletionConditionCoverageIncomplete, &[];
+        "CompletionSupportOverLimit" | LocalErrorCode::CompletionSupportOverLimit => "CompletionSupportOverLimit", LocalErrorCode::CompletionSupportOverLimit, &[];
+        "CompletionTextOverLimit" | LocalErrorCode::CompletionTextOverLimit => "CompletionTextOverLimit", LocalErrorCode::CompletionTextOverLimit, &[];
+        "CompletionSpendReasonRequired" | LocalErrorCode::CompletionSpendReasonRequired => "CompletionSpendReasonRequired", LocalErrorCode::CompletionSpendReasonRequired, &[];
+        "CompletionInvalidDetails" | LocalErrorCode::CompletionInvalidDetails => "CompletionInvalidDetails", LocalErrorCode::CompletionInvalidDetails, &[];
+        "ClassificationStalePolicyRevision" | LocalErrorCode::ClassificationStalePolicyRevision => "ClassificationStalePolicyRevision", LocalErrorCode::ClassificationStalePolicyRevision, &[];
+        "ClassificationNoPolicyPublished" | LocalErrorCode::ClassificationNoPolicyPublished => "ClassificationNoPolicyPublished", LocalErrorCode::ClassificationNoPolicyPublished, &[];
+        "ClassificationAlreadyClassified" | LocalErrorCode::ClassificationAlreadyClassified => "ClassificationAlreadyClassified", LocalErrorCode::ClassificationAlreadyClassified, &[];
+        "ClassificationPredecessorNotLatest" | LocalErrorCode::ClassificationPredecessorNotLatest => "ClassificationPredecessorNotLatest", LocalErrorCode::ClassificationPredecessorNotLatest, &[];
+        "ClassificationPredecessorUnproven" | LocalErrorCode::ClassificationPredecessorUnproven => "ClassificationPredecessorUnproven", LocalErrorCode::ClassificationPredecessorUnproven, &[];
+        "ClassificationVersionCeilingReached" | LocalErrorCode::ClassificationVersionCeilingReached => "ClassificationVersionCeilingReached", LocalErrorCode::ClassificationVersionCeilingReached, &[];
+        "ClassificationTextOverLimit" | LocalErrorCode::ClassificationTextOverLimit => "ClassificationTextOverLimit", LocalErrorCode::ClassificationTextOverLimit, &[];
+        "ClassificationInvalidDetails" | LocalErrorCode::ClassificationInvalidDetails => "ClassificationInvalidDetails", LocalErrorCode::ClassificationInvalidDetails, &[];
+        "MissionClassificationUnavailable" | LocalErrorCode::MissionClassificationUnavailable => "MissionClassificationUnavailable", LocalErrorCode::MissionClassificationUnavailable, &[];
+        "OutcomeNotCompleted" | LocalErrorCode::OutcomeNotCompleted => "OutcomeNotCompleted", LocalErrorCode::OutcomeNotCompleted, &[];
+        "OutcomeNotClassified" | LocalErrorCode::OutcomeNotClassified => "OutcomeNotClassified", LocalErrorCode::OutcomeNotClassified, &[];
+        "OutcomeNoClassificationAtCompletion" | LocalErrorCode::OutcomeNoClassificationAtCompletion => "OutcomeNoClassificationAtCompletion", LocalErrorCode::OutcomeNoClassificationAtCompletion, &[];
+        "OutcomePreparationUnavailable" | LocalErrorCode::OutcomePreparationUnavailable => "OutcomePreparationUnavailable", LocalErrorCode::OutcomePreparationUnavailable, &[];
+        "OutcomeCandidateNotFound" | LocalErrorCode::OutcomeCandidateNotFound => "OutcomeCandidateNotFound", LocalErrorCode::OutcomeCandidateNotFound, &[];
+        "OutcomeCandidateUnavailable" | LocalErrorCode::OutcomeCandidateUnavailable => "OutcomeCandidateUnavailable", LocalErrorCode::OutcomeCandidateUnavailable, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -3553,6 +5069,36 @@ mod tests {
         "R42S2.TRANSPORT.Team" | LocalTransportError::Team(error)
             => format!("Team operation failed: {}", expected_team(error).1),
             LocalTransportError::Team(TeamError::TeamNotFound), &[];
+        "R42S2.TRANSPORT.MissionCompletionRead" | LocalTransportError::MissionCompletionRead(error)
+            => format!("Mission completion read failed: {}", expected_completion_read(error).1),
+            LocalTransportError::MissionCompletionRead(crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::OrphanCompletedEvent)), &[];
+        "R42S2.TRANSPORT.OutcomePreparation" | LocalTransportError::OutcomePreparation(error)
+            => format!("Outcome preparation failed: {}", expected_preparation(error).1),
+            LocalTransportError::OutcomePreparation(crate::PrepareRefusal::ClassificationAbsent), &[];
+        "R42S2.TRANSPORT.OutcomePreparationAfterCommit" | LocalTransportError::OutcomePreparationAfterCommit(fault)
+            => format!(
+                "Outcome preparation failed after the candidate was written: {}",
+                expected_post_preparation(fault).1
+            ),
+            LocalTransportError::OutcomePreparationAfterCommit(PostPreparationFault::Identity {
+                field: "manifestId",
+                expected: payload_a(),
+                observed: payload_a(),
+            }), &[NEEDLE_A];
+        "R42S2.TRANSPORT.OutcomeCandidateDocument" | LocalTransportError::OutcomeCandidateDocument(fault)
+            => format!(
+                "Outcome candidate document read failed: {}",
+                expected_candidate_document(fault).1
+            ),
+            LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Manifest(
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+            )), &[];
+        "R42S2.TRANSPORT.MissionImpactClassification" | LocalTransportError::MissionImpactClassification(error)
+            => format!("Mission impact classification failed: {}", expected_impact_classification(error).1),
+            LocalTransportError::MissionImpactClassification(crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
+        "R42S2.TRANSPORT.MissionCompletionCommand" | LocalTransportError::MissionCompletionCommand(error)
+            => format!("Mission completion command failed: {}", expected_completion_command(error).1),
+            LocalTransportError::MissionCompletionCommand(crate::CompletionCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
         "R42S2.TRANSPORT.Mission" | LocalTransportError::Mission(error)
             => format!("Mission operation failed: {}", expected_mission(error).1),
             LocalTransportError::Mission(MissionError::MissionNotFound), &[];
@@ -4037,6 +5583,7 @@ mod tests {
         "Proposal" | StartupPass::Proposal => "Proposal", StartupPass::Proposal, &[];
         "Evaluation" | StartupPass::Evaluation => "Evaluation", StartupPass::Evaluation, &[];
         "Artifact" | StartupPass::Artifact => "Artifact", StartupPass::Artifact, &[];
+        "Invocation" | StartupPass::Invocation => "Invocation", StartupPass::Invocation, &[];
         "Ruling" | StartupPass::Ruling => "Ruling", StartupPass::Ruling, &[];
         "Candidate" | StartupPass::Candidate => "Candidate", StartupPass::Candidate, &[];
         "ProjectRepository" | StartupPass::ProjectRepository => "ProjectRepository", StartupPass::ProjectRepository, &[];
@@ -4366,6 +5913,18 @@ mod tests {
         "EvaluationChainsMismatch" | SupervisorError::EvaluationChainsMismatch(cause)
             => format!("EvaluationChainsMismatch.{}", expected_evaluation(cause).1),
             SupervisorError::EvaluationChainsMismatch(EvaluationError::NotFound), &[];
+        "InvocationEventPayloadOverCeiling" | SupervisorError::InvocationEventPayloadOverCeiling { .. }
+            => "InvocationEventPayloadOverCeiling",
+            SupervisorError::InvocationEventPayloadOverCeiling { sequence: STORED_VERSION, payload_bytes: STORED_VERSION }, &[];
+        "InvocationEventMismatch" | SupervisorError::InvocationEventMismatch(..)
+            => "InvocationEventMismatch",
+            SupervisorError::InvocationEventMismatch(STORED_VERSION), &[];
+        "InvocationTotalsMismatch" | SupervisorError::InvocationTotalsMismatch(..)
+            => "InvocationTotalsMismatch",
+            SupervisorError::InvocationTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "InvocationStateMismatch" | SupervisorError::InvocationStateMismatch { cause, .. }
+            => format!("InvocationStateMismatch.{}", cause.name()),
+            SupervisorError::InvocationStateMismatch { workspace_id: first_uuid(), invocation_id: first_uuid(), cause: crate::InvocationStoreError::InvalidStore }, &[];
         "ArtifactEventMismatch" | SupervisorError::ArtifactEventMismatch(..)
             => "ArtifactEventMismatch",
             SupervisorError::ArtifactEventMismatch(STORED_VERSION), &[];
@@ -4628,6 +6187,71 @@ mod tests {
         team_rows,
         "R42S2.TRANSPORT.Team",
         TeamError::Account
+    );
+    domain_cases!(
+        preparation_cases,
+        LocalTransportError::OutcomePreparation,
+        preparation_rows,
+        "R42S2.TRANSPORT.OutcomePreparation",
+        crate::PrepareRefusal::Account
+    );
+    domain_cases!(
+        post_preparation_cases,
+        LocalTransportError::OutcomePreparationAfterCommit,
+        post_preparation_rows,
+        "R42S2.TRANSPORT.OutcomePreparationAfterCommit",
+        post_read_account
+    );
+    /// C7's expansion, written out rather than macro-generated: this domain has TWO account arms,
+    /// one per stage, and `domain_cases!` knows how to expand exactly one.
+    fn candidate_document_cases(cases: &mut Vec<Case>) {
+        for (case, value, markers) in candidate_document_rows() {
+            let stage = match case {
+                "ManifestAccount" => Some("Manifest"),
+                "CandidateAccount" => Some("Candidate"),
+                _ => None,
+            };
+            match stage {
+                Some(stage) => {
+                    for (child, account, child_markers) in account_rows() {
+                        cases.push(Case {
+                            id: format!(
+                                "R42S2.TRANSPORT.OutcomeCandidateDocument.{stage}.Account.{child}"
+                            ),
+                            value: LocalTransportError::OutcomeCandidateDocument(match stage {
+                                "Manifest" => CandidateDocumentFault::Manifest(
+                                    crate::PrepareRefusal::Account(account),
+                                ),
+                                _ => CandidateDocumentFault::Candidate(
+                                    crate::PrepareRefusal::Account(account),
+                                ),
+                            }),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                None => cases.push(Case {
+                    id: format!("R42S2.TRANSPORT.OutcomeCandidateDocument.{case}"),
+                    value: LocalTransportError::OutcomeCandidateDocument(value),
+                    markers,
+                }),
+            }
+        }
+    }
+
+    domain_cases!(
+        impact_classification_cases,
+        LocalTransportError::MissionImpactClassification,
+        impact_classification_rows,
+        "R42S2.TRANSPORT.MissionImpactClassification",
+        crate::ClassificationCommandError::Account
+    );
+    domain_cases!(
+        completion_command_cases,
+        LocalTransportError::MissionCompletionCommand,
+        completion_command_rows,
+        "R42S2.TRANSPORT.MissionCompletionCommand",
+        crate::CompletionCommandError::Account
     );
     domain_cases!(
         mission_cases,
@@ -4939,6 +6563,15 @@ mod tests {
                 "R42S2.TRANSPORT.SampleProject" => sample_cases(&mut cases),
                 "R42S2.TRANSPORT.Team" => team_cases(&mut cases),
                 "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
+                "R42S2.TRANSPORT.MissionCompletionCommand" => completion_command_cases(&mut cases),
+                "R42S2.TRANSPORT.MissionImpactClassification" => {
+                    impact_classification_cases(&mut cases)
+                }
+                "R42S2.TRANSPORT.OutcomePreparation" => preparation_cases(&mut cases),
+                "R42S2.TRANSPORT.OutcomePreparationAfterCommit" => {
+                    post_preparation_cases(&mut cases)
+                }
+                "R42S2.TRANSPORT.OutcomeCandidateDocument" => candidate_document_cases(&mut cases),
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -5096,24 +6729,44 @@ mod tests {
             3,
             "R42S2.TRANSPORT.CARDINALITY.InvalidDraft"
         );
+        // Counted at THIS source: 63 before this slice, plus the eight completion codes.
+        // 84 before C7, plus its two: `outcome_candidate_not_found` and
+        // `outcome_candidate_unavailable`.
         assert_eq!(
             code_rows().len(),
-            62,
+            86,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
+        // 23 before this slice, plus the `MissionCompletionCommand` carrier. 27 before C7, plus its
+        // `OutcomeCandidateDocument` carrier.
         assert_eq!(
             transport_rows().len(),
-            22,
+            28,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 876, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 878 before this slice, and my first arithmetic here was wrong by exactly the eight new
+        // wire codes -- the `Remote` branch expands `code_rows()`, so adding a code adds a case too.
+        // 878 + 8 (new Remote codes) + 10 (the carrier's direct arms) + 18 (its `Account` arm over
+        // every account row) = 914.
+        // 914 before C5: plus its nine Remote codes, its nine direct arms, and its `Account` arm
+        // over all eighteen account rows = 950.
+        // 950 before C6: plus its four Remote codes, the pre-commit domain's fourteen direct arms and
+        // its `Account` arm over all eighteen account rows, and the post-commit domain's two direct
+        // arms plus ITS `Account` arm over the same eighteen = 1006. Counted on this head.
+        // 1006 before C7. Its read adds: two new Remote codes (the `Remote` branch expands
+        // `code_rows()`, so a code is also a case); five direct arms -- `ManifestNotFound`,
+        // `Manifest`, `Candidate`, `Identity`, `Content`; and TWO `Account` arms, one per stage,
+        // each over all eighteen account rows. 1006 + 2 + 5 + 36 = 1049. Counted on this head.
+        // C2 adds four Supervisor cases and one StoredIdentityUnreadable startup-pass case.
+        // Preserve every C3-C7 case: 1049 + 4 + 1 = 1054.
+        assert_eq!(cases.len(), 1054, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            75,
+            79,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =
@@ -5237,7 +6890,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 153] = [
+    const WIRE_MAP: [(&str, WireExpectation); 199] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -5778,10 +7431,208 @@ mod tests {
         ),
         ("Outcome.Absent", WireExpectation::Code("outcome_absent")),
         ("Outcome.Account", WireExpectation::Account),
+        // The completion COMMAND family. Transcribed from the contract, one row per owner arm:
+        // malformed grammar and duplicated set entries are `completion_invalid_details`, never
+        // "text over limit", and an unverifiable completion reuses C3's existing code.
+        ("MissionCompletionCommand.Account", WireExpectation::Account),
+        (
+            "MissionCompletionCommand.IntentChanged",
+            WireExpectation::Code("completion_intent_changed"),
+        ),
+        (
+            "MissionCompletionCommand.AlreadyRecorded",
+            WireExpectation::Code("completion_already_recorded"),
+        ),
+        (
+            "MissionCompletionCommand.ResidentNotInAdmissionRoster",
+            WireExpectation::Code("completion_resident_not_in_admission_roster"),
+        ),
+        (
+            "MissionCompletionCommand.ConditionCoverageIncomplete",
+            WireExpectation::Code("completion_condition_coverage_incomplete"),
+        ),
+        (
+            "MissionCompletionCommand.SupportOverLimit",
+            WireExpectation::Code("completion_support_over_limit"),
+        ),
+        (
+            "MissionCompletionCommand.TextOverLimit",
+            WireExpectation::Code("completion_text_over_limit"),
+        ),
+        (
+            "MissionCompletionCommand.SpendReasonRequired",
+            WireExpectation::Code("completion_spend_reason_required"),
+        ),
+        (
+            "MissionCompletionCommand.MalformedRequest",
+            WireExpectation::Code("completion_invalid_details"),
+        ),
+        (
+            "MissionCompletionCommand.DuplicateSetEntry",
+            WireExpectation::Code("completion_invalid_details"),
+        ),
+        (
+            "MissionCompletionCommand.Unavailable",
+            WireExpectation::Code("mission_completion_unavailable"),
+        ),
+        // The classification family, transcribed from C5-interface.md: nine codes and the account
+        // recursion, with malformed details never shown as a length problem.
+        (
+            "MissionImpactClassification.Account",
+            WireExpectation::Account,
+        ),
+        (
+            "MissionImpactClassification.StalePolicyRevision",
+            WireExpectation::Code("classification_stale_policy_revision"),
+        ),
+        (
+            "MissionImpactClassification.NoPolicyPublished",
+            WireExpectation::Code("classification_no_policy_published"),
+        ),
+        (
+            "MissionImpactClassification.AlreadyClassified",
+            WireExpectation::Code("classification_already_classified"),
+        ),
+        (
+            "MissionImpactClassification.PredecessorNotLatest",
+            WireExpectation::Code("classification_predecessor_not_latest"),
+        ),
+        (
+            "MissionImpactClassification.PredecessorUnproven",
+            WireExpectation::Code("classification_predecessor_unproven"),
+        ),
+        (
+            "MissionImpactClassification.VersionCeilingReached",
+            WireExpectation::Code("classification_version_ceiling_reached"),
+        ),
+        (
+            "MissionImpactClassification.TextOverLimit",
+            WireExpectation::Code("classification_text_over_limit"),
+        ),
+        (
+            "MissionImpactClassification.MalformedRequest",
+            WireExpectation::Code("classification_invalid_details"),
+        ),
+        (
+            "MissionImpactClassification.Unavailable",
+            WireExpectation::Code("mission_classification_unavailable"),
+        ),
+        // C6 preparation, BEFORE the commit: only the three actual owner variants are definite, the
+        // account child recurses, and every broken-evidence arm is unavailable.
+        ("OutcomePreparation.Account", WireExpectation::Account),
+        (
+            "OutcomePreparation.CrossWorkspace",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Manifest",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Completion",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Classification",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.ClassificationAbsent",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Irreconcilable",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Render",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Artifact",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.MissionNotCompleted",
+            WireExpectation::Code("outcome_not_completed"),
+        ),
+        (
+            "OutcomePreparation.MissionNotClassified",
+            WireExpectation::Code("outcome_not_classified"),
+        ),
+        (
+            "OutcomePreparation.MissionNotClassifiedAtBoundary",
+            WireExpectation::Code("outcome_no_classification_at_completion"),
+        ),
+        (
+            "OutcomePreparation.Collector",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Assembly",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Sources",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        // And AFTER it: one code for all three, `Account` INCLUDED. A session refusal from a re-read
+        // is not definite, because the candidate may already exist.
+        (
+            "OutcomePreparationAfterCommit.Account",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparationAfterCommit.Read",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparationAfterCommit.Identity",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        // C7's READ. The account rows recurse at BOTH stages -- a read wrote nothing, so a session
+        // refusal is still a definite answer.
+        (
+            "OutcomeCandidateDocument.ManifestAccount",
+            WireExpectation::Account,
+        ),
+        // The ONE absence this command reports, and the only row here that is not `unavailable`.
+        // Both `Absent` and `CrossWorkspace` arrive at it, deliberately collapsed.
+        (
+            "OutcomeCandidateDocument.ManifestNotFound",
+            WireExpectation::Code("outcome_candidate_not_found"),
+        ),
+        (
+            "OutcomeCandidateDocument.Manifest",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.CandidateAccount",
+            WireExpectation::Account,
+        ),
+        // Absence-shaped refusals INCLUDED: the manifest was already held, so this is a store
+        // disagreeing with itself rather than an absence a caller may act on.
+        (
+            "OutcomeCandidateDocument.Candidate",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.Identity",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
+        (
+            "OutcomeCandidateDocument.Content",
+            WireExpectation::Code("outcome_candidate_unavailable"),
+        ),
     ];
 
-    /// The 62 code spellings: wire literal and reviewed Remote NAME, both independent.
-    const CODE_SPELLINGS: [(&str, &str, &str); 62] = [
+    /// The 83 code spellings: wire literal and reviewed Remote NAME, both independent.
+    ///
+    /// The eight completion rows are transcribed from `C4-interface.md`'s superseding section, not
+    /// read off the enum: a spelling that agreed with the code because it was generated from it
+    /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
+    /// without a spelling; that gap is C3's to close, not this slice's to edit.)
+    const CODE_SPELLINGS: [(&str, &str, &str); 85] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -5972,6 +7823,19 @@ mod tests {
             "mission_unavailable",
             "MissionUnavailable",
         ),
+        // C7's two, transcribed from the accepted frontend's fixed copy table rather than read off
+        // the enum: a spelling that agreed with the code because it was generated from it would
+        // witness nothing.
+        (
+            "OutcomeCandidateNotFound",
+            "outcome_candidate_not_found",
+            "OutcomeCandidateNotFound",
+        ),
+        (
+            "OutcomeCandidateUnavailable",
+            "outcome_candidate_unavailable",
+            "OutcomeCandidateUnavailable",
+        ),
         ("OutcomeAbsent", "outcome_absent", "OutcomeAbsent"),
         (
             "OutcomeUnavailable",
@@ -6024,6 +7888,111 @@ mod tests {
             "UnauthorizedClient",
         ),
         ("ProtocolError", "protocol_error", "ProtocolError"),
+        (
+            "CompletionIntentChanged",
+            "completion_intent_changed",
+            "CompletionIntentChanged",
+        ),
+        (
+            "CompletionAlreadyRecorded",
+            "completion_already_recorded",
+            "CompletionAlreadyRecorded",
+        ),
+        (
+            "CompletionResidentNotInAdmissionRoster",
+            "completion_resident_not_in_admission_roster",
+            "CompletionResidentNotInAdmissionRoster",
+        ),
+        (
+            "CompletionConditionCoverageIncomplete",
+            "completion_condition_coverage_incomplete",
+            "CompletionConditionCoverageIncomplete",
+        ),
+        (
+            "CompletionSupportOverLimit",
+            "completion_support_over_limit",
+            "CompletionSupportOverLimit",
+        ),
+        (
+            "CompletionTextOverLimit",
+            "completion_text_over_limit",
+            "CompletionTextOverLimit",
+        ),
+        (
+            "CompletionSpendReasonRequired",
+            "completion_spend_reason_required",
+            "CompletionSpendReasonRequired",
+        ),
+        (
+            "CompletionInvalidDetails",
+            "completion_invalid_details",
+            "CompletionInvalidDetails",
+        ),
+        (
+            "ClassificationStalePolicyRevision",
+            "classification_stale_policy_revision",
+            "ClassificationStalePolicyRevision",
+        ),
+        (
+            "ClassificationNoPolicyPublished",
+            "classification_no_policy_published",
+            "ClassificationNoPolicyPublished",
+        ),
+        (
+            "ClassificationAlreadyClassified",
+            "classification_already_classified",
+            "ClassificationAlreadyClassified",
+        ),
+        (
+            "ClassificationPredecessorNotLatest",
+            "classification_predecessor_not_latest",
+            "ClassificationPredecessorNotLatest",
+        ),
+        (
+            "ClassificationPredecessorUnproven",
+            "classification_predecessor_unproven",
+            "ClassificationPredecessorUnproven",
+        ),
+        (
+            "ClassificationVersionCeilingReached",
+            "classification_version_ceiling_reached",
+            "ClassificationVersionCeilingReached",
+        ),
+        (
+            "ClassificationTextOverLimit",
+            "classification_text_over_limit",
+            "ClassificationTextOverLimit",
+        ),
+        (
+            "ClassificationInvalidDetails",
+            "classification_invalid_details",
+            "ClassificationInvalidDetails",
+        ),
+        (
+            "MissionClassificationUnavailable",
+            "mission_classification_unavailable",
+            "MissionClassificationUnavailable",
+        ),
+        (
+            "OutcomeNotCompleted",
+            "outcome_not_completed",
+            "OutcomeNotCompleted",
+        ),
+        (
+            "OutcomeNotClassified",
+            "outcome_not_classified",
+            "OutcomeNotClassified",
+        ),
+        (
+            "OutcomeNoClassificationAtCompletion",
+            "outcome_no_classification_at_completion",
+            "OutcomeNoClassificationAtCompletion",
+        ),
+        (
+            "OutcomePreparationUnavailable",
+            "outcome_preparation_unavailable",
+            "OutcomePreparationUnavailable",
+        ),
     ];
 
     // -------------------------------------------------------------------------------------
@@ -6086,8 +8055,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 153, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 62, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 199, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 85, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
@@ -6200,7 +8169,8 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 135, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+        // 135 before this slice, plus the completion family's eleven owner arms.
+        assert_eq!(checked, 174, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
 
         // All 18 account faults at the root...
         for (variant, account, _) in account_rows() {
@@ -6305,7 +8275,7 @@ mod tests {
             );
         }
 
-        // All 62 Remote codes relay BOTH fields unchanged, including a retry on a code that does
+        // All 83 Remote codes relay BOTH fields unchanged, including a retry on a code that does
         // not otherwise carry one. Existing behaviour, pinned -- not a new promise.
         for (variant, literal, _) in CODE_SPELLINGS {
             let code = code_rows()
@@ -6323,7 +8293,7 @@ mod tests {
         }
     }
 
-    /// R42 slice 2: the wire schema and all 62 code spellings are closed.
+    /// R42 slice 2: the wire schema and all 83 code spellings are closed.
     #[test]
     fn r42_wire_schema_and_code_spellings_are_closed() {
         for (variant, literal, name) in CODE_SPELLINGS {
@@ -6441,6 +8411,26 @@ mod tests {
             domain!("Team", LocalTransportError::Team, team_rows),
             domain!("Mission", LocalTransportError::Mission, mission_rows),
             domain!(
+                "MissionCompletionCommand",
+                LocalTransportError::MissionCompletionCommand,
+                completion_command_rows
+            ),
+            domain!(
+                "MissionImpactClassification",
+                LocalTransportError::MissionImpactClassification,
+                impact_classification_rows
+            ),
+            domain!(
+                "OutcomePreparation",
+                LocalTransportError::OutcomePreparation,
+                preparation_rows
+            ),
+            domain!(
+                "OutcomePreparationAfterCommit",
+                LocalTransportError::OutcomePreparationAfterCommit,
+                post_preparation_rows
+            ),
+            domain!(
                 "ResourceDiscovery",
                 LocalTransportError::ResourceDiscovery,
                 discovery_rows
@@ -6463,5 +8453,1600 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
         ]
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // C4 -- the completion family's parser ceilings, refusal ORDER and closed vocabulary.
+    //
+    // FOR A COLD READER: written while this seat had no Cargo grant (Opus held the sole grant for
+    // the owner build). Nothing below had been compiled or run when it was committed. It is source.
+    // ------------------------------------------------------------------------------------------
+
+    struct CompletionScratch(std::path::PathBuf);
+
+    impl Drop for CompletionScratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A bound server plus its paths. The scratch must stay alive for the test's duration.
+    fn completion_fixture(
+        tag: &str,
+    ) -> (
+        LocalSupervisorServer,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        CompletionScratch,
+    ) {
+        let root = std::env::temp_dir().join(format!("beacond-c4-{tag}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let scratch = CompletionScratch(root.clone());
+        let socket_path = root.join("beacond.sock");
+        let token_path = root.join("beacond.token");
+        initialize_local_auth_token(&token_path).unwrap();
+        let server = LocalSupervisorServer::bind(LocalServerConfig {
+            store_path: root.join("beacon.sqlite3"),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: socket_path.clone(),
+            auth_token_path: token_path.clone(),
+            lock_path: root.join("beacond.lock"),
+            local_model_endpoint: LocalModelEndpoint::ollama_default(),
+        })
+        .unwrap();
+        (server, socket_path, token_path, scratch)
+    }
+
+    /// Send BYTES, not a typed command: a size test that goes through the client would be testing
+    /// the client's own serializer instead of what the server accepts.
+    fn raw_exchange(socket_path: &std::path::Path, body: &[u8]) -> ResponseEnvelope {
+        use std::io::{Read as _, Write as _};
+
+        let mut stream = std::os::unix::net::UnixStream::connect(socket_path).unwrap();
+        stream.write_all(body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).expect("the supervisor answers with an envelope")
+    }
+
+    /// One valid OLD-family request, padded to `total` bytes through a legal string field.
+    fn padded_old_command(token: &str, total: usize) -> Vec<u8> {
+        let build = |padding: usize| {
+            serde_json::to_vec(&serde_json::json!({
+                "protocol": 1,
+                "token": token,
+                "command": {
+                    "name": "inspect_local_model",
+                    "model_name": "m".repeat(padding),
+                    "expected_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                },
+            }))
+            .unwrap()
+        };
+        let empty = build(0).len();
+        assert!(total > empty, "the padding target is below the empty body");
+        let body = build(total - empty);
+        assert_eq!(body.len(), total, "C4.FIXTURE.PADDED_TO_EXACT_LENGTH");
+        body
+    }
+
+    #[test]
+    fn the_larger_request_domain_is_exactly_preview_and_record() {
+        assert!(
+            accepts_completion_sized_request(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            "C4.FAMILY.PREVIEW_IS_IN"
+        );
+        assert!(
+            accepts_completion_sized_request(&LocalCommand::RecordMissionCompletion {
+                request: completion_request_fixture(),
+                reviewed_intent_sha256: "a".repeat(64),
+            }),
+            "C4.FAMILY.RECORD_IS_IN"
+        );
+        // One UUID in, one token or null out: it can never need the larger domain.
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::GetMissionCompletionIntent {
+                mission_id: Uuid::new_v4(),
+            }),
+            "C4.FAMILY.GET_INTENT_IS_OUT"
+        );
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::MissionCompletion {
+                mission_id: Uuid::new_v4(),
+            }),
+            "C4.FAMILY.C3_READ_IS_OUT"
+        );
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::Status),
+            "C4.FAMILY.OLD_COMMAND_IS_OUT"
+        );
+
+        // Constructing all 55 commands here would be a fixture, not a witness -- and a command added
+        // tomorrow would not be in it. The predicate's own source is read instead, so ANY arm that
+        // appears in it and is not one of the two held names fails by name. A mutant that adds
+        // `LocalCommand::Projects` to the predicate is caught here, where the constructed rows above
+        // never reach it.
+        let held = ["PreviewMissionCompletion", "RecordMissionCompletion"];
+        let predicate = include_str!("local_transport.rs")
+            .split(concat!(
+                "fn accepts_completion",
+                "_sized_request(command: &LocalCommand) -> bool {"
+            ))
+            .nth(1)
+            .expect("the family predicate is a function in this file")
+            .split("\n}")
+            .next()
+            .expect("the function closes");
+        let named: Vec<String> = wire_command_arms()
+            .into_iter()
+            .filter(|arm| predicate.contains(&format!("LocalCommand::{arm}")))
+            .collect();
+        assert_eq!(named, held, "C4.FAMILY.PREDICATE_NAMES_EXACTLY_THE_TWO");
+        assert!(
+            wire_command_arms().len() >= 55,
+            "C4.FAMILY.ARMS_FOUND: {}",
+            wire_command_arms().len()
+        );
+    }
+
+    #[test]
+    fn only_the_preview_response_leaves_the_old_domain() {
+        assert_eq!(
+            response_max(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C4.RESPONSE.PREVIEW_IS_LARGER"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::RecordMissionCompletion {
+                request: completion_request_fixture(),
+                reviewed_intent_sha256: "a".repeat(64),
+            }),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.RECORD_STAYS_OLD"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::GetMissionCompletionIntent {
+                mission_id: Uuid::new_v4(),
+            }),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.GET_INTENT_STAYS_OLD"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::Status),
+            MAX_MESSAGE_BYTES,
+            "C4.RESPONSE.OLD_COMMAND_STAYS_OLD"
+        );
+    }
+
+    /// Every wire command states its own response domain, derived from the source rather than from a
+    /// hand list -- a hand list would need editing exactly when nobody edits it.
+    ///
+    /// The needles are assembled with `concat!` so this parser does not match its own source text.
+    /// Every arm of the wire vocabulary, read from this file's own source.
+    ///
+    /// A hand-written list would need editing exactly when nobody edits it -- when a command is
+    /// added. The needles are assembled with `concat!` so this parser does not match its own text.
+    fn wire_command_arms() -> Vec<String> {
+        let source = include_str!("local_transport.rs");
+        source
+            .split(concat!("enum ", "LocalCommand {"))
+            .nth(1)
+            .expect("the wire vocabulary is an enum in this file")
+            .split("\n}")
+            .next()
+            .expect("the enum closes")
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with(',') || line.ends_with(" {"))
+            .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
+            .map(|line| line.trim_end_matches(" {").trim_end_matches(',').to_owned())
+            .filter(|name| {
+                name.chars().next().is_some_and(char::is_uppercase)
+                    && name.chars().all(char::is_alphanumeric)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_command_states_its_response_domain() {
+        let source = include_str!("local_transport.rs");
+        let arms = wire_command_arms();
+        assert!(
+            arms.len() >= 55,
+            "C4.RESPONSE.TABLE.ARMS_FOUND: {}",
+            arms.len()
+        );
+
+        let table = source
+            .split(concat!(
+                "fn response",
+                "_max(command: &LocalCommand) -> u64 {"
+            ))
+            .nth(1)
+            .expect("the response table is a function in this file")
+            .split("\n}")
+            .next()
+            .expect("the function closes");
+        for arm in &arms {
+            assert!(
+                table.contains(&format!("LocalCommand::{arm}")),
+                "C4.RESPONSE.TABLE.STATES_EVERY_COMMAND: {arm}"
+            );
+        }
+        // Exactly one command may leave the old domain, and it is named here independently.
+        let larger = table
+            .split(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES"))
+            .next()
+            .expect("the larger ceiling appears once");
+        assert!(
+            larger.contains("LocalCommand::PreviewMissionCompletion"),
+            "C4.RESPONSE.TABLE.ONLY_PREVIEW_IS_LARGER"
+        );
+        assert_eq!(
+            table
+                .matches(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES"))
+                .count(),
+            1,
+            "C4.RESPONSE.TABLE.LARGER_CEILING_APPEARS_ONCE"
+        );
+    }
+
+    /// The ceilings cover the grammar, by a conservative bound rather than by an example.
+    ///
+    /// `J <= 2C + K`, where `C` is the owner's canonical size and `K` is the maximum of `J - 2C` over
+    /// the grammar. Adding `b` UTF-8 bytes of text adds at most `2b` to `J` (escaping at most doubles
+    /// a scalar) and exactly `8 + b` to `C` (the codec's `u64` length prefix), so `d(J - 2C) <= -16`:
+    /// the maximum is reached with EMPTY text placeholders, which exist for the algebra only and are
+    /// not a legal record.
+    ///
+    /// **What this bounds, exactly.** It bounds every OWNER-VALID request. It does NOT bound what
+    /// serde would parse: a `Vec` or a `String` has no length limit at the parser, so parser-valid
+    /// input is not finitely bounded by the owner's caps at all, and no ceiling derived from them
+    /// could claim to be a maximum parser domain. The ceiling is a finite parser ceiling chosen to
+    /// COVER the owner-valid domain; a larger body is refused by size, which is the intended answer.
+    ///
+    /// The literals are measured, not derived here: `tools/c4/opus2/transport/verify-bound.py` and
+    /// `bound-certificate.json`. They use `u32::MAX` for every ordinal, which is a deliberate
+    /// CONSERVATIVE SUPERSET of the owner-valid input -- the owner requires dense ordinals, so a
+    /// legal record's ordinals are at most two digits. Blue's independently proved owner-valid bounds
+    /// are 147,219 and 171,539; the 702-byte gap in both totals is exactly that ordinal digit width,
+    /// and the wider figure is used here on purpose.
+    #[test]
+    fn the_completion_ceilings_cover_the_conservative_grammar_bound() {
+        // Transcribed from `mission_completion.rs`, not read from it: that constant is private, and
+        // a bound that imported its own input would witness nothing.
+        const OWNER_CANONICAL_CAP: u64 = 65_536;
+        const K_MAX_RESIDUAL: u64 = 16_622;
+        const REQUEST_ENVELOPE_OVERHEAD: u64 = 227;
+        const PREVIEW_RESPONSE_EXTRA: u64 = 24_462;
+        const PREVIEW_RESPONSE_ENVELOPE_OVERHEAD: u64 = 85;
+
+        let request_upper = 2 * OWNER_CANONICAL_CAP + K_MAX_RESIDUAL + REQUEST_ENVELOPE_OVERHEAD;
+        assert_eq!(
+            request_upper, 147_921,
+            "C4.BOUND.REQUEST_UPPER_IS_UNCHANGED"
+        );
+        assert!(
+            request_upper <= MAX_COMPLETION_REQUEST_BYTES,
+            "C4.BOUND.REQUEST_CEILING_COVERS_THE_GRAMMAR"
+        );
+
+        let preview_upper = 2 * OWNER_CANONICAL_CAP
+            + K_MAX_RESIDUAL
+            + PREVIEW_RESPONSE_EXTRA
+            + PREVIEW_RESPONSE_ENVELOPE_OVERHEAD;
+        assert_eq!(
+            preview_upper, 172_241,
+            "C4.BOUND.PREVIEW_UPPER_IS_UNCHANGED"
+        );
+        assert!(
+            preview_upper <= MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C4.BOUND.PREVIEW_CEILING_COVERS_THE_GRAMMAR"
+        );
+
+        // The constants themselves, held independently. Proving only that the calculated bound is
+        // `<=` them would leave a widening free: 161 KiB also covers 147,921.
+        assert_eq!(
+            MAX_COMPLETION_REQUEST_BYTES, 163_840,
+            "C4.BOUND.REQUEST_CEILING_IS_EXACTLY_160_KIB"
+        );
+        assert_eq!(
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES, 196_608,
+            "C4.BOUND.PREVIEW_CEILING_IS_EXACTLY_192_KIB"
+        );
+
+        // The old domain is untouched. The ORDERING of the three lives beside the constants as a
+        // compile-time invariant: clippy is right that asserting a constant at runtime proves nothing
+        // later, and a `const` assertion refuses to BUILD instead of refusing to pass.
+        assert_eq!(
+            MAX_MESSAGE_BYTES,
+            64 * 1024,
+            "C4.BOUND.OLD_DOMAIN_UNCHANGED"
+        );
+    }
+
+    /// An old command over the old ceiling is refused for its SIZE, before authentication -- which is
+    /// where it was refused before this change. The token below is wrong on purpose: if the size
+    /// check had moved after the token check, the answer would be `unauthorized_client`.
+    #[test]
+    fn an_old_command_over_the_old_ceiling_is_refused_before_authentication() {
+        let (server, socket_path, _token_path, _scratch) = completion_fixture("old-over");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+
+        let over = raw_exchange(
+            &socket_path,
+            &padded_old_command("not-the-real-token", (MAX_MESSAGE_BYTES + 1) as usize),
+        );
+        assert_eq!(
+            over.error.map(|error| error.code),
+            Some(LocalErrorCode::ProtocolError),
+            "C4.OLD_DOMAIN.OVER_LIMIT_IS_PROTOCOL_BEFORE_AUTH"
+        );
+
+        // ... and one byte under it still reaches authentication, so the boundary is the boundary.
+        let under = raw_exchange(
+            &socket_path,
+            &padded_old_command("not-the-real-token", MAX_MESSAGE_BYTES as usize),
+        );
+        assert_eq!(
+            under.error.map(|error| error.code),
+            Some(LocalErrorCode::UnauthorizedClient),
+            "C4.OLD_DOMAIN.AT_LIMIT_STILL_REACHES_AUTH"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// A body over the COMPLETION ceiling is refused by size, whatever it claims to be.
+    #[test]
+    fn a_body_over_the_completion_ceiling_is_refused_by_size() {
+        let (server, socket_path, _token_path, _scratch) = completion_fixture("c4-over");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+
+        let body = padded_old_command(
+            "not-the-real-token",
+            (MAX_COMPLETION_REQUEST_BYTES + 1) as usize,
+        );
+        let answer = raw_exchange(&socket_path, &body);
+        assert_eq!(
+            answer.error.map(|error| error.code),
+            Some(LocalErrorCode::ProtocolError),
+            "C4.CEILING.OVER_THE_COMPLETION_CEILING_IS_PROTOCOL"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// A malformed body keeps the refusal it had: `Json` under the old ceiling, `Protocol` above it.
+    ///
+    /// Read through `read_request` directly, because both variants project to the same wire code --
+    /// the distinction is internal, and an outward-only test could not see it.
+    #[test]
+    fn a_malformed_body_keeps_its_refusal_on_each_side_of_the_old_ceiling() {
+        use std::io::Write as _;
+
+        let (server, _socket_path, _token_path, _scratch) = completion_fixture("malformed");
+
+        let refuse = |length: usize| {
+            let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+            let body = vec![b'{'; length];
+            thread::spawn(move || {
+                let _ = theirs.write_all(&body);
+                let _ = theirs.shutdown(std::net::Shutdown::Write);
+            });
+            server.read_request(&mut ours)
+        };
+
+        assert!(
+            matches!(refuse(64), Err(LocalTransportError::Json(_))),
+            "C4.PARSE.UNDER_THE_OLD_CEILING_IS_STILL_JSON"
+        );
+        assert!(
+            matches!(
+                refuse((MAX_MESSAGE_BYTES + 1) as usize),
+                Err(LocalTransportError::Protocol)
+            ),
+            "C4.PARSE.OVER_THE_OLD_CEILING_IS_STILL_PROTOCOL"
+        );
+        assert!(
+            matches!(
+                refuse((MAX_COMPLETION_REQUEST_BYTES + 1) as usize),
+                Err(LocalTransportError::Protocol)
+            ),
+            "C4.PARSE.OVER_THE_COMPLETION_CEILING_IS_PROTOCOL"
+        );
+    }
+
+    /// The three commands are registered, reach the owner, and are authenticated like every other
+    /// command. This is NOT a claim that a completion round trips: it is a claim that an
+    /// unauthenticated caller is refused by the account, not by a missing route.
+    #[test]
+    fn the_completion_commands_are_registered_and_authenticated() {
+        let (server, socket_path, token_path, _scratch) = completion_fixture("auth");
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+        let client = LocalSupervisorClient::connect(&socket_path, &token_path).unwrap();
+
+        assert!(
+            matches!(
+                client.preview_mission_completion(completion_request_fixture()),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.PREVIEW_IS_AUTHENTICATED"
+        );
+        assert!(
+            matches!(
+                client.record_mission_completion(completion_request_fixture(), "a".repeat(64)),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.RECORD_IS_AUTHENTICATED"
+        );
+        assert!(
+            matches!(
+                client.get_mission_completion_intent(Uuid::new_v4()),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::NotAuthenticated,
+                    ..
+                })
+            ),
+            "C4.ROUTE.GET_INTENT_IS_AUTHENTICATED"
+        );
+
+        running.store(false, Ordering::SeqCst);
+        let _ = std::os::unix::net::UnixStream::connect(&socket_path);
+        server_thread.join().unwrap();
+    }
+
+    /// The smallest legal request: one condition, nothing optional cited. Used where the CONTENT does
+    /// not matter, only that a real DTO crosses the boundary.
+    fn completion_request_fixture() -> crate::CompletionIntentRequest {
+        crate::CompletionIntentRequest {
+            mission_id: Uuid::new_v4(),
+            accountable_resident_id: Uuid::new_v4(),
+            disposition: "concluded".to_owned(),
+            condition_results: vec![crate::ConditionResultDto {
+                ordinal: 0,
+                outcome: "met".to_owned(),
+                support: Vec::new(),
+                note: None,
+            }],
+            delivered_artifacts: Vec::new(),
+            unfinished_work: Vec::new(),
+            uncertainty: Vec::new(),
+            spend: crate::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+            summary: "Shipped it.".to_owned(),
+        }
+    }
+
+    /// The wire vocabulary is strict in both directions: every field required, `null` explicit, no
+    /// unknown field, no unknown command.
+    #[test]
+    fn the_completion_wire_vocabulary_is_strict() {
+        let with_command =
+            |command: serde_json::Value| serde_json::from_value::<LocalCommand>(command);
+
+        let mut request = serde_json::json!({
+            "missionId": "11111111-1111-4111-8111-111111111111",
+            "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+            "disposition": "concluded",
+            "conditionResults": [{
+                "ordinal": 0,
+                "outcome": "met",
+                "support": [],
+                "note": null,
+            }],
+            "deliveredArtifacts": [],
+            "unfinishedWork": [],
+            "uncertainty": [],
+            "spend": {"notMeasured": "no meter on this Mission"},
+            "summary": "Shipped it.",
+        });
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": request.clone(),
+            }))
+            .is_ok(),
+            "C4.WIRE.A_COMPLETE_REQUEST_IS_ACCEPTED"
+        );
+
+        // An ABSENT note is not the same fact as an explicit null, and the owner is told which.
+        let mut absent = request.clone();
+        absent["conditionResults"][0]
+            .as_object_mut()
+            .expect("the condition is an object")
+            .remove("note");
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": absent,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_ABSENT_NOTE_IS_REFUSED"
+        );
+
+        request["conditionResults"][0]["unexpected"] = serde_json::Value::from(1);
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion",
+                "request": request,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_UNKNOWN_FIELD_IS_REFUSED"
+        );
+
+        assert!(
+            with_command(serde_json::json!({
+                "name": "preview_mission_completion_v2",
+                "request": serde_json::Value::Null,
+            }))
+            .is_err(),
+            "C4.WIRE.AN_UNKNOWN_COMMAND_IS_REFUSED"
+        );
+
+        // The record leg carries the REVIEWED token, spelled as the contract spells it.
+        assert!(
+            with_command(serde_json::json!({
+                "name": "record_mission_completion",
+                "request": serde_json::json!({
+                    "missionId": "11111111-1111-4111-8111-111111111111",
+                    "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+                    "disposition": "concluded",
+                    "conditionResults": [],
+                    "deliveredArtifacts": [],
+                    "unfinishedWork": [],
+                    "uncertainty": [],
+                    "spend": {"notMeasured": "x"},
+                    "summary": "y",
+                }),
+                "reviewed_intent_sha256": "a".repeat(64),
+            }))
+            .is_ok(),
+            "C4.WIRE.THE_RECORD_LEG_CARRIES_THE_REVIEWED_TOKEN"
+        );
+        assert!(
+            with_command(serde_json::json!({
+                "name": "record_mission_completion",
+                "request": serde_json::json!({
+                    "missionId": "11111111-1111-4111-8111-111111111111",
+                    "accountableResidentId": "22222222-2222-4222-8222-222222222222",
+                    "disposition": "concluded",
+                    "conditionResults": [],
+                    "deliveredArtifacts": [],
+                    "unfinishedWork": [],
+                    "uncertainty": [],
+                    "spend": {"notMeasured": "x"},
+                    "summary": "y",
+                }),
+            }))
+            .is_err(),
+            "C4.WIRE.A_RECORD_WITHOUT_THE_REVIEWED_TOKEN_IS_REFUSED"
+        );
+    }
+
+    /// The preparation receipt through the NATIVE serializer: nine keys, exactly, and strict on both
+    /// sides.
+    ///
+    /// Every literal is written from the C6 contract, not read off the types.
+    #[test]
+    fn the_preparation_wire_shapes_are_exact_and_strict() {
+        let mission = "99999999-9999-4999-8999-9999999c6000";
+        let hex = "a".repeat(64);
+        let receipt = serde_json::json!({
+            "missionId": mission,
+            "appendixRequest": "policy_default",
+            "appendixMode": "policy_state_not_high_impact",
+            "manifestId": "66666666-6666-4666-8666-666666666666",
+            "manifestDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.outcome.manifest.v2",
+                "value": hex,
+            },
+            "candidateArtifactDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.artifact.v1",
+                "value": hex,
+            },
+            "candidateContentDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.raw.v1",
+                "value": hex,
+            },
+            "candidateContentBytes": 1_048_576_u64,
+            "mediaType": "text/markdown; charset=utf-8",
+        });
+        let decoded: PreparedOutcomeCandidateDto =
+            serde_json::from_value(receipt.clone()).expect("the nine-field receipt decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("it re-serializes"),
+            receipt,
+            "C6T.WIRE.THE_RECEIPT_ROUND_TRIPS"
+        );
+        assert_eq!(
+            receipt.as_object().expect("an object").len(),
+            9,
+            "C6T.WIRE.THE_RECEIPT_HAS_NINE_KEYS"
+        );
+
+        for absent in [
+            "missionId",
+            "appendixRequest",
+            "appendixMode",
+            "manifestId",
+            "manifestDigest",
+            "candidateArtifactDigest",
+            "candidateContentDigest",
+            "candidateContentBytes",
+            "mediaType",
+        ] {
+            let mut missing = receipt.clone();
+            missing.as_object_mut().expect("an object").remove(absent);
+            assert!(
+                serde_json::from_value::<PreparedOutcomeCandidateDto>(missing).is_err(),
+                "C6T.WIRE.EVERY_RECEIPT_KEY_IS_REQUIRED: {absent}"
+            );
+        }
+        let mut extra = receipt.clone();
+        extra["isPublished"] = serde_json::Value::from(false);
+        assert!(
+            serde_json::from_value::<PreparedOutcomeCandidateDto>(extra).is_err(),
+            "C6T.WIRE.NO_STATUS_OR_PUBLICATION_FIELD_IS_ADMITTED"
+        );
+        let mut partial = receipt.clone();
+        partial["manifestDigest"]
+            .as_object_mut()
+            .expect("an object")
+            .remove("canonicalizer");
+        assert!(
+            serde_json::from_value::<PreparedOutcomeCandidateDto>(partial).is_err(),
+            "C6T.WIRE.A_DIGEST_WITHOUT_ITS_CANONICALIZER_IS_NOT_AN_IDENTITY"
+        );
+
+        // The request seam: a Mission and ONE of two appendix spellings, and nothing else.
+        for spelling in ["policy_default", "include"] {
+            let command = serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission,
+                "appendix_request": spelling,
+            });
+            let decoded: LocalCommand =
+                serde_json::from_value(command.clone()).expect("the command decodes");
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("it re-serializes"),
+                command,
+                "C6T.WIRE.THE_COMMAND_ROUND_TRIPS: {spelling}"
+            );
+        }
+        for forbidden in ["omit", "default", "policyDefault", "POLICY_DEFAULT", ""] {
+            assert!(
+                serde_json::from_value::<LocalCommand>(serde_json::json!({
+                    "name": "prepare_outcome_candidate",
+                    "mission_id": mission,
+                    "appendix_request": forbidden,
+                }))
+                .is_err(),
+                "C6T.WIRE.THE_APPENDIX_CHOICE_ADMITS_NOTHING_ELSE: {forbidden:?}"
+            );
+        }
+        for widened in ["manifest_digest", "candidate_artifact_digest", "evidence"] {
+            let mut command = serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission,
+                "appendix_request": "include",
+            });
+            command[widened] = serde_json::Value::from("x");
+            assert!(
+                serde_json::from_value::<LocalCommand>(command).is_err(),
+                "C6T.WIRE.THE_REQUEST_ADMITS_NO_OWNER_INPUT: {widened}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<LocalCommand>(serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "appendix_request": "include",
+            }))
+            .is_err(),
+            "C6T.WIRE.THE_MISSION_IS_REQUIRED"
+        );
+    }
+
+    /// The candidate read's two STAGES answer differently, and only the first can say "absent".
+    ///
+    /// **Mapper evidence, labelled as such.** A live stage-2 fault is not constructible in this store:
+    /// `artifacts` and `outcome_manifests` carry unconditional `BEFORE UPDATE`/`BEFORE DELETE`
+    /// triggers that abort with "... are immutable", so no fixture can remove or corrupt a candidate
+    /// behind a real manifest without dropping a deliberate guard. This bar therefore drives the
+    /// mapper with the SAME refusal values at both stages and asserts they answer differently -- which
+    /// is the whole claim the phase distinction makes -- rather than pretending to a live interleaving.
+    #[test]
+    fn the_candidate_read_stages_map_to_their_own_answers() {
+        let read = |fault| envelope_of(LocalTransportError::OutcomeCandidateDocument(fault));
+
+        // The two absence-shaped refusals, at stage ONE: one answer, byte for byte.
+        let absent = read(CandidateDocumentFault::Manifest(
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+        ));
+        let foreign = read(CandidateDocumentFault::Manifest(
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::CrossWorkspace),
+        ));
+        assert_eq!(
+            absent,
+            expected_envelope("outcome_candidate_not_found", None),
+            "C7T.STAGE.AN_ABSENT_MANIFEST_IS_NOT_FOUND"
+        );
+        assert_eq!(
+            foreign, absent,
+            "C7T.STAGE.A_FOREIGN_MANIFEST_IS_THE_SAME_ANSWER"
+        );
+
+        // The SAME two values at stage TWO are unavailable, because a manifest was already held.
+        for (name, refusal) in [
+            (
+                "Absent",
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+            ),
+            (
+                "CrossWorkspace",
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::CrossWorkspace),
+            ),
+            (
+                "ArtifactNotFound",
+                crate::PrepareRefusal::Artifact(ArtifactError::NotFound),
+            ),
+        ] {
+            assert_eq!(
+                read(CandidateDocumentFault::Candidate(refusal)),
+                expected_envelope("outcome_candidate_unavailable", None),
+                "C7T.STAGE.THE_CANDIDATE_STAGE_IS_NEVER_ABSENCE: {name}"
+            );
+        }
+
+        // Everything else at stage one is unavailable too: absence is the exception, not the default.
+        assert_eq!(
+            read(CandidateDocumentFault::Manifest(
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::BytesDisagree)
+            )),
+            expected_envelope("outcome_candidate_unavailable", None),
+            "C7T.STAGE.A_DISAGREEING_MANIFEST_IS_NOT_AN_ABSENCE"
+        );
+
+        // And an account refusal keeps its OWN code at BOTH stages -- a read wrote nothing, so there
+        // is no uncertainty to collapse it into. This is the one place C7 and C6 deliberately differ.
+        for (stage, wrap) in [
+            (
+                "Manifest",
+                CandidateDocumentFault::Manifest as fn(crate::PrepareRefusal) -> _,
+            ),
+            (
+                "Candidate",
+                CandidateDocumentFault::Candidate as fn(crate::PrepareRefusal) -> _,
+            ),
+        ] {
+            for (child, cause, _) in account_rows() {
+                let (code, retry) = account_expectation(child);
+                assert_eq!(
+                    read(wrap(crate::PrepareRefusal::Account(cause))),
+                    expected_envelope(code, retry),
+                    "C7T.STAGE.AN_ACCOUNT_REFUSAL_KEEPS_ITS_CODE: {stage}.{child}"
+                );
+            }
+        }
+    }
+
+    /// The candidate read's identity label is a CLOSED vocabulary on the outward line.
+    ///
+    /// `Identity.field` is a public `&'static str`, so the type permits any static text at all. C6
+    /// learned this after shipping the hole; C7 closes it before, and this witness holds its own
+    /// literals rather than calling the production guard or its table.
+    #[test]
+    fn the_candidate_identity_label_is_a_closed_vocabulary() {
+        let known: [(&str, &str); 3] = [
+            (
+                "manifestDigest",
+                "Outcome candidate document read failed: Identity.manifestDigest",
+            ),
+            (
+                "candidateArtifactDigest",
+                "Outcome candidate document read failed: Identity.candidateArtifactDigest",
+            ),
+            (
+                "candidateContentBytes",
+                "Outcome candidate document read failed: Identity.candidateContentBytes",
+            ),
+        ];
+        for (label, expected_line) in known {
+            let error =
+                LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Identity {
+                    field: label,
+                    expected: payload_a(),
+                    observed: payload_b(),
+                });
+            assert_eq!(
+                error.to_string(),
+                expected_line,
+                "C7T.LABEL.IDENTITY_FIELD_IS_CLOSED: {label}"
+            );
+        }
+
+        for unknown in [
+            "R42S2_PRIVATE_A /home/example/private.md\r\nsecond-line: manifestDigest",
+            "",
+            "someOtherField",
+        ] {
+            let error =
+                LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Identity {
+                    field: unknown,
+                    expected: payload_a(),
+                    observed: payload_b(),
+                });
+            let line = error.to_string();
+            assert_eq!(
+                line, "Outcome candidate document read failed: Identity",
+                "C7T.LABEL.IDENTITY_FIELD_IS_CLOSED: {unknown:?}"
+            );
+            assert!(
+                !line.contains(NEEDLE_A) && !line.contains('\r') && !line.contains('\n'),
+                "C7T.LABEL.AN_UNKNOWN_LABEL_NEVER_REACHES_THE_LINE: {unknown:?}"
+            );
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(NEEDLE_A)
+                    && debug.contains(NEEDLE_B)
+                    && debug.contains(&format!("{unknown:?}")),
+                "C7T.LABEL.THE_LABEL_AND_VALUES_SURVIVE_IN_DEBUG: {unknown:?}"
+            );
+        }
+
+        // The UTF-8 refusal carries a byte count in `Debug` and NOT on the line: how much private
+        // content there is, is a fact about private content.
+        let broken =
+            LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Content {
+                bytes: 987_654,
+                error: not_utf8(),
+            });
+        assert_eq!(
+            broken.to_string(),
+            "Outcome candidate document read failed: Content",
+            "C7T.LABEL.A_DECODE_FAILURE_NAMES_ITSELF_ONLY"
+        );
+        assert!(
+            format!("{broken:?}").contains("987654"),
+            "C7T.LABEL.THE_BYTE_COUNT_SURVIVES_IN_DEBUG"
+        );
+    }
+
+    /// Every one of the eight keys is REQUIRED, and nothing else is accepted.
+    ///
+    /// A deserialization witness on the actual `OutcomeCandidateDocumentDto`, which the live
+    /// produced-key bar cannot stand in for: a produced reply proves what this version writes, while
+    /// adding `serde(default)` to a field or dropping `deny_unknown_fields` would change what a future
+    /// version ACCEPTS without changing a single produced key. The literal below is written out here,
+    /// not serialized from a value, so the two sides cannot agree by construction.
+    #[test]
+    fn the_candidate_document_dto_requires_its_eight_keys_and_admits_no_others() {
+        let whole = serde_json::json!({
+            "missionId": "11111111-1111-4111-8111-111111111111",
+            "manifestId": "22222222-2222-4222-8222-222222222222",
+            "manifestDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.outcome.manifest.v2",
+                "value": "a".repeat(64),
+            },
+            "candidateArtifactDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.artifact.v1",
+                "value": "b".repeat(64),
+            },
+            "candidateContentDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.raw.v1",
+                "value": "c".repeat(64),
+            },
+            "candidateContentBytes": 11,
+            "mediaType": "text/markdown; charset=utf-8",
+            "candidateContentBase64": "aGVsbG8gdGhlcmU=",
+        });
+
+        // It round trips, and every field lands where this test says it should.
+        let document: OutcomeCandidateDocumentDto = serde_json::from_value(whole.clone())
+            .unwrap_or_else(|error| panic!("C7T.DTO.THE_WHOLE_DOCUMENT_DESERIALIZES: {error}"));
+        assert_eq!(
+            document.mission_id.to_string(),
+            "11111111-1111-4111-8111-111111111111",
+            "C7T.DTO.MISSION_ID"
+        );
+        assert_eq!(
+            document.manifest_id.to_string(),
+            "22222222-2222-4222-8222-222222222222",
+            "C7T.DTO.MANIFEST_ID"
+        );
+        assert_eq!(
+            (
+                document.manifest_digest.canonicalizer.as_str(),
+                document.candidate_artifact_digest.canonicalizer.as_str(),
+                document.candidate_content_digest.canonicalizer.as_str(),
+            ),
+            (
+                "beacon.outcome.manifest.v2",
+                "beacon.artifact.v1",
+                "beacon.raw.v1",
+            ),
+            "C7T.DTO.THREE_CANONICALIZERS_IN_THEIR_OWN_FIELDS"
+        );
+        assert_eq!(
+            document.candidate_content_bytes, 11,
+            "C7T.DTO.CONTENT_BYTES"
+        );
+        assert_eq!(
+            document.media_type, "text/markdown; charset=utf-8",
+            "C7T.DTO.MEDIA_TYPE"
+        );
+        assert_eq!(
+            document.candidate_content_base64, "aGVsbG8gdGhlcmU=",
+            "C7T.DTO.CONTENT_BODY"
+        );
+        // And it serializes back to exactly the same eight keys: no key is dropped on the way out.
+        assert_eq!(
+            serde_json::to_value(&document).expect("the document serializes"),
+            whole,
+            "C7T.DTO.THE_ROUND_TRIP_IS_THE_SAME_EIGHT_KEYS"
+        );
+
+        // Each key REMOVED, one at a time.
+        for key in [
+            "missionId",
+            "manifestId",
+            "manifestDigest",
+            "candidateArtifactDigest",
+            "candidateContentDigest",
+            "candidateContentBytes",
+            "mediaType",
+            "candidateContentBase64",
+        ] {
+            let mut missing = whole.clone();
+            missing
+                .as_object_mut()
+                .unwrap()
+                .remove(key)
+                .unwrap_or_else(|| panic!("C7T.DTO.THE_FIXTURE_HAS_THE_KEY: {key}"));
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(missing).is_err(),
+                "C7T.DTO.EVERY_KEY_IS_REQUIRED: {key}"
+            );
+        }
+
+        // And each of the facts this DTO must NOT carry, refused rather than ignored. Every one of
+        // these is something a caller could mistake for a verdict about the candidate.
+        for (extra, value) in [
+            ("status", serde_json::json!("ready")),
+            ("evaluation", serde_json::json!({ "verdict": "pass" })),
+            ("published", serde_json::json!(true)),
+            ("current", serde_json::json!(true)),
+            ("publicationVersion", serde_json::json!(1)),
+            ("appendixMode", serde_json::json!("included")),
+            ("summary", serde_json::json!("looks good")),
+        ] {
+            let mut widened = whole.clone();
+            widened
+                .as_object_mut()
+                .unwrap()
+                .insert(extra.to_owned(), value);
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(widened).is_err(),
+                "C7T.DTO.NO_OTHER_FACT_IS_ADMITTED: {extra}"
+            );
+        }
+
+        // A digest envelope is whole, too: three keys, each required, nothing extra.
+        for key in ["algorithm", "canonicalizer", "value"] {
+            let mut partial = whole.clone();
+            partial
+                .get_mut("manifestDigest")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(partial).is_err(),
+                "C7T.DTO.THE_DIGEST_ENVELOPE_IS_WHOLE: {key}"
+            );
+        }
+        let mut widened_envelope = whole.clone();
+        widened_envelope
+            .get_mut("candidateContentDigest")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("verified".to_owned(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<OutcomeCandidateDocumentDto>(widened_envelope).is_err(),
+            "C7T.DTO.THE_DIGEST_ENVELOPE_ADMITS_NOTHING_ELSE"
+        );
+    }
+
+    /// The largest DTO this command can answer with fits its own ceiling, and does NOT fit the
+    /// default frame.
+    ///
+    /// **A framing certificate, and only that.** The body is a synthetic 1 MiB of content, not a
+    /// renderer-produced candidate: nothing here claims Beacon's renderer can emit a 1 MiB Outcome
+    /// document, and no such fixture was built. What it proves is that the DTO's REAL serialized shape
+    /// at the owner's content ceiling stays inside `MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES`, measured
+    /// by serde rather than reproduced in another language.
+    #[test]
+    fn the_largest_candidate_document_fits_its_own_ceiling_and_not_the_default() {
+        let content = vec![b'\x01'; 1_048_576];
+        let digest = |canonicalizer: &str| DigestEnvelopeDto {
+            algorithm: "sha256".to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: "f".repeat(64),
+        };
+        let document = OutcomeCandidateDocumentDto {
+            mission_id: Uuid::new_v4(),
+            manifest_id: Uuid::new_v4(),
+            manifest_digest: digest("beacon.outcome.manifest.v2"),
+            candidate_artifact_digest: digest("beacon.artifact.v1"),
+            candidate_content_digest: digest("beacon.raw.v1"),
+            candidate_content_bytes: content.len() as u64,
+            media_type: "text/markdown; charset=utf-8".to_owned(),
+            candidate_content_base64: data_encoding::BASE64.encode(&content),
+        };
+        // 4 * ceil(1048576 / 3), computed here rather than read from the value under test.
+        assert_eq!(
+            document.candidate_content_base64.len(),
+            1_398_104,
+            "C7T.SIZE.BASE64_IS_A_PURE_FUNCTION_OF_THE_BYTE_COUNT"
+        );
+
+        let response = ResponseEnvelope {
+            protocol: 1,
+            result: Some(LocalResult::OutcomeCandidateDocument { document }),
+            error: None,
+        };
+        let serialized = serde_json::to_vec(&response).expect("the response serializes");
+        let length = serialized.len() as u64;
+        assert!(
+            length <= MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+            "C7T.SIZE.THE_LARGEST_DOCUMENT_FITS_ITS_CEILING: {length} > {MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES}"
+        );
+        assert!(
+            length > MAX_MESSAGE_BYTES,
+            "C7T.SIZE.IT_DOES_NOT_FIT_THE_DEFAULT_FRAME: {length}"
+        );
+        // The headroom is real but not generous, and it is stated rather than left to be discovered.
+        assert!(
+            MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES - length < 8 * 1024,
+            "C7T.SIZE.THE_CEILING_IS_NOT_A_GUESS: {length}"
+        );
+
+        // And the ceiling belongs to THIS command alone.
+        assert_eq!(
+            response_max(&LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: "a".repeat(64),
+            }),
+            MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+            "C7T.SIZE.THE_READ_HAS_ITS_OWN_DOMAIN"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::Status),
+            MAX_MESSAGE_BYTES,
+            "C7T.SIZE.AN_OLD_COMMAND_KEEPS_THE_DEFAULT"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C7T.SIZE.THE_PREVIEW_FAMILY_IS_UNCHANGED"
+        );
+        // The REQUEST stays in the default domain: it is one digest.
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: "a".repeat(64),
+            }),
+            "C7T.SIZE.THE_REQUEST_STAYS_SMALL"
+        );
+    }
+
+    /// A static label that no dispatch of this transport supplies, carrying CR/LF and a private-looking
+    /// path. If an outward line ever interpolates a label, this is what it would print.
+    const NEEDLE_LABEL: &str =
+        "R42S2_PRIVATE_A /home/example/private.txt\r\nsecond-line: manifestId";
+
+    /// The identity label is a CLOSED vocabulary on the caller line.
+    ///
+    /// `PostPreparationFault::Identity.field` is a PUBLIC `&'static str`, so nothing in the type stops
+    /// a future construction from carrying any static text at all. The outward line therefore must not
+    /// interpolate it blind: known labels are named, and anything else falls back to the bare arm.
+    /// R42's static-field lesson, applied to a field this slice introduced.
+    ///
+    /// Expectations here are written from the contract, not from the production guard: this test
+    /// holds its own list and its own fallback, so a change to either side has to disagree.
+    #[test]
+    fn the_identity_label_is_a_closed_vocabulary_on_the_line() {
+        // The five labels this transport's dispatch actually supplies, with whole expected lines
+        // written out: transcribed from the dispatch, never formatted from the label under test.
+        let known: [(&str, &str, &str); 5] = [
+            (
+                "manifestId",
+                "Identity.manifestId",
+                "Outcome preparation failed after the candidate was written: Identity.manifestId",
+            ),
+            (
+                "manifestDigest",
+                "Identity.manifestDigest",
+                "Outcome preparation failed after the candidate was written: Identity.manifestDigest",
+            ),
+            (
+                "candidateArtifactDigest",
+                "Identity.candidateArtifactDigest",
+                "Outcome preparation failed after the candidate was written: Identity.candidateArtifactDigest",
+            ),
+            (
+                "missionId",
+                "Identity.missionId",
+                "Outcome preparation failed after the candidate was written: Identity.missionId",
+            ),
+            (
+                "appendixRequest",
+                "Identity.appendixRequest",
+                "Outcome preparation failed after the candidate was written: Identity.appendixRequest",
+            ),
+        ];
+        for (label, expected_tag, expected_line) in known {
+            let fault = PostPreparationFault::Identity {
+                field: label,
+                expected: payload_a(),
+                observed: payload_b(),
+            };
+            assert_eq!(
+                expected_post_preparation(&fault),
+                ("Identity", expected_tag.to_owned()),
+                "C6T.PHASE.THE_EXPECTED_TABLE_NAMES_EVERY_LABEL: {label}"
+            );
+            let error = LocalTransportError::OutcomePreparationAfterCommit(fault);
+            assert_eq!(
+                error.to_string(),
+                expected_line,
+                "C6T.PHASE.IDENTITY_FIELD_IS_CLOSED: {label}"
+            );
+            assert_eq!(
+                envelope_of(error),
+                expected_envelope("outcome_preparation_unavailable", None),
+                "C6T.PHASE.THE_CODE_IS_UNCHANGED_BY_THE_LABEL: {label}"
+            );
+        }
+
+        // Anything else: the bare arm, with NO interpolation of the value.
+        for unknown in [NEEDLE_LABEL, "", "someOtherField", "Identity.manifestId"] {
+            let fault = PostPreparationFault::Identity {
+                field: unknown,
+                expected: payload_a(),
+                observed: payload_b(),
+            };
+            assert_eq!(
+                expected_post_preparation(&fault),
+                ("Identity", "Identity".to_owned()),
+                "C6T.PHASE.THE_EXPECTED_TABLE_CLOSES_AN_UNNAMED_LABEL: {unknown:?}"
+            );
+            let error = LocalTransportError::OutcomePreparationAfterCommit(fault);
+            let line = error.to_string();
+            assert_eq!(
+                line, "Outcome preparation failed after the candidate was written: Identity",
+                "C6T.PHASE.IDENTITY_FIELD_IS_CLOSED: {unknown:?}"
+            );
+            assert!(
+                !line.contains(NEEDLE_A) && !line.contains('\r') && !line.contains('\n'),
+                "C6T.PHASE.AN_UNKNOWN_LABEL_NEVER_REACHES_THE_LINE: {unknown:?}"
+            );
+            // The label and both compared values survive where R42 puts them.
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(NEEDLE_A) && debug.contains(NEEDLE_B),
+                "C6T.PHASE.THE_COMPARED_VALUES_SURVIVE_IN_DEBUG: {unknown:?}"
+            );
+            // `Debug` escapes, so the label survives there as its escaped spelling -- which is
+            // exactly what a developer reading a log needs, and still not the outward line.
+            assert!(
+                debug.contains(&format!("{unknown:?}")),
+                "C6T.PHASE.THE_LABEL_SURVIVES_IN_DEBUG: {unknown:?}"
+            );
+            // And the wire code is unchanged: this is a LINE contract, not a code change.
+            assert_eq!(
+                envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                    PostPreparationFault::Identity {
+                        field: unknown,
+                        expected: payload_a(),
+                        observed: payload_b(),
+                    }
+                )),
+                expected_envelope("outcome_preparation_unavailable", None),
+                "C6T.PHASE.THE_CODE_IS_UNCHANGED_BY_THE_LABEL: {unknown:?}"
+            );
+        }
+    }
+
+    /// Every account child, count for count: definite BEFORE the commit, never definite after it.
+    ///
+    /// This is a MAPPER witness, not a live interleaving. `serve_until` handles connections
+    /// sequentially (`:1368-1380`), so no second client can lock the session between
+    /// `prepare_for_mission` and the two re-reads; that race is reported NOT PROBED. What is proved
+    /// here is the projection: a retained post-read `Account` cause answers
+    /// `outcome_preparation_unavailable` for all eighteen children, and its cause survives in `Debug`.
+    #[test]
+    fn a_post_commit_account_refusal_is_never_definite() {
+        let before = account_rows();
+        let after = account_rows();
+        assert_eq!(
+            before.len(),
+            18,
+            "C6T.PHASE.THE_ACCOUNT_VOCABULARY_IS_EIGHTEEN"
+        );
+
+        for ((variant, pre_cause, markers), (_, post_cause, _)) in before.into_iter().zip(after) {
+            // Before the commit the account refusal keeps its own meaning -- the frontend's definite
+            // session copy is correct there.
+            let (code, retry) = account_expectation(variant);
+            assert_eq!(
+                envelope_of(LocalTransportError::OutcomePreparation(
+                    crate::PrepareRefusal::Account(pre_cause)
+                )),
+                expected_envelope(code, retry),
+                "C6T.PHASE.BEFORE_THE_COMMIT_AN_ACCOUNT_REFUSAL_IS_ITSELF: {variant}"
+            );
+
+            // After it, the same refusal says nothing definite: the candidate may already exist.
+            let fault = post_read_account(post_cause);
+            let line = LocalTransportError::OutcomePreparationAfterCommit(fault).to_string();
+            let debug = format!(
+                "{:?}",
+                LocalTransportError::OutcomePreparationAfterCommit(post_read_account(
+                    match variant {
+                        "AuthenticationThrottled" =>
+                            OperatorAccountError::AuthenticationThrottled {
+                                retry_after_ms: THROTTLE_MS,
+                            },
+                        "Store" => OperatorAccountError::Store(driver_error(NEEDLE_A)),
+                        _ => OperatorAccountError::NotAuthenticated,
+                    }
+                ))
+            );
+            assert!(
+                line.starts_with(
+                    "Outcome preparation failed after the candidate was written: Read.Account."
+                ),
+                "C6T.PHASE.THE_LINE_NAMES_THE_PHASE_AND_THE_CHILD: {variant}: {line}"
+            );
+            assert!(
+                debug.contains("Account"),
+                "C6T.PHASE.THE_CAUSE_SURVIVES_IN_DEBUG: {variant}"
+            );
+            for needle in markers {
+                assert!(
+                    !line.contains(needle),
+                    "C6T.PHASE.NO_PRIVATE_TEXT_REACHES_THE_LINE: {variant}"
+                );
+            }
+        }
+
+        // And the one code, asserted once more directly so the collapse is not only implied by the loop.
+        assert_eq!(
+            envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                post_read_account(OperatorAccountError::NotAuthenticated)
+            )),
+            expected_envelope("outcome_preparation_unavailable", None),
+            "C6T.PHASE.NOT_AUTHENTICATED_AFTER_THE_COMMIT_IS_UNAVAILABLE"
+        );
+        // An identity mismatch takes the same code, and its three compared values stay in Debug.
+        let mismatch =
+            LocalTransportError::OutcomePreparationAfterCommit(PostPreparationFault::Identity {
+                field: "manifestDigest",
+                expected: payload_a(),
+                observed: payload_b(),
+            });
+        let line = mismatch.to_string();
+        assert_eq!(
+            envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                PostPreparationFault::Identity {
+                    field: "manifestDigest",
+                    expected: payload_a(),
+                    observed: payload_b(),
+                }
+            )),
+            expected_envelope("outcome_preparation_unavailable", None),
+            "C6T.PHASE.AN_IDENTITY_MISMATCH_IS_UNAVAILABLE"
+        );
+        assert!(
+            !line.contains(NEEDLE_A) && !line.contains(NEEDLE_B),
+            "C6T.PHASE.THE_COMPARED_VALUES_STAY_OUT_OF_THE_LINE: {line}"
+        );
+    }
+
+    /// The classification DTOs through the NATIVE serializer: twelve fields, a decimal-string cursor
+    /// that survives above 2^53, an authentic legacy rule identity, and strictness at every seam.
+    ///
+    /// `serde_json` is the thing that will actually carry these, so it is the thing asked. Every
+    /// literal here is written from `C5-interface.md` rather than from the types.
+    #[test]
+    fn the_classification_wire_shapes_are_exact_and_strict() {
+        let mission = "99999999-9999-4999-8999-9999999c5000";
+        let project = "22222222-2222-4222-8222-222222222222";
+        let hex = "a".repeat(64);
+        // 18_446_744_073_709_551_615 and 9_007_199_254_740_993 are both beyond `Number.MAX_SAFE_INTEGER`.
+        for cursor in ["0", "9007199254740993", "18446744073709551615"] {
+            let observation = serde_json::json!({
+                "missionId": mission,
+                "observedAtEventSeq": cursor,
+                "publishedPolicy": null,
+                "latest": null,
+            });
+            let decoded: crate::ClassificationObservation =
+                serde_json::from_value(observation.clone())
+                    .expect("a four-field observation decodes");
+            assert_eq!(
+                decoded.observed_at_event_seq, cursor,
+                "C5T.WIRE.THE_CURSOR_SURVIVES_ABOVE_MAX_SAFE_INTEGER"
+            );
+            // Re-serialized by the NATIVE serializer, the cursor is still the same DIGITS, still a
+            // JSON string, and never a number.
+            let again = serde_json::to_value(&decoded).expect("it re-serializes");
+            assert_eq!(
+                again.pointer("/observedAtEventSeq"),
+                Some(&serde_json::Value::from(cursor)),
+                "C5T.WIRE.THE_CURSOR_IS_A_STRING_IN_BOTH_DIRECTIONS"
+            );
+            assert_eq!(again, observation, "C5T.WIRE.THE_OBSERVATION_ROUND_TRIPS");
+        }
+
+        // The twelve-field view, including an authentic legacy `policy_rule` basis and its rule id.
+        let legacy = serde_json::json!({
+            "missionId": mission,
+            "classificationId": "66666666-6666-4666-8666-666666666666",
+            "version": 3,
+            "impact": "high",
+            "basis": "policy_rule",
+            "ruleId": "security.credential-path",
+            "reason": "A legacy record that names its rule.",
+            "policy": { "projectId": project, "policyRevision": 2, "charterRevision": 2 },
+            "classifiedBy": "operator",
+            "classifiedAtMs": 1_757_000_000_000_u64,
+            "supersedes": { "kind": "record", "predecessorDigest": hex },
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.mission-impact.v1",
+                "value": hex,
+            },
+        });
+        let view: crate::ClassificationView =
+            serde_json::from_value(legacy.clone()).expect("the twelve-field view decodes");
+        assert_eq!(
+            view.rule_id.as_deref(),
+            Some("security.credential-path"),
+            "C5T.WIRE.A_LEGACY_RULE_IDENTITY_CROSSES_UNCHANGED"
+        );
+        assert_eq!(
+            view.basis, "policy_rule",
+            "C5T.WIRE.A_LEGACY_BASIS_IS_NOT_RELABELLED"
+        );
+        assert_eq!(
+            serde_json::to_value(&view).expect("it re-serializes"),
+            legacy,
+            "C5T.WIRE.THE_VIEW_ROUND_TRIPS"
+        );
+
+        // `ruleId` is a required KEY: absent and null are different facts, and only null is legal for
+        // an Operator declaration.
+        let mut absent = legacy.clone();
+        absent
+            .as_object_mut()
+            .expect("an object")
+            .remove("ruleId")
+            .expect("the key was there");
+        assert!(
+            serde_json::from_value::<crate::ClassificationView>(absent).is_err(),
+            "C5T.WIRE.AN_ABSENT_RULE_ID_IS_REFUSED"
+        );
+        let mut extra = legacy.clone();
+        extra["unexpected"] = serde_json::Value::from(1);
+        assert!(
+            serde_json::from_value::<crate::ClassificationView>(extra).is_err(),
+            "C5T.WIRE.AN_UNKNOWN_VIEW_FIELD_IS_REFUSED"
+        );
+
+        // The request seam: five keys, `expectedPolicyRevision` PRESENT and nullable, nothing else.
+        let request = serde_json::json!({
+            "missionId": mission,
+            "impact": "ordinary",
+            "reason": "No operator-visible surface changed.",
+            "expectedPolicyRevision": null,
+            "supersedes": { "kind": "none" },
+        });
+        assert!(
+            serde_json::from_value::<crate::ClassificationIntentRequest>(request.clone()).is_ok(),
+            "C5T.WIRE.THE_FIVE_KEY_REQUEST_IS_ACCEPTED"
+        );
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .expect("an object")
+            .remove("expectedPolicyRevision");
+        assert!(
+            serde_json::from_value::<crate::ClassificationIntentRequest>(missing).is_err(),
+            "C5T.WIRE.AN_ABSENT_EXPECTED_REVISION_IS_REFUSED"
+        );
+        for forbidden in ["basis", "ruleId", "version", "classifiedAtMs"] {
+            let mut widened = request.clone();
+            widened[forbidden] = serde_json::Value::from("x");
+            assert!(
+                serde_json::from_value::<crate::ClassificationIntentRequest>(widened).is_err(),
+                "C5T.WIRE.THE_REQUEST_ADMITS_NO_DERIVED_FIELD: {forbidden}"
+            );
+        }
+
+        // And the two commands' own envelopes carry the names the contract fixes.
+        let classify = serde_json::to_value(LocalCommand::ClassifyMissionImpact {
+            request: serde_json::from_value(request).expect("the request decodes"),
+        })
+        .expect("the command serializes");
+        assert_eq!(
+            classify
+                .pointer("/name")
+                .and_then(serde_json::Value::as_str),
+            Some("classify_mission_impact"),
+            "C5T.WIRE.THE_WRITE_COMMAND_NAME"
+        );
+        let observe = serde_json::to_value(LocalCommand::GetMissionClassification {
+            mission_id: uuid::Uuid::nil(),
+        })
+        .expect("the command serializes");
+        assert_eq!(
+            observe.pointer("/name").and_then(serde_json::Value::as_str),
+            Some("get_mission_classification"),
+            "C5T.WIRE.THE_READ_COMMAND_NAME"
+        );
+        assert_eq!(
+            observe
+                .pointer("/mission_id")
+                .and_then(serde_json::Value::as_str),
+            Some("00000000-0000-0000-0000-000000000000"),
+            "C5T.WIRE.THE_READ_ARGUMENT_NAME"
+        );
+    }
+
+    /// The slow deadline still belongs to exactly one command, and the completion family does not
+    /// take it. Source-derived, for the same reason as the response table.
+    #[test]
+    fn only_the_install_command_uses_the_slow_deadline() {
+        let source = include_str!("local_transport.rs");
+        let needle = concat!("CLIENT_SLOW", "_COMMAND_TIMEOUT");
+        let call_sites: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains(needle))
+            .filter(|line| {
+                !line.trim_start().starts_with("//") && !line.trim_start().starts_with("///")
+            })
+            .collect();
+        // One definition, one call site. Anything else means a second command took the slow budget.
+        assert_eq!(
+            call_sites.len(),
+            2,
+            "C4.DEADLINE.SLOW_BUDGET_HAS_ONE_CALLER: {call_sites:?}"
+        );
+        assert!(
+            source
+                .split(concat!("fn install_sample", "_project"))
+                .nth(1)
+                .expect("the install command is in this file")
+                .split("\n    }")
+                .next()
+                .expect("the method closes")
+                .contains(needle),
+            "C4.DEADLINE.SLOW_BUDGET_BELONGS_TO_INSTALL"
+        );
+    }
+
+    /// R42S2.TRANSPORT.MissionCompletionRead.Account — the wrapper must name the CHILD.
+    ///
+    /// The `MissionCompletionRead` root is expanded in the big case table with ONE sample, and that
+    /// sample is an `Unavailable`, whose projection happens to equal the owner's own `name()`. So
+    /// the `Account` arm -- the only one where the wrapper's line and the child's differ -- has
+    /// never been reached at this boundary, and the caller line has been saying a bare `Account`
+    /// while `expected_completion_read` (:3402-3405) says `Account.<child>`. Two statements about
+    /// the same string, and nothing made them meet.
+    ///
+    /// Every expected line here is composed from the child's OWN case label in `account_rows()`,
+    /// which is a hand-written literal in that table -- never from `MissionCompletionReadError::name`
+    /// and never from the selector under test.
+    #[test]
+    fn r42s2_transport_mission_completion_read_names_its_account_child() {
+        let rows = account_rows();
+        assert_eq!(
+            rows.len(),
+            18,
+            "R42S2.TRANSPORT.MissionCompletionRead.Account.CARDINALITY: every account child must \
+             reach this wrapper, so a shrunken vocabulary cannot pass by not being tried"
+        );
+
+        for (child, account, markers) in rows {
+            let value = LocalTransportError::MissionCompletionRead(
+                crate::MissionCompletionReadError::Account(account),
+            );
+            let line = value.to_string();
+            let expected = format!("Mission completion read failed: Account.{child}");
+
+            assert_eq!(
+                line, expected,
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.PROJECTION"
+            );
+            // The two test-side statements about this line must agree with each other as well.
+            assert_eq!(
+                line,
+                format!(
+                    "Mission completion read failed: {}",
+                    expected_completion_read(match &value {
+                        LocalTransportError::MissionCompletionRead(error) => error,
+                        other => panic!("R42S2.TRANSPORT.MissionCompletionRead.{child}: {other:?}"),
+                    })
+                    .1
+                ),
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.TABLE_AGREES"
+            );
+
+            for marker in markers {
+                assert!(
+                    !line.contains(marker),
+                    "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.NO_NEEDLE: {line}"
+                );
+                assert!(
+                    format!("{value:?}").contains(marker),
+                    "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.DEBUG_RETAINS"
+                );
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.ONE_LINE: {line:?}"
+            );
+        }
+
+        // The OTHER arm, pinned in the same bar: `Unavailable` carries no child on this line, and a
+        // fix that started forwarding everything would have to break this to pass the loop above.
+        let value = LocalTransportError::MissionCompletionRead(
+            crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::Store(
+                driver_error(NEEDLE_A),
+            )),
+        );
+        let line = value.to_string();
+        assert_eq!(
+            line, "Mission completion read failed: Unavailable",
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.PROJECTION"
+        );
+        assert!(
+            !line.contains(NEEDLE_A),
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.NO_NEEDLE: {line}"
+        );
+        assert!(
+            format!("{value:?}").contains(NEEDLE_A),
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.DEBUG_RETAINS"
+        );
     }
 }

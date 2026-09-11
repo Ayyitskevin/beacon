@@ -239,7 +239,7 @@ pub enum SupportRef {
 }
 
 impl SupportRef {
-    fn kind(&self) -> SupportKind {
+    pub(crate) fn kind(&self) -> SupportKind {
         match self {
             Self::Artifact(_) => SupportKind::Artifact,
             Self::Receipt { .. } => SupportKind::Receipt,
@@ -259,7 +259,7 @@ impl SupportRef {
 
     /// The bytes this reference sorts by, after its kind tag. A set needs one total order, and
     /// comparing the identity's own bytes is the only order that does not depend on a field name.
-    fn order_key(&self) -> Vec<u8> {
+    pub(crate) fn order_key(&self) -> Vec<u8> {
         match self {
             Self::Artifact(digest) | Self::Evaluation(digest) | Self::Ruling(digest) => {
                 digest.to_vec()

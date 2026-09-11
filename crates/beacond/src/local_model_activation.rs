@@ -844,79 +844,208 @@ pub(crate) fn verify_activation_state(
                 LocalModelActivationStateFault::Unreadable(cause)
             }
         })?;
-        let named_workspace = activation.workspace_id;
-        let named_activation = activation.id;
         let key = (
             activation.workspace_id,
             activation.binding.endpoint.clone(),
             activation.binding.model_name.clone(),
         );
-        match previous.get(&key) {
-            None => {
-                if activation.predecessor_id.is_some()
-                    || activation.state != LocalModelActivationState::Active
-                {
-                    return Err(LocalModelActivationStateFault::Row {
-                        workspace_id: named_workspace,
-                        activation_id: named_activation,
-                        cause: LocalModelActivationError::InvalidStore,
-                    });
-                }
-            }
-            Some(prior) => {
-                if activation.predecessor_id != Some(prior.id)
-                    || activation.state == prior.state
-                    || activation.decided_at_ms < prior.decided_at_ms
-                {
-                    return Err(LocalModelActivationStateFault::Row {
-                        workspace_id: named_workspace,
-                        activation_id: named_activation,
-                        cause: LocalModelActivationError::InvalidStore,
-                    });
-                }
-            }
-        }
-        let payload = serde_json::to_string(&LocalModelActivationDecisionPayload {
-            activation: activation.clone(),
-        })
-        .map_err(|cause| LocalModelActivationStateFault::Row {
-            workspace_id: named_workspace,
-            activation_id: named_activation,
-            cause: LocalModelActivationError::Json(cause),
-        })?;
-        let kind = match activation.state {
-            LocalModelActivationState::Active => "local_model.activated",
-            LocalModelActivationState::Inactive => "local_model.deactivated",
-        };
-        let event_count: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM events
-             WHERE workspace_id = ?1 AND kind = ?2 AND payload_json = ?3 AND occurred_at_ms = ?4",
-                params![
-                    activation.workspace_id.to_string(),
-                    kind,
-                    payload,
-                    i64::try_from(activation.decided_at_ms).map_err(|_| {
-                        LocalModelActivationStateFault::Row {
-                            workspace_id: named_workspace,
-                            activation_id: named_activation,
-                            cause: LocalModelActivationError::InvalidStore,
-                        }
-                    })?,
-                ],
-                |row| row.get(0),
-            )
-            .map_err(LocalModelActivationStateFault::Store)?;
-        if event_count != 1 {
-            return Err(LocalModelActivationStateFault::Row {
-                workspace_id: named_workspace,
-                activation_id: named_activation,
-                cause: LocalModelActivationError::InvalidStore,
-            });
-        }
+        verify_one_activation_decision(connection, &activation, previous.get(&key))?;
         previous.insert(key, activation);
     }
     Ok(())
+}
+
+/// The per-decision proof used by both startup and a scoped resource-chain read. Returning the
+/// existing startup fault preserves its Row versus Store classification at every original site.
+fn verify_one_activation_decision(
+    connection: &Connection,
+    activation: &LocalModelActivation,
+    prior: Option<&LocalModelActivation>,
+) -> Result<(), LocalModelActivationStateFault> {
+    let named_workspace = activation.workspace_id;
+    let named_activation = activation.id;
+    match prior {
+        None => {
+            if activation.predecessor_id.is_some()
+                || activation.state != LocalModelActivationState::Active
+            {
+                return Err(LocalModelActivationStateFault::Row {
+                    workspace_id: named_workspace,
+                    activation_id: named_activation,
+                    cause: LocalModelActivationError::InvalidStore,
+                });
+            }
+        }
+        Some(prior) => {
+            if activation.predecessor_id != Some(prior.id)
+                || activation.state == prior.state
+                || activation.decided_at_ms < prior.decided_at_ms
+            {
+                return Err(LocalModelActivationStateFault::Row {
+                    workspace_id: named_workspace,
+                    activation_id: named_activation,
+                    cause: LocalModelActivationError::InvalidStore,
+                });
+            }
+        }
+    }
+    let payload = serde_json::to_string(&LocalModelActivationDecisionPayload {
+        activation: activation.clone(),
+    })
+    .map_err(|cause| LocalModelActivationStateFault::Row {
+        workspace_id: named_workspace,
+        activation_id: named_activation,
+        cause: LocalModelActivationError::Json(cause),
+    })?;
+    let kind = match activation.state {
+        LocalModelActivationState::Active => "local_model.activated",
+        LocalModelActivationState::Inactive => "local_model.deactivated",
+    };
+    let event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events
+         WHERE workspace_id = ?1 AND kind = ?2 AND payload_json = ?3 AND occurred_at_ms = ?4",
+            params![
+                activation.workspace_id.to_string(),
+                kind,
+                payload,
+                i64::try_from(activation.decided_at_ms).map_err(|_| {
+                    LocalModelActivationStateFault::Row {
+                        workspace_id: named_workspace,
+                        activation_id: named_activation,
+                        cause: LocalModelActivationError::InvalidStore,
+                    }
+                })?,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(LocalModelActivationStateFault::Store)?;
+    if event_count != 1 {
+        return Err(LocalModelActivationStateFault::Row {
+            workspace_id: named_workspace,
+            activation_id: named_activation,
+            cause: LocalModelActivationError::InvalidStore,
+        });
+    }
+    Ok(())
+}
+
+// Engineering limits for the new context read only. SQLite can still allocate during queries.
+// The complete resource history is counted before Rust enumeration; nothing is truncated.
+const CONTEXT_HISTORY_LIMIT: i64 = 256;
+const CONTEXT_ROW_OVERSIZED: &str = "
+    length(CAST(id AS BLOB)) > 36 OR length(CAST(workspace_id AS BLOB)) > 36
+    OR coalesce(length(CAST(predecessor_id AS BLOB)), 0) > 36
+    OR length(CAST(provider AS BLOB)) > 65536 OR length(CAST(state AS BLOB)) > 65536
+    OR length(CAST(endpoint AS BLOB)) > 128 OR length(CAST(model_name AS BLOB)) > 1024
+    OR length(CAST(model_digest AS BLOB)) > 64 OR length(CAST(inspection_digest AS BLOB)) > 64
+    OR length(CAST(provider_features_json AS BLOB)) > 65536
+    OR length(CAST(unrecognized_features_json AS BLOB)) > 65536
+    OR length(CAST(approved_features_json AS BLOB)) > 65536";
+
+/// Preflight selected and related resource rows before either the configuration or activation
+/// owner transfers their strings. Lookup keys are not claims; the verified owner still proves all.
+pub(crate) fn activation_within_context_read_limits(
+    connection: &Connection,
+    workspace_id: Uuid,
+    activation_id: Uuid,
+) -> Result<bool, LocalModelActivationError> {
+    let oversized: bool = connection.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM local_model_activation_decisions
+         WHERE workspace_id = ?1 AND id = ?2 AND ({CONTEXT_ROW_OVERSIZED}))"
+        ),
+        params![workspace_id.to_string(), activation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if oversized {
+        return Ok(false);
+    }
+    let keys: Option<(String, String)> = connection
+        .query_row(
+            "SELECT endpoint, model_name FROM local_model_activation_decisions
+         WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id.to_string(), activation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((endpoint, model_name)) = keys else {
+        return Ok(true);
+    };
+    let (count, oversized): (i64, bool) = connection.query_row(
+        &format!(
+            "SELECT count(*), coalesce(max({CONTEXT_ROW_OVERSIZED}), 0)
+         FROM local_model_activation_decisions
+         WHERE workspace_id = ?1 AND endpoint = ?2 AND model_name = ?3"
+        ),
+        params![workspace_id.to_string(), endpoint, model_name],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(count <= CONTEXT_HISTORY_LIMIT && !oversized)
+}
+
+/// Prove the configured decision and the whole current history of its exact owner resource key.
+/// This reads recorded decisions only; it never inspects or contacts the resource.
+pub(crate) fn verified_activation_chain_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    activation_id: Uuid,
+) -> Result<(LocalModelActivation, LocalModelActivation), LocalModelActivationError> {
+    let selected = activation_by_id(connection, workspace_id, activation_id)?
+        .ok_or(LocalModelActivationError::InvalidStore)?;
+    let invalid_sequence: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_model_activation_decisions
+         WHERE workspace_id = ?1 AND endpoint = ?2 AND model_name = ?3
+           AND sequence < 1)",
+        params![
+            workspace_id.to_string(),
+            selected.binding.endpoint,
+            selected.binding.model_name
+        ],
+        |row| row.get(0),
+    )?;
+    if invalid_sequence {
+        return Err(LocalModelActivationError::InvalidStore);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, workspace_id, provider, endpoint, model_name, model_digest,
+                inspection_digest, provider_features_json, unrecognized_features_json,
+                approved_features_json, state, predecessor_id, decided_at_ms
+         FROM local_model_activation_decisions
+         WHERE workspace_id = ?1 AND endpoint = ?2 AND model_name = ?3
+         ORDER BY sequence",
+    )?;
+    let mut rows = statement.query(params![
+        workspace_id.to_string(),
+        selected.binding.endpoint,
+        selected.binding.model_name,
+    ])?;
+    let mut previous = None;
+    let mut configured = None;
+    while let Some(row) = rows.next()? {
+        let activation = read_activation_row(row)?;
+        verify_one_activation_decision(connection, &activation, previous.as_ref()).map_err(
+            |fault| match fault {
+                LocalModelActivationStateFault::Store(error) => {
+                    LocalModelActivationError::Store(error)
+                }
+                LocalModelActivationStateFault::Row { cause, .. }
+                | LocalModelActivationStateFault::Unreadable(cause) => cause,
+                LocalModelActivationStateFault::Identity { .. }
+                | LocalModelActivationStateFault::Sequence { .. } => {
+                    LocalModelActivationError::InvalidStore
+                }
+            },
+        )?;
+        if activation.id == activation_id {
+            configured = Some(activation.clone());
+        }
+        previous = Some(activation);
+    }
+    Ok((
+        configured.ok_or(LocalModelActivationError::InvalidStore)?,
+        previous.ok_or(LocalModelActivationError::InvalidStore)?,
+    ))
 }
 
 fn require_exact_model(

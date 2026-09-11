@@ -459,6 +459,60 @@ fn list_residents(
     Ok(residents)
 }
 
+/// Protect directly selected Resident and lifecycle-history strings before the owning readers
+/// allocate them. This is neither a proof nor a total SQLite/transitive allocation bound.
+pub(crate) fn lifecycle_within_context_read_limits(
+    connection: &Connection,
+    workspace_id: Uuid,
+    resident_id: Uuid,
+) -> Result<bool, ResidentLifecycleError> {
+    let oversized: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ?1 AND id = ?2 AND (
+         length(CAST(id AS BLOB)) > 36 OR length(CAST(workspace_id AS BLOB)) > 36
+         OR length(CAST(role AS BLOB)) > 65536 OR length(CAST(display_name_state AS BLOB)) > 65536
+         OR length(CAST(display_name AS BLOB)) > 65536 OR length(CAST(lifecycle AS BLOB)) > 65536))",
+        params![workspace_id.to_string(), resident_id.to_string()], |row| row.get(0),
+    )?;
+    if oversized {
+        return Ok(false);
+    }
+    let (count, oversized): (i64, bool) = connection.query_row(
+        "SELECT count(*), coalesce(max(
+         length(CAST(id AS BLOB)) > 36 OR length(CAST(workspace_id AS BLOB)) > 36
+         OR length(CAST(resident_id AS BLOB)) > 36
+         OR coalesce(length(CAST(predecessor_id AS BLOB)), 0) > 36
+         OR length(CAST(from_lifecycle AS BLOB)) > 65536
+         OR length(CAST(to_lifecycle AS BLOB)) > 65536
+         OR length(CAST(decided_by AS BLOB)) > 65536), 0)
+         FROM resident_lifecycle_decisions WHERE workspace_id = ?1 AND resident_id = ?2",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(count <= 256 && !oversized)
+}
+
+/// One Resident's complete lifecycle proof in the caller's snapshot, including the ordering
+/// key domain that startup checks before enumeration. Missing admitted identities are errors.
+pub(crate) fn verified_resident_lifecycle_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    resident_id: Uuid,
+) -> Result<ResidentAgentView, ResidentLifecycleError> {
+    let invalid_sequence: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM resident_lifecycle_decisions
+         WHERE workspace_id = ?1 AND resident_id = ?2 AND sequence < 1)",
+        params![workspace_id.to_string(), resident_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if invalid_sequence {
+        return Err(ResidentLifecycleError::InvalidStore);
+    }
+    let resident = load_resident(connection, workspace_id, resident_id)?
+        .ok_or(ResidentLifecycleError::NotFound)?;
+    verify_one_resident_lifecycle(connection, &resident)?;
+    Ok(resident)
+}
+
 pub(crate) fn load_resident(
     connection: &Connection,
     workspace_id: Uuid,

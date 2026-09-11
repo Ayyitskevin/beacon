@@ -3122,7 +3122,7 @@ END;",
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        36
+        37
     );
     future.without_run_triggers(
         "UPDATE receipts

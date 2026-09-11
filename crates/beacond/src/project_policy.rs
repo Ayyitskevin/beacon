@@ -815,6 +815,98 @@ fn verify_one_project_policy(
     Ok(())
 }
 
+/// The latest published Policy revision of one Project, **proven against its own owning Event**.
+///
+/// Narrow and owning, not a projection accessor: it answers only the two numbers a citation needs,
+/// and it answers them only when exactly one `project.policy_published` Event exists for that
+/// revision and `verify_project_policy_event` -- the shipped validation, reused rather than
+/// re-derived -- agrees the Event and the row say the same thing. A caller cannot get an unproven
+/// revision number out of it.
+///
+/// `None` is "this Project has never published a Policy", which is a different answer from a
+/// revision that does not prove; the latter is an error.
+pub(crate) fn verified_latest_policy_citation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<(u32, u32)>, ProjectPolicyError> {
+    // BOTH directions, and both BEFORE either state judgment. Measured: without the Event->row
+    // half, deleting every Policy row answered `Ok(None)` -- "this Project has never published a
+    // Policy" -- while two `project.policy_published` Events sat in the log, and deleting only the
+    // head silently promoted revision 1 and let a classification be written citing it as current
+    // (root's two probes, both RED first).
+    //
+    // Bounded by the Project, exactly as the classification orphan check is bounded by its Mission:
+    // this is not a store-wide sweep and it is not a second owner.
+    let mut rows = connection.prepare(
+        "SELECT revision FROM project_policy_revisions WHERE workspace_id = ?1 AND project_id = ?2",
+    )?;
+    let recorded = rows
+        .query_map(
+            params![workspace_id.to_string(), project_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(positive_u32)
+        .collect::<Result<HashSet<u32>, _>>()?;
+    let mut named = connection.prepare(
+        "SELECT json_extract(payload_json, '$.policy.revision') FROM events
+         WHERE workspace_id = ?1 AND kind = 'project.policy_published'
+           AND json_extract(payload_json, '$.policy.projectId') = ?2",
+    )?;
+    for revision in named
+        .query_map(
+            params![workspace_id.to_string(), project_id.to_string()],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    {
+        // A typed candidate domain first: a NULL or out-of-domain revision in an owner Event is a
+        // corrupt store, not a revision to compare.
+        let revision = positive_u32(revision.ok_or(ProjectPolicyError::InvalidStore)?)?;
+        // An Event naming a revision this store does not hold is a BROKEN history, never an absent
+        // one. Refusing here is what keeps `Ok(None)` a proved absence.
+        if !recorded.contains(&revision) {
+            return Err(ProjectPolicyError::InvalidStore);
+        }
+    }
+    drop(rows);
+    drop(named);
+
+    let Some(policy) = latest_stored_policy(connection, workspace_id, project_id)? else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'project.policy_published'
+           AND json_extract(payload_json, '$.policy.projectId') = ?2
+           AND json_extract(payload_json, '$.policy.revision') = ?3",
+    )?;
+    let owning = statement
+        .query_map(
+            params![
+                workspace_id.to_string(),
+                project_id.to_string(),
+                i64::from(policy.revision)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    // Exactly one. Zero is a row the log does not account for; more than one is two claims about
+    // one revision, and neither is something to read a citation out of.
+    let [(payload_json, occurred_at_ms)] = owning.as_slice() else {
+        return Err(ProjectPolicyError::InvalidStore);
+    };
+    verify_project_policy_event(
+        connection,
+        workspace_id,
+        nonnegative_u64(*occurred_at_ms)?,
+        payload_json,
+    )?;
+    Ok(Some((policy.revision, policy.charter_revision)))
+}
+
 pub(crate) fn verify_project_policy_event(
     connection: &Connection,
     workspace_id: Uuid,

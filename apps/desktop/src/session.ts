@@ -2,6 +2,94 @@ import { invoke } from "@tauri-apps/api/core";
 
 type LockedPhase = "operator_setup_required" | "locked";
 
+
+/** One declared success condition's recorded result. `ordinal` is its 0-based index in the
+ *  Mission's own declaration order, which is how it pairs with `successConditions`. */
+export type CompletionConditionResult = {
+  ordinal: number;
+  outcome: "met" | "not_met" | "not_assessed" | "assessment_inconclusive";
+  supportCount: number;
+  note: string | null;
+};
+
+/** What a Mission's verified completion RECORDED. Neither disposition is a success verdict, and
+ *  the counts are counts of recorded and cited things -- this reader verifies none of them. */
+export type CompletionView = {
+  missionId: string;
+  completionId: string;
+  actor: "operator";
+  accountableResidentId: string;
+  accountableResidentConfigurationId: string;
+  disposition: "concluded" | "abandoned";
+  conditionResults: CompletionConditionResult[];
+  deliveredArtifactCount: number;
+  unfinishedWorkCount: number;
+};
+
+
+/** One manually entered supporting reference. Externally tagged, exactly as the C4 contract fixes
+ *  it -- and deliberately distinct from the daemon's outer command tag. */
+export type SupportRefDto =
+  | { artifact: string }
+  | { receipt: { runId: string; receiptVersion: number; receiptBytesSha256: string } }
+  | { evaluation: string }
+  | { ruling: string };
+
+export type CompletionConditionInput = {
+  ordinal: number;
+  outcome: "met" | "not_met" | "not_assessed" | "assessment_inconclusive";
+  support: SupportRefDto[];
+  note: string | null;
+};
+
+export type CompletionNarrativeInput<K extends string> = {
+  ordinal: number;
+  kind: K;
+  conditionOrdinal: number | null;
+  summary: string;
+};
+
+export type UnfinishedKindToken =
+  | "condition_not_met"
+  | "deferred_scope"
+  | "known_defect"
+  | "blocked_dependency";
+export type UncertaintyKindToken =
+  | "unverified_claim"
+  | "unmeasured_quantity"
+  | "conflicting_evidence"
+  | "outside_scope_of_checks";
+
+export type SpendReferenceDto =
+  | { recorded: { spendId: string; spendVersion: number; spendSha256: string } }
+  | { notMeasured: string };
+
+/** Everything the Operator authored. Identity, service time and the boundary are NOT here: Beacon
+ *  assigns them when it records. */
+export type CompletionIntentRequest = {
+  missionId: string;
+  accountableResidentId: string;
+  disposition: "concluded" | "abandoned";
+  conditionResults: CompletionConditionInput[];
+  deliveredArtifacts: string[];
+  unfinishedWork: CompletionNarrativeInput<UnfinishedKindToken>[];
+  uncertainty: CompletionNarrativeInput<UncertaintyKindToken>[];
+  spend: SpendReferenceDto;
+  summary: string;
+};
+
+/** The owner's normalized echo of the request, plus the bindings it verified. */
+export type CompletionPreview = {
+  request: CompletionIntentRequest;
+  intentSha256: string;
+  workspaceId: string;
+  projectId: string;
+  actor: "operator";
+  accountableResidentConfigurationId: string;
+  declaredConditionsSha256: string;
+  conditions: string[];
+};
+
 export type DesktopSessionStatus =
   | {
       phase: LockedPhase;
@@ -1234,6 +1322,724 @@ export function describeLocalAccountError(error: unknown): string {
     default:
       return "Beacon could not complete that local request.";
   }
+}
+
+/** This Mission's verified completion, or `null` when the Workspace recorded none.
+ *
+ *  Absence is a value the owner returns; a failed or refused read REJECTS and is never converted to
+ *  null, because "nothing was recorded" and "we could not tell" are different answers. The returned
+ *  `missionId` is compared against the one asked for: a payload about another Mission is a refusal,
+ *  not something to render under this heading. */
+export async function loadMissionCompletion(missionId: string): Promise<CompletionView | null> {
+  const value = await invokeAndValidate(
+    "get_mission_completion",
+    { missionId },
+    isCompletionViewOrAbsent,
+    "Mission completion",
+  );
+  if (value !== null && value.missionId !== missionId) {
+    throw new Error("Beacon received an invalid Mission completion.");
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------------------------
+// C5: the Mission impact classification surface (local candidate; no owner behind it yet)
+// ---------------------------------------------------------------------------------------------
+
+/** The Policy revision a classification cites, with that Policy revision's OWN Charter revision --
+ *  never the Project's current one (`mission_impact.rs`'s `PolicyRevisionRef`). */
+export type PolicyCitation = {
+  projectId: string;
+  policyRevision: number;
+  charterRevision: number;
+};
+
+export type ClassificationDigestValue = {
+  algorithm: string;
+  canonicalizer: string;
+  value: string;
+};
+
+/** Which record a classification replaces. Tagged, because "replacing nothing" and "replacing this"
+ *  are two statements rather than one absence. */
+export type ClassificationSupersedes =
+  | { kind: "none" }
+  | { kind: "record"; predecessorDigest: string };
+
+/** The twelve fields of the owner's `ClassificationView` (C5-interface.md). `basis` and `ruleId` are
+ *  PROJECTED from the stored record: the old public store admits a `policy_rule` row with a rule id
+ *  (`mission_impact.rs:332-343`), and a verified legacy row must keep its own basis and rule
+ *  identity rather than being relabelled. No new write ever sends either. */
+export type ClassificationView = {
+  missionId: string;
+  classificationId: string;
+  version: number;
+  impact: "high" | "ordinary";
+  basis: "operator_declared" | "policy_rule";
+  ruleId: string | null;
+  reason: string;
+  policy: PolicyCitation;
+  classifiedBy: "operator";
+  classifiedAtMs: number;
+  supersedes: ClassificationSupersedes;
+  digest: ClassificationDigestValue;
+};
+
+/** One snapshot: where it was taken, the Policy a NEW classification would cite, and the highest
+ *  proven record at that cursor. No count, no history, no "current impact" verdict. */
+export type ClassificationObservation = {
+  missionId: string;
+  /** A canonical nonnegative decimal STRING in the u64 domain. NEVER converted to a JS number: a
+   *  sequence above 2**53 would round, and a cursor that rounds is a cursor that lies. */
+  observedAtEventSeq: string;
+  publishedPolicy: PolicyCitation | null;
+  latest: ClassificationView | null;
+};
+
+/** What the Operator decides, and nothing else: five keys, `expectedPolicyRevision` present-nullable,
+ *  no basis, no ruleId, no identity, no clock, no Policy provenance. */
+export type ClassificationIntentRequest = {
+  missionId: string;
+  impact: "high" | "ordinary";
+  reason: string;
+  expectedPolicyRevision: number | null;
+  supersedes: ClassificationSupersedes;
+};
+
+const CLASSIFICATION_REASON_SCALARS = 2_000;
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+/** The cursor's canonical form: digits only, no sign, no space, no leading zero unless the value IS
+ *  zero, and inside the u64 domain. Compared with `BigInt` because the whole point is that the value
+ *  does not fit a JS number. */
+function isCanonicalEventSequence(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/.test(value)) return false;
+  return BigInt(value) <= U64_MAX;
+}
+
+/** Classification counts and revisions are lossless `u32` in the owner's codec. Deliberately not a
+ *  narrowing of the shared `isNonnegativeInteger`, which also guards millisecond instants. */
+function isClassificationU32(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32_COUNT;
+}
+
+function isPolicyCitation(value: unknown): value is PolicyCitation {
+  return (
+    hasExactKeys(value, ["charterRevision", "policyRevision", "projectId"]) &&
+    isUuid(value.projectId) &&
+    isClassificationU32(value.policyRevision) &&
+    isClassificationU32(value.charterRevision)
+  );
+}
+
+function isClassificationSupersedes(value: unknown): value is ClassificationSupersedes {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.kind === "none") return hasExactKeys(value, ["kind"]);
+  if (record.kind !== "record") return false;
+  return (
+    hasExactKeys(value, ["kind", "predecessorDigest"]) && isHex64(record.predecessorDigest)
+  );
+}
+
+function isClassificationView(value: unknown): value is ClassificationView {
+  if (
+    !hasExactKeys(value, [
+      "basis",
+      "classificationId",
+      "classifiedAtMs",
+      "classifiedBy",
+      "digest",
+      "impact",
+      "missionId",
+      "policy",
+      "reason",
+      "ruleId",
+      "supersedes",
+      "version",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.classificationId)) return false;
+  if (!isClassificationU32(value.version) || value.version < 1) return false;
+  if (value.impact !== "high" && value.impact !== "ordinary") return false;
+  // A legacy `policy_rule` row carries its rule id; an operator-declared one must not.
+  if (value.basis === "operator_declared") {
+    if (value.ruleId !== null) return false;
+  } else if (value.basis === "policy_rule") {
+    if (typeof value.ruleId !== "string" || value.ruleId === "") return false;
+  } else {
+    return false;
+  }
+  if (!isTrimmedText(value.reason, CLASSIFICATION_REASON_SCALARS)) return false;
+  if (!isPolicyCitation(value.policy)) return false;
+  if (value.classifiedBy !== "operator") return false;
+  if (!isNonnegativeInteger(value.classifiedAtMs)) return false;
+  if (!isClassificationSupersedes(value.supersedes)) return false;
+  const digest = value.digest;
+  return (
+    hasExactKeys(digest, ["algorithm", "canonicalizer", "value"]) &&
+    digest.algorithm === "sha256" &&
+    digest.canonicalizer === "beacon.mission-impact.v1" &&
+    isHex64(digest.value)
+  );
+}
+
+function isClassificationObservation(value: unknown): value is ClassificationObservation {
+  return (
+    hasExactKeys(value, ["latest", "missionId", "observedAtEventSeq", "publishedPolicy"]) &&
+    isUuid(value.missionId) &&
+    isCanonicalEventSequence(value.observedAtEventSeq) &&
+    (value.publishedPolicy === null || isPolicyCitation(value.publishedPolicy)) &&
+    (value.latest === null || isClassificationView(value.latest))
+  );
+}
+
+/** Record one classification. The Operator's five keys go out unchanged; the owner derives identity,
+ *  version, the Policy citation, the actor and the clock, and fixes `operator_declared` with no rule.
+ *
+ *  `classify_mission_impact` is wired to `MissionImpactCommandService::classify`. The COMPONENT tests
+ *  for this surface mock this boundary and do not execute the real owner. */
+export async function recordMissionClassification(
+  request: ClassificationIntentRequest,
+): Promise<ClassificationView> {
+  const value = await invokeAndValidate(
+    "classify_mission_impact",
+    { request },
+    isClassificationView,
+    "Mission classification",
+  );
+  if (value.missionId !== request.missionId) {
+    throw new Error("Beacon received an invalid Mission classification.");
+  }
+  return value;
+}
+
+/** One snapshot of this Mission's classification. A read; it writes nothing.
+ *
+ *  `get_mission_classification` is wired to `MissionImpactCommandService::observe`. The COMPONENT
+ *  tests for this surface mock this boundary and do not execute the real owner; the owner and the
+ *  transport have their own bars. */
+export async function loadMissionClassification(
+  missionId: string,
+): Promise<ClassificationObservation> {
+  const value = await invokeAndValidate(
+    "get_mission_classification",
+    { missionId },
+    isClassificationObservation,
+    "Mission classification",
+  );
+  // The outer id AND the nested record's: an observation whose `latest` belongs to another Mission is
+  // incoherent, and rendering it would show one Mission's record under another's heading. Refused at
+  // the same validation boundary as every other shape fault, not repaired.
+  if (value.missionId !== missionId || (value.latest !== null && value.latest.missionId !== missionId)) {
+    throw new Error("Beacon received an invalid Mission classification.");
+  }
+  return value;
+}
+
+// The OWNER's bounds, not this client's. `mission_completion.rs:128-133` fixes short text at 500
+// Unicode scalar values and applies it to a condition note; `isTrimmedText` counts with
+// `Array.from`, so astral text is one scalar per character rather than two UTF-16 units. A larger
+// cap here would accept a record the owner would refuse and call it recorded content.
+const COMPLETION_SHORT_TEXT_SCALARS = 500;
+const COMPLETION_MAX_CONDITIONS = 20;
+const COMPLETION_MAX_SUPPORT_PER_CONDITION = 8;
+const COMPLETION_MAX_DELIVERED_ARTIFACTS = 32;
+const COMPLETION_MAX_NARRATIVE_ITEMS = 32;
+
+const COMPLETION_OUTCOMES = ["met", "not_met", "not_assessed", "assessment_inconclusive"] as const;
+
+function isCompletionConditionResult(value: unknown): value is CompletionConditionResult {
+  return (
+    hasExactKeys(value, ["note", "ordinal", "outcome", "supportCount"]) &&
+    isCompletionU32(value.ordinal) &&
+    typeof value.outcome === "string" &&
+    (COMPLETION_OUTCOMES as readonly string[]).includes(value.outcome) &&
+    isCompletionU32(value.supportCount) &&
+    value.supportCount <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
+    (value.note === null || isCompletionText(value.note, COMPLETION_SHORT_TEXT_SCALARS))
+  );
+}
+
+function isCompletionViewOrAbsent(value: unknown): value is CompletionView | null {
+  if (value === null) return true;
+  if (
+    !hasExactKeys(value, [
+      "accountableResidentConfigurationId",
+      "accountableResidentId",
+      "actor",
+      "completionId",
+      "conditionResults",
+      "deliveredArtifactCount",
+      "disposition",
+      "missionId",
+      "unfinishedWorkCount",
+    ]) ||
+    !isUuid(value.missionId) ||
+    !isUuid(value.completionId) ||
+    value.actor !== "operator" ||
+    !isUuid(value.accountableResidentId) ||
+    !isUuid(value.accountableResidentConfigurationId) ||
+    (value.disposition !== "concluded" && value.disposition !== "abandoned") ||
+    !isCompletionU32(value.deliveredArtifactCount) ||
+    value.deliveredArtifactCount > COMPLETION_MAX_DELIVERED_ARTIFACTS ||
+    !isCompletionU32(value.unfinishedWorkCount) ||
+    value.unfinishedWorkCount > COMPLETION_MAX_NARRATIVE_ITEMS ||
+    !Array.isArray(value.conditionResults) ||
+    value.conditionResults.length > COMPLETION_MAX_CONDITIONS ||
+    !value.conditionResults.every(isCompletionConditionResult)
+  ) {
+    return false;
+  }
+  // A repeated ordinal would make one condition's result ambiguous. Refused here rather than
+  // silently collapsed, because dropping one is exactly the omission the contract forbids.
+  const ordinals = new Set(value.conditionResults.map((result) => result.ordinal));
+  return ordinals.size === value.conditionResults.length;
+}
+
+// The owner's limits, cited to `mission_completion.rs:124-133`. The frontend refuses what the owner
+// would refuse; it is never the authority on canonical size or on what a citation means.
+const COMPLETION_MAX_SUMMARY_SCALARS = 2_000;
+
+/** A completion count, version or ordinal is a lossless `u32` in the owner's codec, so `2**32`
+ *  is out of domain even though it is a safe JS integer. Deliberately NOT a narrowing of the shared
+ *  `isNonnegativeInteger`: that helper also guards millisecond instants (`createdAtMs`,
+ *  `admittedAtMs`, ...) for unrelated commands, where a u32 ceiling would refuse correct values. */
+function isCompletionU32(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32_COUNT;
+}
+
+/** The owner's completion text grammar, `require_text` at `mission_completion.rs:489-506`: nonempty,
+ *  trimmed, at most `maxScalars` Unicode scalars, and no control character other than LF or TAB,
+ *  which the owner treats as content. Neither shared helper is this grammar -- `isTrimmedText`
+ *  accepts every control character and `isTrimmedTextWithoutControls` refuses the LF and TAB the
+ *  owner allows -- and changing either would change unrelated commands. */
+function isCompletionText(value: unknown, maxScalars: number): value is string {
+  return (
+    isTrimmedText(value, maxScalars) &&
+    !Array.from(value).some(
+      (character) => /\p{Cc}/u.test(character) && character !== "\n" && character !== "\t",
+    )
+  );
+}
+
+function isHex64(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isSupportRefDto(value: unknown): value is SupportRefDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const record = value as Record<string, unknown>;
+  if (keys[0] === "artifact") return isHex64(record.artifact);
+  if (keys[0] === "evaluation") return isHex64(record.evaluation);
+  if (keys[0] === "ruling") return isHex64(record.ruling);
+  if (keys[0] !== "receipt") return false;
+  const receipt = record.receipt;
+  return (
+    hasExactKeys(receipt, ["receiptBytesSha256", "receiptVersion", "runId"]) &&
+    isUuid(receipt.runId) &&
+    isCompletionU32(receipt.receiptVersion) &&
+    isHex64(receipt.receiptBytesSha256)
+  );
+}
+
+function isNarrativeInput(value: unknown, kinds: readonly string[]): boolean {
+  return (
+    hasExactKeys(value, ["conditionOrdinal", "kind", "ordinal", "summary"]) &&
+    isCompletionU32(value.ordinal) &&
+    typeof value.kind === "string" &&
+    kinds.includes(value.kind) &&
+    (value.conditionOrdinal === null || isCompletionU32(value.conditionOrdinal)) &&
+    isCompletionText(value.summary, COMPLETION_SHORT_TEXT_SCALARS)
+  );
+}
+
+function isSpendReferenceDto(value: unknown): value is SpendReferenceDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const record = value as Record<string, unknown>;
+  if (keys[0] === "notMeasured") {
+    return isCompletionText(record.notMeasured, COMPLETION_SHORT_TEXT_SCALARS);
+  }
+  if (keys[0] !== "recorded") return false;
+  const recorded = record.recorded;
+  return (
+    hasExactKeys(recorded, ["spendId", "spendSha256", "spendVersion"]) &&
+    isUuid(recorded.spendId) &&
+    isCompletionU32(recorded.spendVersion) &&
+    isHex64(recorded.spendSha256)
+  );
+}
+
+const UNFINISHED_KINDS = [
+  "condition_not_met",
+  "deferred_scope",
+  "known_defect",
+  "blocked_dependency",
+] as const;
+const UNCERTAINTY_KINDS = [
+  "unverified_claim",
+  "unmeasured_quantity",
+  "conflicting_evidence",
+  "outside_scope_of_checks",
+] as const;
+
+function isCompletionIntentRequest(value: unknown): value is CompletionIntentRequest {
+  return (
+    hasExactKeys(value, [
+      "accountableResidentId",
+      "conditionResults",
+      "deliveredArtifacts",
+      "disposition",
+      "missionId",
+      "spend",
+      "summary",
+      "uncertainty",
+      "unfinishedWork",
+    ]) &&
+    isUuid(value.missionId) &&
+    isUuid(value.accountableResidentId) &&
+    (value.disposition === "concluded" || value.disposition === "abandoned") &&
+    Array.isArray(value.conditionResults) &&
+    value.conditionResults.length >= 1 &&
+    value.conditionResults.length <= COMPLETION_MAX_CONDITIONS &&
+    value.conditionResults.every(
+      (result: unknown) =>
+        hasExactKeys(result, ["note", "ordinal", "outcome", "support"]) &&
+        isCompletionU32(result.ordinal) &&
+        typeof result.outcome === "string" &&
+        (COMPLETION_OUTCOMES as readonly string[]).includes(result.outcome) &&
+        Array.isArray(result.support) &&
+        result.support.length <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
+        result.support.every(isSupportRefDto) &&
+        (result.note === null || isCompletionText(result.note, COMPLETION_SHORT_TEXT_SCALARS)),
+    ) &&
+    Array.isArray(value.deliveredArtifacts) &&
+    value.deliveredArtifacts.length <= COMPLETION_MAX_DELIVERED_ARTIFACTS &&
+    value.deliveredArtifacts.every(isHex64) &&
+    Array.isArray(value.unfinishedWork) &&
+    value.unfinishedWork.length <= COMPLETION_MAX_NARRATIVE_ITEMS &&
+    value.unfinishedWork.every((item: unknown) => isNarrativeInput(item, UNFINISHED_KINDS)) &&
+    Array.isArray(value.uncertainty) &&
+    value.uncertainty.length <= COMPLETION_MAX_NARRATIVE_ITEMS &&
+    value.uncertainty.every((item: unknown) => isNarrativeInput(item, UNCERTAINTY_KINDS)) &&
+    isSpendReferenceDto(value.spend) &&
+    isCompletionText(value.summary, COMPLETION_MAX_SUMMARY_SCALARS)
+  );
+}
+
+function isCompletionPreview(value: unknown): value is CompletionPreview {
+  return (
+    hasExactKeys(value, [
+      "accountableResidentConfigurationId",
+      "actor",
+      "conditions",
+      "declaredConditionsSha256",
+      "intentSha256",
+      "projectId",
+      "request",
+      "workspaceId",
+    ]) &&
+    isCompletionIntentRequest(value.request) &&
+    isHex64(value.intentSha256) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    value.actor === "operator" &&
+    isUuid(value.accountableResidentConfigurationId) &&
+    isHex64(value.declaredConditionsSha256) &&
+    Array.isArray(value.conditions) &&
+    value.conditions.every((condition: unknown) => typeof condition === "string")
+  );
+}
+
+function isIntentAcknowledgement(value: unknown): value is { intentSha256: string } {
+  return hasExactKeys(value, ["intentSha256"]) && isHex64(value.intentSha256);
+}
+
+function isIntentTokenOrAbsent(value: unknown): value is { intentSha256: string } | null {
+  return value === null || isIntentAcknowledgement(value);
+}
+
+/** Derive the owner's normalized record for review. Writes nothing. */
+export async function previewMissionCompletion(
+  request: CompletionIntentRequest,
+): Promise<CompletionPreview> {
+  return invokeAndValidate(
+    "preview_mission_completion",
+    { request },
+    isCompletionPreview,
+    "Mission completion preview",
+  );
+}
+
+/** Record the reviewed intent. The echoed token is a consistency check on authenticated input --
+ *  not proof a screen was viewed, and not an idempotency key. */
+export async function recordMissionCompletion(
+  request: CompletionIntentRequest,
+  reviewedIntentSha256: string,
+): Promise<{ intentSha256: string }> {
+  return invokeAndValidate(
+    "record_mission_completion",
+    { request, reviewedIntentSha256 },
+    isIntentAcknowledgement,
+    "Mission completion acknowledgement",
+  );
+}
+
+/** Recompute the stored completion's consistency token, for recovery. `null` means no completion is
+ *  visible in THAT snapshot -- never proof that a pending write cannot still arrive. */
+export async function getMissionCompletionIntent(
+  missionId: string,
+): Promise<{ intentSha256: string } | null> {
+  return invokeAndValidate(
+    "get_mission_completion_intent",
+    { missionId },
+    isIntentTokenOrAbsent,
+    "Mission completion intent",
+  );
+}
+
+/** One digest, whole: never a bare hex string. Which canonicalizer produced it is part of the
+ *  identity, so this surface holds the exact expected canonicalizer for each of the three. */
+export type OutcomeDigestValue = {
+  algorithm: string;
+  canonicalizer: string;
+  value: string;
+};
+
+/** What the Operator asked for. Two arms, no `omit`: a caller must not be able to suppress the
+ *  verification appendix by asking. */
+export type AppendixRequest = "policy_default" | "include";
+
+/** What that request resolved to against the verified Policy classification. Derived by the owner
+ *  from the manifest, never a stored column. */
+export type AppendixMode = "included" | "policy_state_not_high_impact";
+
+/** The nine fields of C6's preparation receipt. Metadata only: no document, no verdict, no
+ *  permission, and deliberately no `isEvaluated`/`isPublished`/`isCurrent` bit -- preparation asks
+ *  neither of those owners, so this surface cannot answer for them. */
+export type PreparedOutcomeCandidate = {
+  missionId: string;
+  appendixRequest: AppendixRequest;
+  appendixMode: AppendixMode;
+  manifestId: string;
+  manifestDigest: OutcomeDigestValue;
+  candidateArtifactDigest: OutcomeDigestValue;
+  candidateContentDigest: OutcomeDigestValue;
+  candidateContentBytes: number;
+  mediaType: string;
+};
+
+/** The owner's own content bound (`artifact.rs`, MAX_CONTENT_BYTES). The byte count is safe as a JS
+ *  number because THIS domain is a mebibyte -- not because a `u64` is safe on this boundary. */
+const MAX_CANDIDATE_CONTENT_BYTES = 1_048_576;
+const CANDIDATE_MEDIA_TYPE = "text/markdown; charset=utf-8";
+
+function isOutcomeDigest(value: unknown, canonicalizer: string): value is OutcomeDigestValue {
+  return (
+    hasExactKeys(value, ["algorithm", "canonicalizer", "value"]) &&
+    value.algorithm === "sha256" &&
+    value.canonicalizer === canonicalizer &&
+    isHex64(value.value)
+  );
+}
+
+function isPreparedOutcomeCandidate(value: unknown): value is PreparedOutcomeCandidate {
+  if (
+    !hasExactKeys(value, [
+      "appendixMode",
+      "appendixRequest",
+      "candidateArtifactDigest",
+      "candidateContentBytes",
+      "candidateContentDigest",
+      "manifestDigest",
+      "manifestId",
+      "mediaType",
+      "missionId",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.manifestId)) return false;
+  if (value.appendixRequest !== "policy_default" && value.appendixRequest !== "include") return false;
+  if (value.appendixMode !== "included" && value.appendixMode !== "policy_state_not_high_impact") {
+    return false;
+  }
+  // Each canonicalizer is named here, exactly. A digest whose canonicalizer is another module's is
+  // a different identity wearing the right shape, and accepting it would let this screen show one
+  // record's hex under another record's label.
+  if (!isOutcomeDigest(value.manifestDigest, "beacon.outcome.manifest.v2")) return false;
+  if (!isOutcomeDigest(value.candidateArtifactDigest, "beacon.artifact.v1")) return false;
+  if (!isOutcomeDigest(value.candidateContentDigest, "beacon.raw.v1")) return false;
+  if (!isNonnegativeInteger(value.candidateContentBytes)) return false;
+  if (value.candidateContentBytes > MAX_CANDIDATE_CONTENT_BYTES) return false;
+  return value.mediaType === CANDIDATE_MEDIA_TYPE;
+}
+
+/** Prepare one Outcome candidate from a Mission's recorded completion and evidence.
+ *
+ *  The Operator's two values go out unchanged and nothing else does: the owner derives the manifest,
+ *  the candidate Artifact, every digest and the resolved appendix mode. Preparation writes a
+ *  candidate; it does not evaluate or publish one, and this function makes no claim about either.
+ *
+ *  A reply that does not answer the request it was sent -- another Mission, another appendix request,
+ *  or `include` resolved to the excluded mode -- is refused here rather than displayed. That refusal
+ *  is an UNCONFIRMED outcome, never proof that nothing was written: the owner commits before it
+ *  builds this receipt.
+ *
+ *  The native `prepare_outcome_candidate` command reaches `OutcomeService::prepare_for_mission`,
+ *  then reads the owner-verified records to build this receipt. Frontend tests replace invoke with
+ *  a double; their results prove frontend behavior, not the native/store path. */
+export async function prepareOutcomeCandidate(request: {
+  missionId: string;
+  appendixRequest: AppendixRequest;
+}): Promise<PreparedOutcomeCandidate> {
+  const value = await invokeAndValidate(
+    "prepare_outcome_candidate",
+    { missionId: request.missionId, appendixRequest: request.appendixRequest },
+    isPreparedOutcomeCandidate,
+    "Outcome candidate",
+  );
+  if (
+    value.missionId !== request.missionId ||
+    value.appendixRequest !== request.appendixRequest ||
+    (value.appendixRequest === "include" && value.appendixMode !== "included")
+  ) {
+    throw new Error("Beacon received an invalid Outcome candidate.");
+  }
+  return value;
+}
+
+/** The eight fields of C7's candidate document read. Metadata plus the exact stored bytes, base64
+ *  encoded; no flag, no status, no appendix mode and no inferred "current" candidate. */
+export type OutcomeCandidateDocument = {
+  missionId: string;
+  manifestId: string;
+  manifestDigest: OutcomeDigestValue;
+  candidateArtifactDigest: OutcomeDigestValue;
+  candidateContentDigest: OutcomeDigestValue;
+  candidateContentBytes: number;
+  mediaType: string;
+  candidateContentBase64: string;
+};
+
+/** The decoded document, beside the reply it came from. The text is produced ONCE, under fatal
+ *  decoding, and never re-derived by a caller. */
+export type ReadCandidateDocument = {
+  document: OutcomeCandidateDocument;
+  text: string;
+};
+
+/** `4 * ceil(MAX_CANDIDATE_CONTENT_BYTES / 3)`. Checked BEFORE decoding: a bound that exists to
+ *  prevent an allocation has to run before the allocation. */
+const MAX_CANDIDATE_BASE64_LENGTH = 1_398_104;
+
+/** Canonical base64, strictly: the standard alphabet, correct padding, and no over-long
+ *  representation. The last significant character of a padded group carries unused low bits, and
+ *  two encodings that differ only there decode to the same bytes -- so accepting both would let one
+ *  document have two encodings, which is exactly what a content-addressed record must not have. */
+function isCanonicalBase64(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length > MAX_CANDIDATE_BASE64_LENGTH) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if (value.endsWith("==")) {
+    // 12 bits carried, 8 used: the second character's low FOUR bits must be zero.
+    return (alphabet.indexOf(value[value.length - 3]) & 0b1111) === 0;
+  }
+  if (value.endsWith("=")) {
+    // 18 bits carried, 16 used: the third character's low TWO bits must be zero.
+    return (alphabet.indexOf(value[value.length - 2]) & 0b11) === 0;
+  }
+  return true;
+}
+
+function isOutcomeCandidateDocument(value: unknown): value is OutcomeCandidateDocument {
+  if (
+    !hasExactKeys(value, [
+      "candidateArtifactDigest",
+      "candidateContentBase64",
+      "candidateContentBytes",
+      "candidateContentDigest",
+      "manifestDigest",
+      "manifestId",
+      "mediaType",
+      "missionId",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.manifestId)) return false;
+  if (!isOutcomeDigest(value.manifestDigest, "beacon.outcome.manifest.v2")) return false;
+  if (!isOutcomeDigest(value.candidateArtifactDigest, "beacon.artifact.v1")) return false;
+  if (!isOutcomeDigest(value.candidateContentDigest, "beacon.raw.v1")) return false;
+  if (!isNonnegativeInteger(value.candidateContentBytes)) return false;
+  if (value.candidateContentBytes > MAX_CANDIDATE_CONTENT_BYTES) return false;
+  if (value.mediaType !== CANDIDATE_MEDIA_TYPE) return false;
+  return isCanonicalBase64(value.candidateContentBase64);
+}
+
+function sameDigest(left: OutcomeDigestValue, right: OutcomeDigestValue): boolean {
+  return (
+    left.algorithm === right.algorithm &&
+    left.canonicalizer === right.canonicalizer &&
+    left.value === right.value
+  );
+}
+
+/** Read the exact stored text of the candidate this receipt names.
+ *
+ *  The native receives ONE value -- the held manifest digest's hex -- and the whole held receipt is
+ *  passed here so every expectation is the RECEIPT's, never the reply's. A reply that answers a
+ *  different Mission, manifest, Artifact, content or size is refused before anything is displayed.
+ *
+ *  Decoding is fatal and happens once: a replacement character would be a byte this client invented,
+ *  and a document is its bytes. The BOM, if the stored text has one, is PRESERVED
+ *  (`ignoreBOM: true` means "do not strip it"), and nothing here trims, normalises newlines or
+ *  otherwise edits what was stored.
+ *
+ *  This function does not re-hash anything: the owner verifies the digest/content relationship, and
+ *  restating that here without implementing it would be a claim this client cannot make.
+ *
+ *  The native command now routes through `OutcomeService::manifest` and
+ *  `OutcomeService::candidate`. Frontend tests still answer invoke with a double;
+ *  those tests prove client behavior, while native socket tests cover the owner path. */
+export async function readOutcomeCandidateDocument(
+  held: PreparedOutcomeCandidate,
+): Promise<ReadCandidateDocument> {
+  const document = await invokeAndValidate(
+    "read_outcome_candidate_document",
+    { manifestDigest: held.manifestDigest.value },
+    isOutcomeCandidateDocument,
+    "Outcome candidate document",
+  );
+  if (
+    document.missionId !== held.missionId ||
+    document.manifestId !== held.manifestId ||
+    !sameDigest(document.manifestDigest, held.manifestDigest) ||
+    !sameDigest(document.candidateArtifactDigest, held.candidateArtifactDigest) ||
+    !sameDigest(document.candidateContentDigest, held.candidateContentDigest) ||
+    document.candidateContentBytes !== held.candidateContentBytes ||
+    document.mediaType !== held.mediaType
+  ) {
+    throw new Error("Beacon received an invalid Outcome candidate document.");
+  }
+
+  const encoded = document.candidateContentBase64;
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  if (bytes.length !== held.candidateContentBytes || bytes.length > MAX_CANDIDATE_CONTENT_BYTES) {
+    throw new Error("Beacon received an invalid Outcome candidate document.");
+  }
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  return { document, text };
 }
 
 async function invokeAndValidate<T>(
