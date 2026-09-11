@@ -3273,13 +3273,24 @@ mod name_witness {
 // ---------------------------------------------------------------------------------------------
 
 /// Why an Evaluation did not prove itself WITH its recording Event.
-#[derive(Debug)]
 pub(crate) enum EvaluationEventProof {
     Owner(EvaluationError),
     /// No `evaluation.recorded` Event in this Workspace names this digest, or more than one does.
     RecordingEventUnaccounted,
     /// The Event exists, and the owning verifier refuses it against the record.
     DivergentEvidence,
+}
+
+/// Written out rather than derived, so `name()` and the payload are real reads (R78). Output is
+/// byte-identical to the derived form in both the normal and the alternate mode; the equivalence
+/// test below holds the strings the derived impl produced.
+impl fmt::Debug for EvaluationEventProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owner(inner) => f.debug_tuple(self.name()).field(inner).finish(),
+            Self::RecordingEventUnaccounted | Self::DivergentEvidence => f.write_str(self.name()),
+        }
+    }
 }
 
 impl EvaluationEventProof {
@@ -3335,4 +3346,29 @@ pub(crate) fn verified_evaluation_with_event_within(
     verify_evaluation_event(connection, workspace_id, occurred_at_ms, payload_json)
         .map_err(|_| EvaluationEventProof::DivergentEvidence)?;
     Ok(Some(record))
+}
+
+/// R78: Debug equivalence for `EvaluationEventProof`.
+///
+/// The expected strings are the ones the DERIVED impl produced at 7195e8c3, observed by a
+/// throwaway probe before any edit and recorded in the R78 evidence directory. They are literals
+/// here and are NOT recomputed from the formatter under test, so this test can disagree with it.
+#[cfg(test)]
+mod r78_debug_equivalence {
+    use super::{EvaluationError, EvaluationEventProof};
+
+    #[test]
+    fn s4_gate_debug_output_unchanged_for_evaluation_event_proof() {
+        let payload = EvaluationEventProof::Owner(EvaluationError::NotFound);
+        assert_eq!(format!("{payload:?}"), "Owner(NotFound)");
+        assert_eq!(format!("{payload:#?}"), "Owner(\n    NotFound,\n)");
+
+        let unaccounted = EvaluationEventProof::RecordingEventUnaccounted;
+        assert_eq!(format!("{unaccounted:?}"), "RecordingEventUnaccounted");
+        assert_eq!(format!("{unaccounted:#?}"), "RecordingEventUnaccounted");
+
+        let divergent = EvaluationEventProof::DivergentEvidence;
+        assert_eq!(format!("{divergent:?}"), "DivergentEvidence");
+        assert_eq!(format!("{divergent:#?}"), "DivergentEvidence");
+    }
 }
