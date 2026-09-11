@@ -297,6 +297,13 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              -- R58: the chain's own state and trigger, which 0036 added. A rollback fixture that
              -- does not undo the newest migration leaves objects behind and compares a v17 store
              -- against a signature that has them -- which is how this fixture caught the omission.
+             DROP TRIGGER model_invocation_observations_no_update;
+             DROP TRIGGER model_invocation_observations_no_delete;
+             DROP TABLE model_invocation_observations;
+             DROP TRIGGER model_invocations_no_update;
+             DROP TRIGGER model_invocations_no_delete;
+             DROP INDEX model_invocations_by_mission;
+             DROP TABLE model_invocations;
              DROP TRIGGER event_chain_state_no_delete;
              DROP TABLE event_chain_state;
              DROP TRIGGER dispatch_preparations_no_delete;
@@ -2164,7 +2171,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }

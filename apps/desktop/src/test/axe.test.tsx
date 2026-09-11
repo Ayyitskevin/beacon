@@ -104,15 +104,28 @@ it("every surface test file runs the WCAG bar", () => {
     "the surface derivation found no test files: it has stopped matching",
   ).toEqual([
     "App.test.tsx",
+    "AstraC4Lifetimes.test.tsx",
+    "AstraC4Recovery.test.tsx",
+    "AstraC4Unmount.test.tsx",
     "BriefingReceipts.test.tsx",
+    "MissionClassification.test.tsx",
+    "MissionCompletion.test.tsx",
+    "MissionCompletionCompose.test.tsx",
+    "MissionOutcomePreparation.test.tsx",
     "MissionOutcomes.test.tsx",
+    "OutcomeCandidateDocument.test.tsx",
     "ProjectMissions.test.tsx",
     "SampleProject.test.tsx",
   ]);
 
   for (const { entry, source, rendered } of surfaceTests) {
     expect(
-      source.includes("expectNoWcagViolations("),
+      // Either bar counts as running one: a surface held to 2.2 AA
+      // (`expectNoWcag22Violations`) is not uncovered because it does not call
+      // the 2.1 helper. The 2.1 name is a PREFIX of the 2.2 one, so the check
+      // is written as the two explicit names rather than one substring.
+      source.includes("expectNoWcagViolations(") ||
+        source.includes("expectNoWcag22Violations("),
       `${entry} renders ${rendered.join(", ")} and never runs the WCAG bar`,
     ).toBe(true);
   }

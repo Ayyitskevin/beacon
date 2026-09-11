@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectNoWcagViolations } from "./test/axe";
@@ -4066,6 +4066,433 @@ describe("Beacon desktop shell", () => {
     // The other error is not this read's to answer, and a successful retry must not fake it away.
     expect(screen.queryByText(unrelated),
       "B12.RETRY.UNRELATED_ERROR_PRESERVED").not.toBeNull();
+  });
+
+
+  // -------------------------------------------------------------------------------------------
+  // C3: the read-only Mission completion view
+  // -------------------------------------------------------------------------------------------
+  //
+  // MOCKED CONTRACT. `get_mission_completion` has no real owner until Opus's backend candidate
+  // integrates, so green here proves RENDERING against the agreed DTO and nothing end to end.
+
+  const C3_PROJECT = "44444444-4444-4444-8444-4444444c3000";
+  const C3_MISSION = "88888888-8888-4888-8888-8888888c3000";
+  const C3_OUTCOME = "Ship the completion view";
+
+  function c3Completion(overrides: Record<string, unknown> = {}) {
+    return {
+      missionId: C3_MISSION,
+      completionId: "11111111-2222-4333-8444-555555555555",
+      actor: "operator",
+      accountableResidentId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      accountableResidentConfigurationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      disposition: "concluded",
+      conditionResults: [
+        { ordinal: 0, outcome: "met", supportCount: 2, note: null },
+        { ordinal: 1, outcome: "not_met", supportCount: 0, note: "the check never ran green" },
+        { ordinal: 2, outcome: "not_assessed", supportCount: 0, note: null },
+        { ordinal: 3, outcome: "assessment_inconclusive", supportCount: 1, note: null },
+      ],
+      deliveredArtifactCount: 3,
+      unfinishedWorkCount: 1,
+      ...overrides,
+    };
+  }
+
+  function installC3(completion: (args: unknown) => Promise<unknown>) {
+    const project = {
+      id: C3_PROJECT,
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Completion Project",
+      charter: {
+        revision: 1,
+        purpose: "Prove the completion view.",
+        desiredOutcomes: ["Show what was recorded"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    };
+    const mission = {
+      id: C3_MISSION,
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      charterRevision: 1,
+      teamId: "55555555-5555-4555-8555-555555555555",
+      desiredOutcome: C3_OUTCOME,
+      successConditions: ["Gates pass", "A reviewer signs", "The view renders", "Docs updated"],
+      constraints: [],
+      prohibitions: [],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 126,
+      members: [
+        {
+          residentId: "66666666-6666-4666-8666-666666666666",
+          admissionConfigurationId: "77777777-7777-4777-8777-777777777777",
+        },
+      ],
+    } as const;
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const asked: unknown[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([mission]);
+      if (command === "mission_publications") return Promise.resolve([]);
+      // The Mission card now mounts the impact classification panel too, so this fixture has to
+      // answer its read. `publishedPolicy: null` is the quietest truthful answer: the panel shows the
+      // Policy prerequisite and renders no form, no alert and no status.
+      if (command === "get_mission_classification") {
+        return Promise.resolve({
+          missionId: (args as { missionId: string }).missionId,
+          observedAtEventSeq: "128",
+          publishedPolicy: null,
+          latest: null,
+        });
+      }
+      if (command === "get_mission_completion") {
+        asked.push(args);
+        return completion(args);
+      }
+      return base(command, args);
+    });
+    return { asked, mission };
+  }
+
+  async function openC3Mission(user: ReturnType<typeof userEvent.setup>) {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Completion Project/i }));
+    await screen.findByText(C3_OUTCOME);
+  }
+
+  it("shows a recorded Mission completion with every condition outcome distinct", async () => {
+    const user = userEvent.setup();
+    const { asked } = installC3(() => Promise.resolve(c3Completion()));
+    await openC3Mission(user);
+
+    expect(await screen.findByText("Concluded"), "C3.UI.RECORDED_SHOWS_EACH_OUTCOME").toBeVisible();
+    for (const label of ["Met", "Not met", "Not assessed", "Assessment inconclusive"]) {
+      expect(screen.queryByText(label), `C3.UI.RECORDED_SHOWS_EACH_OUTCOME: ${label}`).not.toBeNull();
+    }
+    expect(asked, "C3.UI.EXACT_MISSION_ARGUMENT").toEqual([{ missionId: C3_MISSION }]);
+  });
+
+
+  it("says no completion is recorded when the owner answers with a real absence", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.resolve(null));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("No completion recorded for this Mission."),
+      "C3.UI.NO_RECORD_IS_NOT_FAILURE",
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.NO_RECORD_IS_NOT_FAILURE").toBeNull();
+    expect(screen.queryByText("Concluded"), "C3.UI.NO_RECORD_IS_NOT_FAILURE").toBeNull();
+  });
+
+  it("offers Retry when the completion read fails, and never shows an empty completion", async () => {
+    const user = userEvent.setup();
+    let attempt = 0;
+    const { asked } = installC3(() => {
+      attempt += 1;
+      return attempt === 1
+        ? Promise.reject(new Error("the local request failed"))
+        : Promise.resolve(c3Completion());
+    });
+    await openC3Mission(user);
+    const retry = await screen.findByRole("button", { name: "Retry Mission completion" });
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.UNAVAILABLE_OFFERS_RETRY").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.UNAVAILABLE_OFFERS_RETRY").toBeNull();
+
+    retry.focus();
+    expect(retry, "C3.UI.ACCESSIBLE_AND_KEYBOARD").toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Concluded"), "C3.UI.RETRY_REREADS_THE_SAME_MISSION").toBeVisible();
+    expect(asked, "C3.UI.RETRY_REREADS_THE_SAME_MISSION").toEqual([
+      { missionId: C3_MISSION },
+      { missionId: C3_MISSION },
+    ]);
+    await expectNoWcagViolations(document.body);
+  });
+
+  it("refuses a payload about a different Mission instead of rendering it", async () => {
+    const user = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(c3Completion({ missionId: "99999999-9999-4999-8999-999999999999" })),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.WRONG_MISSION_IS_REFUSED",
+    ).toBeVisible();
+    expect(screen.queryByText("Concluded"), "C3.UI.WRONG_MISSION_IS_REFUSED").toBeNull();
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.WRONG_MISSION_IS_REFUSED").toBeNull();
+  });
+
+  it("refuses a completion whose condition ordinal this Mission does not declare", async () => {
+    const user = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [{ ordinal: 9, outcome: "met", supportCount: 0, note: null }],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.UNPAIRABLE_ORDINAL_IS_REFUSED",
+    ).toBeVisible();
+    expect(screen.queryByText("Met"), "C3.UI.UNPAIRABLE_ORDINAL_IS_REFUSED").toBeNull();
+  });
+
+
+  /** Two Projects, one Mission each, both completions held open. A stale write shows up either as
+   *  the other Mission's data or as this one's pending state being released. The payload released
+   *  below is the SAME shape `shows a recorded Mission completion` already proves renders, so its
+   *  absence here is the lifetime guard and not an invalid fixture. */
+  function installC3TwoProjects() {
+    const second = "44444444-4444-4444-8444-4444444c3111";
+    const secondMission = "88888888-8888-4888-8888-8888888c3111";
+    let releaseFirst!: (value: unknown) => void;
+    let rejectFirst!: (cause: unknown) => void;
+    const firstCompletion = new Promise<unknown>((resolve, reject) => {
+      releaseFirst = resolve;
+      rejectFirst = reject;
+    });
+    const heldSecond = new Promise<unknown>(() => {});
+    const base = installC3(() => firstCompletion);
+    const installed = invokeMock.getMockImplementation()!;
+    const summaries = [
+      { id: C3_PROJECT, name: "Completion Project", charterRevision: 1,
+        autonomyProfile: "supervised", createdAtMs: 120 },
+      { id: second, name: "Second Project", charterRevision: 1,
+        autonomyProfile: "supervised", createdAtMs: 121 },
+    ];
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      const missionId = (args as { missionId?: string } | undefined)?.missionId;
+      if (command === "projects") return Promise.resolve(summaries);
+      if (command === "project" && projectId === second) {
+        return Promise.resolve({
+          id: second, workspaceId: acceptedOrganization.workspaceId, name: "Second Project",
+          charter: { revision: 1, purpose: "The other Project.", desiredOutcomes: ["Stay separate"],
+            constraints: [], prohibitions: [], autonomyProfile: "supervised",
+            budgetBoundary: "no_spend", externalEffects: "prohibited", authoredAtMs: 123 },
+          createdAtMs: 121,
+        });
+      }
+      if (command === "missions" && projectId === second) {
+        return Promise.resolve([{
+          id: secondMission, workspaceId: acceptedOrganization.workspaceId, projectId: second,
+          charterRevision: 1, teamId: "55555555-5555-4555-8555-555555555555",
+          desiredOutcome: "Hold the second Mission",
+          successConditions: ["Stay pending"], constraints: [], prohibitions: [],
+          lifecycle: "admitted", admittedBy: "operator", admittedAtMs: 127,
+          members: [{ residentId: "66666666-6666-4666-8666-666666666666",
+            admissionConfigurationId: "77777777-7777-4777-8777-777777777777" }],
+        }]);
+      }
+      // The Mission card now mounts the impact classification panel too, so this fixture has to
+      // answer its read. `publishedPolicy: null` is the quietest truthful answer: the panel shows the
+      // Policy prerequisite and renders no form, no alert and no status.
+      if (command === "get_mission_classification") {
+        return Promise.resolve({
+          missionId: (args as { missionId: string }).missionId,
+          observedAtEventSeq: "128",
+          publishedPolicy: null,
+          latest: null,
+        });
+      }
+      if (command === "get_mission_completion") {
+        return missionId === C3_MISSION ? firstCompletion : heldSecond;
+      }
+      return installed(command, args);
+    });
+    return { releaseFirst, rejectFirst, base };
+  }
+
+  async function leaveForTheSecondMission(user: ReturnType<typeof userEvent.setup>) {
+    await openC3Mission(user);
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.FIRST_MISSION_STILL_PENDING").not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Second Project/i }));
+    await screen.findByText("Hold the second Mission");
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.SECOND_MISSION_STILL_PENDING").not.toBeNull();
+  }
+
+  // UNMOUNT path. Leaving a Project unmounts this Mission's card, so a late `setState` is a silent
+  // no-op and BOTH lifetime mutants survive these two bars -- measured, not assumed. The guard
+  // itself is witnessed in `MissionCompletion.test.tsx`, where the component stays mounted across a
+  // Mission change. These two remain because the unmount path is worth holding too.
+  it("a stale completion success after leaving the Project replaces nothing", async () => {
+    const user = userEvent.setup();
+    const { releaseFirst } = installC3TwoProjects();
+    await leaveForTheSecondMission(user);
+
+    await act(async () => {
+      releaseFirst(c3Completion());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("Concluded"), "C3.UI.STALE_SUCCESS_DOES_NOT_REPLACE").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.STALE_SUCCESS_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.STALE_SUCCESS_DOES_NOT_RELEASE_PENDING").toBeNull();
+  });
+
+  it("a stale completion rejection after leaving the Project plants no failure", async () => {
+    const user = userEvent.setup();
+    const { rejectFirst } = installC3TwoProjects();
+    await leaveForTheSecondMission(user);
+
+    await act(async () => {
+      rejectFirst(new Error("the local request failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.STALE_REJECTION_PLANTS_NO_FAILURE").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.STALE_REJECTION_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+  });
+
+
+  // -------------------------------------------------------------------------------------------
+  // C3 fold 1 — Blue's three measured P1s, reconstructed from DC3F-blue-review.md
+  // -------------------------------------------------------------------------------------------
+  //
+  // Blue's original probe files were not yet on disk when these were written, so these are
+  // RECONSTRUCTED from the report's stated counterexamples, NOT adopted verbatim.
+
+  it("refuses a completion that omits a declared condition instead of rendering it whole", async () => {
+    const user = userEvent.setup();
+    // Two of this Mission's four declared conditions are simply absent from the payload.
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.MISSING_CONDITION_IS_UNAVAILABLE",
+    ).toBeVisible();
+    expect(screen.queryByText("Concluded"), "C3.UI.MISSING_CONDITION_IS_UNAVAILABLE").toBeNull();
+  });
+
+  it("gives the completion refusal its own fixed sentence, not the app-wide fallback", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.reject({ code: "mission_completion_unavailable" }));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("The Mission completion could not be verified."),
+      "C3.UI.UNAVAILABLE_HAS_FIXED_COPY",
+    ).toBeVisible();
+    expect(
+      screen.queryByText("Beacon could not complete that local request."),
+      "C3.UI.UNAVAILABLE_HAS_FIXED_COPY",
+    ).toBeNull();
+  });
+
+  it("keeps existing session refusals truthful rather than relabelling them", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.reject({ code: "authentication_failed" }));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("That credential was not accepted."),
+      "C3.UI.EXISTING_REFUSALS_STAY_TRUTHFUL",
+    ).toBeVisible();
+  });
+
+  it("accepts a note at the owner's 500-scalar bound and refuses 501", async () => {
+    const user = userEvent.setup();
+    // Astral text: each emoji is ONE Unicode scalar and TWO UTF-16 units, so a JS `.length` bound
+    // would drift by a factor of two. `Array.from` is what the owner's scalar count means.
+    const at = "\u{1F5FF}".repeat(500);
+    const over = "\u{1F5FF}".repeat(501);
+    expect(at.length, "C3.UI.NOTE_BOUND_IS_SCALARS_NOT_UTF16").toBe(1_000);
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: at },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 2, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 3, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(await screen.findByText("Concluded"), "C3.UI.NOTE_AT_OWNER_BOUND_IS_ACCEPTED").toBeVisible();
+
+    cleanup();
+    invokeMock.mockReset();
+    const user2 = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: over },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 2, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 3, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user2);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.NOTE_OVER_OWNER_BOUND_IS_REFUSED",
+    ).toBeVisible();
+  });
+
+  it("refuses counts above the owner's own limits", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.resolve(c3Completion({ deliveredArtifactCount: 33 })));
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.COUNTS_USE_OWNER_LIMITS",
+    ).toBeVisible();
   });
 
 });

@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod artifact;
 mod candidate;
+mod candidate_evaluation;
 mod check_preflight;
 mod declared_checks;
 #[cfg(unix)]
@@ -26,9 +27,12 @@ mod git_object_store;
 mod local_model_activation;
 mod mission;
 mod mission_completion;
+mod mission_completion_command;
 mod mission_completion_store;
 mod mission_impact;
+mod mission_impact_command;
 mod model_invocation;
+mod model_invocation_store;
 mod operator_account;
 mod outcome;
 mod outcome_assembler;
@@ -58,6 +62,11 @@ mod worktree;
 #[cfg(unix)]
 mod local_transport;
 
+pub use candidate_evaluation::{
+    CandidateEvaluationContext, CandidateEvaluationError, CandidateEvaluationService,
+    CurrentActivationEvidence, CurrentEvaluationEligibility, CurrentEvaluatorEvidence,
+    CurrentEvaluatorGap, EvaluationSourcePacket, ProposedOutcomeFidelityRubric,
+};
 pub use check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt, Recorded,
     ResolvedCheck, UnavailableEvidence, enumerate_runs,
@@ -74,8 +83,9 @@ pub use disk_encryption::{
     render_conclusion,
 };
 pub use local_transport::{
-    LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, initialize_local_auth_token,
+    AppendixRequestDto, CandidateDocumentFault, LocalErrorCode, LocalServerConfig,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, OutcomeCandidateDocumentDto,
+    PostPreparationFault, PreparedOutcomeCandidateDto, initialize_local_auth_token,
 };
 #[cfg(unix)]
 pub use recent_receipts::{
@@ -130,9 +140,15 @@ pub use mission_completion::{
     MissionCompletionV1, NarrativeItem, SpendReference, SupportKind, SupportRef, UncertaintyKind,
     UnfinishedKind,
 };
+pub use mission_completion_command::{
+    CompletionCommandError, CompletionCommandUnavailable, CompletionIntentRequest,
+    CompletionPreview, ConditionResultDto, MissionCompletionCommandService, NarrativeItemDto,
+    REVIEWED_INTENT_PREFIX, ReviewedIntent, SpendDto, SupportRefDto,
+};
 pub use mission_completion_store::{
-    CompletionReadRefusal, declared_conditions_digest, enumerate_completions, record_completion,
-    verified_completion_within,
+    CompletionReadRefusal, CompletionUnavailable, CompletionView, ConditionResultView,
+    MissionCompletionReadError, MissionCompletionReadService, declared_conditions_digest,
+    enumerate_completions, record_completion, verified_completion_within,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
@@ -143,6 +159,11 @@ pub use mission_impact::{
     ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
     MissionImpactService, verified_classification_for_citation, verified_classification_within,
 };
+pub use mission_impact_command::{
+    ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
+    ClassificationIntentRequest, ClassificationObservation, ClassificationView,
+    MissionImpactCommandService, PolicyCitationDto, SupersedesDto,
+};
 pub use model_invocation::{
     ADMISSION_CANONICALIZER, AppendRefusal, Appended, ByteCoherenceFault,
     INVOCATION_DIGEST_ALGORITHM, IncompleteCause, InvocationAdmissionV1, InvocationObservationV1,
@@ -151,6 +172,9 @@ pub use model_invocation::{
     MalformedInvocation, OBSERVATION_CANONICALIZER, ObservationKind, OwnerAuthorizationBasis,
     ReadCeiling, RetainedAuthority, RetainedBinding, RetainedHeader, RetainedLimits, SequenceFault,
     TransitionRefusal, TransportHistory, TransportObservation, TransportStatus,
+};
+pub use model_invocation_store::{
+    InvocationStoreError, InvocationStoreService, VerifiedInvocation,
 };
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
@@ -259,7 +283,7 @@ pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 pub use worktree::{FilterInventoryFailure, PinnedRead, PinnedReadFailure};
 
-const SCHEMA_VERSION: i64 = 36;
+const SCHEMA_VERSION: i64 = 37;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -325,6 +349,10 @@ const MIGRATION_V33: &str = include_str!("../migrations/0033_receipt_pre_image_u
 const MIGRATION_V34: &str = include_str!("../migrations/0034_receipt_outcome_typed_owner.sql");
 const MIGRATION_V35: &str = include_str!("../migrations/0035_spend_attribution_dimensions.sql");
 const MIGRATION_V36: &str = include_str!("../migrations/0036_event_chain.sql");
+// PROVISIONAL: the Invocation storage candidate. Its two Event kinds rebuild `events`, so this
+// migration renumbers with the file if another lane takes 0037 first, and the ladder step moves
+// with it.
+const MIGRATION_V37: &str = include_str!("../migrations/0037_model_invocations.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -605,6 +633,14 @@ pub enum SupervisorError {
     /// The completions do not agree with the log as a whole. No row to name.
     MissionCompletionTotalsMismatch(TotalsMismatch),
     ArtifactEventMismatch(i64),
+    /// An Invocation Event payload is larger than the store's parser ceiling, refused before it
+    /// could be transferred into an owned `String`.
+    InvocationEventPayloadOverCeiling {
+        sequence: i64,
+        payload_bytes: i64,
+    },
+    InvocationEventMismatch(i64),
+    InvocationTotalsMismatch(TotalsMismatch),
     /// A stored Artifact does not re-prove against its own bytes or the records it cites.
     ///
     /// Names the row and carries the owning reader's own error (R28.1).
@@ -612,6 +648,14 @@ pub enum SupervisorError {
         workspace_id: Uuid,
         digest_value: String,
         cause: artifact::ArtifactError,
+    },
+    /// One stored Invocation did not re-prove. The cause stays TYPED so `Debug` and the source
+    /// keep the store's own text; the one-line `Display` and the outward projection carry only its
+    /// closed NAME.
+    InvocationStateMismatch {
+        workspace_id: Uuid,
+        invocation_id: Uuid,
+        cause: model_invocation_store::InvocationStoreError,
     },
     /// The Artifact supersession relation does not agree with the store. No row to name.
     ArtifactTotalsMismatch(TotalsMismatch),
@@ -703,6 +747,9 @@ fn identity_label(what: &str) -> &'static str {
     match what {
         "a Project row's identity is not readable" => "a Project row's identity is not readable",
         "a Mission row's identity is not readable" => "a Mission row's identity is not readable",
+        "an Invocation row's identity is not readable" => {
+            "an Invocation row's identity is not readable"
+        }
         "a completion row's Workspace is not readable" => {
             "a completion row's Workspace is not readable"
         }
@@ -928,6 +975,14 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
             format!("EvaluationChainsMismatch.{}", cause.name())
         }
         SupervisorError::ArtifactEventMismatch(..) => "ArtifactEventMismatch".to_owned(),
+        SupervisorError::InvocationEventPayloadOverCeiling { .. } => {
+            "InvocationEventPayloadOverCeiling".to_owned()
+        }
+        SupervisorError::InvocationEventMismatch(..) => "InvocationEventMismatch".to_owned(),
+        SupervisorError::InvocationTotalsMismatch(..) => "InvocationTotalsMismatch".to_owned(),
+        SupervisorError::InvocationStateMismatch { cause, .. } => {
+            format!("InvocationStateMismatch.{}", cause.name())
+        }
         SupervisorError::ArtifactStateMismatch { cause, .. } => {
             format!("ArtifactStateMismatch.{}", cause.name())
         }
@@ -1026,6 +1081,7 @@ impl fmt::Display for TotalsMismatch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupPass {
     Project,
+    Invocation,
     Mission,
     MissionImpactClassification,
     OutcomeManifest,
@@ -1052,6 +1108,7 @@ impl StartupPass {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Project => "Project",
+            Self::Invocation => "Invocation",
             Self::Mission => "Mission",
             Self::MissionImpactClassification => "MissionImpactClassification",
             Self::OutcomeManifest => "OutcomeManifest",
@@ -1424,6 +1481,31 @@ impl fmt::Display for SupervisorError {
             Self::ArtifactEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored Artifact bytes"
+            ),
+            Self::InvocationEventPayloadOverCeiling {
+                sequence,
+                payload_bytes,
+            } => write!(
+                formatter,
+                "Event sequence {sequence} carries {payload_bytes} payload bytes, past the \
+                 Invocation store's ceiling"
+            ),
+            Self::InvocationEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match its stored Invocation record"
+            ),
+            Self::InvocationTotalsMismatch(totals) => write!(
+                formatter,
+                "the Invocations do not agree with the log as a whole -- {totals}"
+            ),
+            Self::InvocationStateMismatch {
+                workspace_id,
+                invocation_id,
+                cause,
+            } => write!(
+                formatter,
+                "Invocation {invocation_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
             ),
             // R28.4: the key and the fault's NAME.
             Self::ArtifactStateMismatch {
@@ -1940,6 +2022,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (34, MIGRATION_V34),
     (35, MIGRATION_V35),
     (36, MIGRATION_V36),
+    (37, MIGRATION_V37),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
@@ -2125,6 +2208,8 @@ enum PersistedEventKind {
     SpendMeasured,
     MissionImpactClassified,
     ArtifactRecorded,
+    InvocationAdmitted,
+    InvocationObserved,
 }
 
 impl PersistedEventKind {
@@ -2161,6 +2246,8 @@ impl PersistedEventKind {
             Self::SpendMeasured => "spend.measured",
             Self::MissionImpactClassified => "mission.impact_classified",
             Self::ArtifactRecorded => "artifact.recorded",
+            Self::InvocationAdmitted => "invocation.admitted",
+            Self::InvocationObserved => "invocation.observed",
         }
     }
 
@@ -2197,6 +2284,8 @@ impl PersistedEventKind {
             "spend.measured" => Ok(Self::SpendMeasured),
             "mission.impact_classified" => Ok(Self::MissionImpactClassified),
             "artifact.recorded" => Ok(Self::ArtifactRecorded),
+            "invocation.admitted" => Ok(Self::InvocationAdmitted),
+            "invocation.observed" => Ok(Self::InvocationObserved),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -2547,6 +2636,38 @@ fn map_evaluation_state_fault(fault: evaluation::EvaluationStateFault) -> Superv
 }
 
 /// The production mapping for the Artifact startup pass, NAMED so a bar can drive it.
+fn map_invocation_state_fault(
+    fault: model_invocation_store::InvocationStateFault,
+) -> SupervisorError {
+    use model_invocation_store::InvocationStateFault;
+    match fault {
+        InvocationStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Invocation,
+            source,
+        },
+        InvocationStateFault::Row {
+            workspace_id,
+            invocation_id,
+            cause,
+        } => SupervisorError::InvocationStateMismatch {
+            workspace_id,
+            invocation_id,
+            cause,
+        },
+        InvocationStateFault::Totals(totals) => SupervisorError::InvocationTotalsMismatch(totals),
+        // The existing root for an unreadable identity, not a fabricated nil UUID and not raw
+        // store text in an outward fault code: `what` is closed by `identity_label`, and the raw
+        // value stays in `Debug` where R42/R45 already put every other owner's.
+        InvocationStateFault::Identity {
+            workspace_id,
+            invocation_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "an Invocation row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Invocation {invocation_id}"),
+        },
+    }
+}
+
 fn map_artifact_state_fault(fault: artifact::ArtifactStateFault) -> SupervisorError {
     match fault {
         artifact::ArtifactStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
@@ -2864,7 +2985,10 @@ fn map_run_state_fault(fault: check_preflight::RunStateFault) -> SupervisorError
     }
 }
 
-fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
+/// Every pass sees ONE deferred snapshot. The parameter is a `Transaction` rather than a
+/// `Connection` so that is a type, not a convention: `&Transaction` deref-coerces to `&Connection`,
+/// so every existing pass call site below is unchanged.
+fn inspect_store(connection: &Transaction<'_>) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
         [],
@@ -2912,6 +3036,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
     artifact::verify_artifact_state(connection).map_err(map_artifact_state_fault)?;
+    // Beside the Artifact pass and for the same reason: it re-proves no other module's record, only
+    // its own rows, its own Events in both directions, and C1's grammar over its stored history.
+    model_invocation_store::verify_invocation_state(connection)
+        .map_err(map_invocation_state_fault)?;
     check_preflight::verify_run_state(connection).map_err(map_run_state_fault)?;
     local_model_activation::verify_activation_state(connection)
         .map_err(map_local_model_activation_state_fault)?;
@@ -2977,19 +3105,36 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
 fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorError> {
     let mut statement = connection.prepare(
         "
-        SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+        SELECT sequence, workspace_id, kind, occurred_at_ms,
+               length(CAST(payload_json AS BLOB)) AS payload_bytes,
+               CASE WHEN kind IN ('invocation.admitted', 'invocation.observed')
+                         AND length(CAST(payload_json AS BLOB)) > ?1
+                    THEN NULL ELSE payload_json END AS payload_json
         FROM events
         ORDER BY sequence
         ",
     )?;
-    let mut rows = statement.query([])?;
+    // The ceiling is applied IN the enumeration, because this is the first statement in the process
+    // that transfers an Event payload and `event_chain::verify_chain` -- which needs those bytes to
+    // recompute a link digest and so cannot be bounded -- runs after it. `length(CAST(... AS BLOB))`
+    // counts UTF-8 bytes; SQLite's `length()` on TEXT counts characters. Only the two Invocation
+    // kinds are guarded, so every existing kind's transfer is unchanged. This bounds what crosses
+    // into an owned `String`; it is not a total SQLite or process memory ceiling.
+    let mut rows = statement.query(params![model_invocation_store::MAX_EVENT_PAYLOAD_BYTES])?;
     let mut count = 0_u64;
     while let Some(row) = rows.next()? {
         let sequence = row.get::<_, i64>(0)?;
         let workspace_id = parse_workspace_id(row.get::<_, String>(1)?)?;
         let kind = PersistedEventKind::parse(row.get::<_, String>(2)?)?;
-        let payload_json = row.get::<_, String>(3)?;
-        let occurred_at_ms = nonnegative_u64(row.get::<_, i64>(4)?)?;
+        let occurred_at_ms = nonnegative_u64(row.get::<_, i64>(3)?)?;
+        let payload_bytes = row.get::<_, i64>(4)?;
+        // `payload_json` is NOT NULL in the table, so a NULL here can only be the guard firing.
+        let Some(payload_json) = row.get::<_, Option<String>>(5)? else {
+            return Err(SupervisorError::InvocationEventPayloadOverCeiling {
+                sequence,
+                payload_bytes,
+            });
+        };
 
         match kind {
             PersistedEventKind::WorkspaceCreated => {
@@ -3129,6 +3274,12 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
             // inserting one 'spend.measured' row and re-bootstrapping.
             PersistedEventKind::SpendMeasured => {}
             PersistedEventKind::MissionImpactClassified => {}
+            // Parse vocabulary only, deliberately: the proof is the Invocation owner's, which
+            // issues its own bounded queries. The precedent is `SpendMeasured` above -- a kind must
+            // parse or every later startup refuses (0025's lesson), but its record pass is where the
+            // comparison belongs.
+            PersistedEventKind::InvocationAdmitted => {}
+            PersistedEventKind::InvocationObserved => {}
             PersistedEventKind::ArtifactRecorded => {
                 artifact::verify_artifact_event(
                     connection,
@@ -6687,6 +6838,8 @@ mod tests {
             super::PersistedEventKind::SpendMeasured,
             super::PersistedEventKind::MissionImpactClassified,
             super::PersistedEventKind::ArtifactRecorded,
+            super::PersistedEventKind::InvocationAdmitted,
+            super::PersistedEventKind::InvocationObserved,
         ];
         fn declaration_index(kind: super::PersistedEventKind) -> usize {
             match kind {
@@ -6721,6 +6874,8 @@ mod tests {
                 super::PersistedEventKind::SpendMeasured => 28,
                 super::PersistedEventKind::MissionImpactClassified => 29,
                 super::PersistedEventKind::ArtifactRecorded => 30,
+                super::PersistedEventKind::InvocationAdmitted => 31,
+                super::PersistedEventKind::InvocationObserved => 32,
             }
         }
 
@@ -7948,7 +8103,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 75] = [
+    const STARTUP_LINES: [(&str, &str); 79] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -8154,6 +8309,22 @@ mod tests {
             "the Evaluation supersession chains do not re-prove: NotFound",
         ),
         (
+            "InvocationEventPayloadOverCeiling",
+            "Event sequence 4242 carries 4242 payload bytes, past the Invocation store's ceiling",
+        ),
+        (
+            "InvocationEventMismatch",
+            "Event sequence 4242 does not match its stored Invocation record",
+        ),
+        (
+            "InvocationTotalsMismatch",
+            "the Invocations do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "InvocationStateMismatch",
+            "Invocation 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: InvalidStore",
+        ),
+        (
             "ArtifactEventMismatch",
             "Event sequence 4242 does not match its stored Artifact bytes",
         ),
@@ -8321,6 +8492,18 @@ mod tests {
         "StarterOrganizationStateMismatch" | SupervisorError::StarterOrganizationStateMismatch { .. }
             => startup_line("StarterOrganizationStateMismatch"),
             SupervisorError::StarterOrganizationStateMismatch { workspace_id: r42s2_uuid(), cause: crate::StarterOrganizationError::EmptyRoster }, &[];
+        "InvocationEventPayloadOverCeiling" | SupervisorError::InvocationEventPayloadOverCeiling { .. }
+            => startup_line("InvocationEventPayloadOverCeiling"),
+            SupervisorError::InvocationEventPayloadOverCeiling { sequence: R42S2_SEQUENCE_I64, payload_bytes: R42S2_SEQUENCE_I64 }, &[];
+        "InvocationEventMismatch" | SupervisorError::InvocationEventMismatch(..)
+            => startup_line("InvocationEventMismatch"),
+            SupervisorError::InvocationEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "InvocationTotalsMismatch" | SupervisorError::InvocationTotalsMismatch(..)
+            => startup_line("InvocationTotalsMismatch"),
+            SupervisorError::InvocationTotalsMismatch(r42s2_totals()), &[];
+        "InvocationStateMismatch" | SupervisorError::InvocationStateMismatch { .. }
+            => startup_line("InvocationStateMismatch"),
+            SupervisorError::InvocationStateMismatch { workspace_id: r42s2_uuid(), invocation_id: r42s2_uuid(), cause: crate::InvocationStoreError::InvalidStore }, &[];
         "ProjectEventMismatch" | SupervisorError::ProjectEventMismatch(..)
             => startup_line("ProjectEventMismatch"),
             SupervisorError::ProjectEventMismatch(R42S2_SEQUENCE_I64), &[];
@@ -8520,11 +8703,11 @@ mod tests {
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 75, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 75, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 79, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 79, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 75, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 79, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);

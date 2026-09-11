@@ -8,16 +8,18 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ExportedOutcome,
+    AccessOrigin, AppendixRequestDto, BeaconCapability, BeaconCapabilityDescriptor,
+    ClassificationIntentRequest, ClassificationObservation, ClassificationView,
+    CompletionIntentRequest, CompletionPreview, CompletionView, ExportedOutcome,
     LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
-    MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
-    PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectPolicy,
-    ProjectPolicyDraft, ProjectRepository, ProjectSummary, ProjectView, ProviderFeature,
-    PublicationSummary, RecentReceiptPage, RepositoryDraft, ResidentAgentView,
-    ResidentConfiguration, SampleProjectInstallResult, SampleProjectStatus, SecretString,
-    StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
-    initialize_local_auth_token,
+    MissionView, OperatorSessionPolicy, OperatorSessionStatus, OutcomeCandidateDocumentDto,
+    PlatformSessionMonitorStatus, PreflightReceipt, PreparedOutcomeCandidateDto, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
+    ProjectSummary, ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage,
+    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ReviewedIntent,
+    SampleProjectInstallResult, SampleProjectStatus, SecretString, StarterOrganizationView,
+    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -473,6 +475,26 @@ impl From<LocalTransportError> for CommandError {
                 code: LocalErrorCode::NotAuthenticated,
                 ..
             } => ("not_authenticated", "Unlock Beacon to continue.", None),
+            // C7's two, each carrying its own code so `session.ts`'s matching `case` is reachable
+            // -- the same reason the Policy and Mission arms are split out above. The not-found
+            // sentence deliberately says "not available in this Workspace" rather than "does not
+            // exist": a foreign Workspace's real manifest answers with these exact bytes too.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeCandidateNotFound,
+                ..
+            } => (
+                "outcome_candidate_not_found",
+                "That Outcome candidate is not available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeCandidateUnavailable,
+                ..
+            } => (
+                "outcome_candidate_unavailable",
+                "Beacon could not verify this Outcome candidate.",
+                None,
+            ),
             LocalTransportError::Remote {
                 code: LocalErrorCode::OutcomeAbsent,
                 ..
@@ -511,6 +533,190 @@ impl From<LocalTransportError> for CommandError {
             } => (
                 "mission_member_ineligible",
                 "A Team member is no longer eligible for Mission admission.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionIntentChanged,
+                ..
+            } => (
+                "completion_intent_changed",
+                "The reviewed details changed. Review the completion again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionAlreadyRecorded,
+                ..
+            } => (
+                "completion_already_recorded",
+                "A completion is already recorded for this Mission. Read the recorded completion.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionResidentNotInAdmissionRoster,
+                ..
+            } => (
+                "completion_resident_not_in_admission_roster",
+                "Choose a Resident admitted to this Mission.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionConditionCoverageIncomplete,
+                ..
+            } => (
+                "completion_condition_coverage_incomplete",
+                "Assess every declared condition explicitly.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionSupportOverLimit,
+                ..
+            } => (
+                "completion_support_over_limit",
+                "This condition cites more support than a completion can record.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionTextOverLimit,
+                ..
+            } => (
+                "completion_text_over_limit",
+                "Some completion text exceeds the supported length.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionSpendReasonRequired,
+                ..
+            } => (
+                "completion_spend_reason_required",
+                "Explain why spend was not measured.",
+                None,
+            ),
+            // A malformed identity, digest, tag or integer, or the same entry twice in a set. It is
+            // NOT a length problem and must never be shown as one.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionInvalidDetails,
+                ..
+            } => (
+                "completion_invalid_details",
+                "Some completion details are invalid. Review the completion again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationStalePolicyRevision,
+                ..
+            } => (
+                "classification_stale_policy_revision",
+                "The Project Policy changed. Review the Policy and classify again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationNoPolicyPublished,
+                ..
+            } => (
+                "classification_no_policy_published",
+                "No Team Lead Policy is published for this Project.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationAlreadyClassified,
+                ..
+            } => (
+                "classification_already_classified",
+                "A classification is already recorded for this Mission. Reclassify it by naming the recorded one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationPredecessorNotLatest,
+                ..
+            } => (
+                "classification_predecessor_not_latest",
+                "That classification is no longer the latest. Read the classification and name the current one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationPredecessorUnproven,
+                ..
+            } => (
+                "classification_predecessor_unproven",
+                "The classification named as replaced could not be verified.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationVersionCeilingReached,
+                ..
+            } => (
+                "classification_version_ceiling_reached",
+                "This Mission cannot record another classification.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationTextOverLimit,
+                ..
+            } => (
+                "classification_text_over_limit",
+                "The reason exceeds the supported length.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ClassificationInvalidDetails,
+                ..
+            } => (
+                "classification_invalid_details",
+                "Some classification details are invalid. Review them and try again.",
+                None,
+            ),
+            // One operation-neutral unavailable answer for the classification read AND write, exactly
+            // as C3/C5 settled it.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionClassificationUnavailable,
+                ..
+            } => (
+                "mission_classification_unavailable",
+                "The Mission classification could not be verified.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNotCompleted,
+                ..
+            } => (
+                "outcome_not_completed",
+                "This Mission has no recorded completion to prepare.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNotClassified,
+                ..
+            } => (
+                "outcome_not_classified",
+                "This Mission has no impact classification.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNoClassificationAtCompletion,
+                ..
+            } => (
+                "outcome_no_classification_at_completion",
+                "This Mission was classified only after completion. This completion cannot be prepared as an Outcome, and another classification will not change its boundary.",
+                None,
+            ),
+            // Every other preparation failure, INCLUDING a failed post-commit read and an identity
+            // mismatch: the candidate may already exist, so nothing here is definite.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomePreparationUnavailable,
+                ..
+            } => (
+                "outcome_preparation_unavailable",
+                "Beacon could not verify the records needed to prepare this Outcome candidate.",
+                None,
+            ),
+            // The one generic unavailable answer for a completion read OR write. Existing typed
+            // session and authentication errors are matched earlier and keep their own semantics.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionCompletionUnavailable,
+                ..
+            } => (
+                "mission_completion_unavailable",
+                "The Mission completion could not be verified.",
                 None,
             ),
             LocalTransportError::Remote {
@@ -571,6 +777,12 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::ProjectRepository(_)
             | LocalTransportError::Team(_)
             | LocalTransportError::Mission(_)
+            | LocalTransportError::MissionCompletionRead(_)
+            | LocalTransportError::MissionCompletionCommand(_)
+            | LocalTransportError::MissionImpactClassification(_)
+            | LocalTransportError::OutcomePreparation(_)
+            | LocalTransportError::OutcomePreparationAfterCommit(_)
+            | LocalTransportError::OutcomeCandidateDocument(_)
             | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
@@ -970,6 +1182,111 @@ fn missions_value(
     project_id: uuid::Uuid,
 ) -> Result<Vec<MissionView>, CommandError> {
     state.supervisor.missions(project_id).map_err(Into::into)
+}
+
+/// The verified completion of one Mission, or `null`.
+///
+/// Absence is `null`; a read that could not be verified rejects with a closed code and is never
+/// converted into `null`.
+fn get_mission_completion_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<Option<CompletionView>, CommandError> {
+    state
+        .supervisor
+        .mission_completion(mission_id)
+        .map_err(Into::into)
+}
+
+/// Derive the completion the Operator would record, and its reviewed-intent token. Writes nothing.
+///
+/// The request crosses unchanged: this adapter does not validate a field the owner owns, does not
+/// rebuild a record, and does not read anything back out of the preview.
+fn preview_mission_completion_value(
+    state: &DesktopState,
+    request: CompletionIntentRequest,
+) -> Result<CompletionPreview, CommandError> {
+    state
+        .supervisor
+        .preview_mission_completion(request)
+        .map_err(Into::into)
+}
+
+/// Record the reviewed completion. The reviewed token is forwarded exactly as reviewed.
+fn record_mission_completion_value(
+    state: &DesktopState,
+    request: CompletionIntentRequest,
+    reviewed_intent_sha256: String,
+) -> Result<ReviewedIntent, CommandError> {
+    state
+        .supervisor
+        .record_mission_completion(request, reviewed_intent_sha256)
+        .map_err(Into::into)
+}
+
+/// The token of the completion visible for this Mission in one snapshot, or `null`.
+///
+/// `null` is "nothing visible in this snapshot", never a substitute for a read that could not be
+/// verified.
+fn get_mission_completion_intent_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<Option<ReviewedIntent>, CommandError> {
+    state
+        .supervisor
+        .get_mission_completion_intent(mission_id)
+        .map_err(Into::into)
+}
+
+/// Prepare one Outcome candidate from a Mission's recorded completion and evidence.
+///
+/// A mutating owner action. It does not evaluate and does not publish, and the receipt it returns says
+/// nothing about whether anything later did.
+fn prepare_outcome_candidate_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+    appendix_request: AppendixRequestDto,
+) -> Result<PreparedOutcomeCandidateDto, CommandError> {
+    state
+        .supervisor
+        .prepare_outcome_candidate(mission_id, appendix_request)
+        .map_err(Into::into)
+}
+
+/// Read one prepared candidate's stored document.
+///
+/// A READ. It writes nothing, prepares nothing and evaluates nothing, and the bytes it returns are the
+/// exact stored content -- base64-encoded, not re-rendered.
+fn read_outcome_candidate_document_value(
+    state: &DesktopState,
+    manifest_digest: String,
+) -> Result<OutcomeCandidateDocumentDto, CommandError> {
+    state
+        .supervisor
+        .read_outcome_candidate_document(&manifest_digest)
+        .map_err(Into::into)
+}
+
+/// Record one Mission impact classification. The Operator's judgment, unchanged.
+fn classify_mission_impact_value(
+    state: &DesktopState,
+    request: ClassificationIntentRequest,
+) -> Result<ClassificationView, CommandError> {
+    state
+        .supervisor
+        .classify_mission_impact(request)
+        .map_err(Into::into)
+}
+
+/// One bounded snapshot of this Mission's classification state.
+fn get_mission_classification_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<ClassificationObservation, CommandError> {
+    state
+        .supervisor
+        .get_mission_classification(mission_id)
+        .map_err(Into::into)
 }
 
 fn mission_value(
@@ -1429,6 +1746,72 @@ fn missions(
 }
 
 #[tauri::command]
+fn get_mission_completion(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<Option<CompletionView>, CommandError> {
+    get_mission_completion_value(&state, mission_id)
+}
+
+#[tauri::command]
+fn preview_mission_completion(
+    state: State<'_, DesktopState>,
+    request: CompletionIntentRequest,
+) -> Result<CompletionPreview, CommandError> {
+    preview_mission_completion_value(&state, request)
+}
+
+#[tauri::command]
+fn record_mission_completion(
+    state: State<'_, DesktopState>,
+    request: CompletionIntentRequest,
+    reviewed_intent_sha256: String,
+) -> Result<ReviewedIntent, CommandError> {
+    record_mission_completion_value(&state, request, reviewed_intent_sha256)
+}
+
+#[tauri::command]
+fn get_mission_completion_intent(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<Option<ReviewedIntent>, CommandError> {
+    get_mission_completion_intent_value(&state, mission_id)
+}
+
+#[tauri::command]
+fn prepare_outcome_candidate(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+    appendix_request: AppendixRequestDto,
+) -> Result<PreparedOutcomeCandidateDto, CommandError> {
+    prepare_outcome_candidate_value(&state, mission_id, appendix_request)
+}
+
+#[tauri::command]
+fn read_outcome_candidate_document(
+    state: State<'_, DesktopState>,
+    manifest_digest: String,
+) -> Result<OutcomeCandidateDocumentDto, CommandError> {
+    read_outcome_candidate_document_value(&state, manifest_digest)
+}
+
+#[tauri::command]
+fn classify_mission_impact(
+    state: State<'_, DesktopState>,
+    request: ClassificationIntentRequest,
+) -> Result<ClassificationView, CommandError> {
+    classify_mission_impact_value(&state, request)
+}
+
+#[tauri::command]
+fn get_mission_classification(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<ClassificationObservation, CommandError> {
+    get_mission_classification_value(&state, mission_id)
+}
+
+#[tauri::command]
 fn mission(
     state: State<'_, DesktopState>,
     mission_id: uuid::Uuid,
@@ -1740,6 +2123,14 @@ pub fn run() {
             team,
             form_team,
             missions,
+            get_mission_completion,
+            preview_mission_completion,
+            record_mission_completion,
+            get_mission_completion_intent,
+            classify_mission_impact,
+            get_mission_classification,
+            prepare_outcome_candidate,
+            read_outcome_candidate_document,
             mission,
             admit_mission,
             mission_publications,
@@ -1780,14 +2171,17 @@ mod tests {
         DesktopState, accept_starter_organization_value, activate_resident_value,
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
-        current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
+        current_project_repository_value, get_mission_completion_intent_value,
+        get_mission_completion_value, install_sample_project_value, migrate_legacy_app_data,
         mission_value, outcome_document_value, platform_session_monitor_status_value,
-        preflight_project_checks_value, prepare_runtime_directory, project_charter_history_value,
+        preflight_project_checks_value, prepare_runtime_directory,
+        preview_mission_completion_value, project_charter_history_value,
         project_policy_history_value, project_policy_value, project_repository_history_value,
         project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
-        residents_value, retire_resident_value, revise_project_charter_value,
-        sample_project_status_value, session_policy_value, session_status_value,
-        set_session_timeout_value, starter_organization_value, suspend_resident_value,
+        record_mission_completion_value, residents_value, retire_resident_value,
+        revise_project_charter_value, sample_project_status_value, session_policy_value,
+        session_status_value, set_session_timeout_value, starter_organization_value,
+        suspend_resident_value,
     };
 
     #[test]
@@ -2081,6 +2475,14 @@ mod tests {
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
+                "allow-get-mission-completion",
+                "allow-preview-mission-completion",
+                "allow-record-mission-completion",
+                "allow-get-mission-completion-intent",
+                "allow-classify-mission-impact",
+                "allow-get-mission-classification",
+                "allow-prepare-outcome-candidate",
+                "allow-read-outcome-candidate-document",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -2123,6 +2525,135 @@ mod tests {
             .unwrap();
         let refusal = outcome_document_value(&state.state, Uuid::new_v4(), None).unwrap_err();
         assert_eq!(refusal.code, "outcome_absent");
+    }
+
+    /// C3.DESKTOP.COMMAND_WIRED — the real native adapter path, not a mock.
+    ///
+    /// This calls the same value function the `#[tauri::command]` wrapper calls, over a real
+    /// `LocalSupervisorServer`/`LocalSupervisorClient` pair. A Mission with no completion is JSON
+    /// `null`; an unknown Mission is the same `null`, so scope stays opaque at the boundary too.
+    /// **Not yet executed:** Blue owns Cargo at the time of writing.
+    #[test]
+    fn c3_desktop_get_mission_completion_is_wired_to_the_real_adapter() {
+        let state = TestState::new();
+        state
+            .state
+            .supervisor
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        state
+            .state
+            .supervisor
+            .complete_operator_setup(true)
+            .unwrap();
+
+        let absent = get_mission_completion_value(&state.state, Uuid::new_v4())
+            .expect("C3.DESKTOP.COMMAND_WIRED: an unknown Mission is not an error");
+        assert!(absent.is_none(), "C3.DESKTOP.COMMAND_WIRED");
+        assert_eq!(
+            serde_json::to_string(&absent).unwrap(),
+            "null",
+            "C3.DESKTOP.COMMAND_WIRED: absence crosses as JSON null"
+        );
+    }
+
+    /// C4.DESKTOP.COMMANDS_WIRED — all three completion adapters over the real pair.
+    ///
+    /// Registration and an unauthenticated refusal prove a route exists; they do not prove the
+    /// adapter reaches the owner and brings an answer back. Here the session is authenticated first,
+    /// so every call below is a real owner answer: a token read for a Mission this Workspace never
+    /// admitted is `null` (absence, never an error), and the two write paths are refused BY THE
+    /// OWNER with the shared unavailable code -- a Mission that is not admitted is outwardly
+    /// indistinguishable from one the caller may not see.
+    ///
+    /// **Not yet executed:** Opus holds Cargo at the time of writing.
+    #[test]
+    fn c4_desktop_completion_commands_are_wired_to_the_real_adapter() {
+        let state = TestState::new();
+        state
+            .state
+            .supervisor
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        state
+            .state
+            .supervisor
+            .complete_operator_setup(true)
+            .unwrap();
+
+        let absent = get_mission_completion_intent_value(&state.state, Uuid::new_v4())
+            .expect("C4.DESKTOP.COMMANDS_WIRED: an unknown Mission is not an error");
+        assert!(absent.is_none(), "C4.DESKTOP.INTENT_ABSENCE_IS_NULL");
+        assert_eq!(
+            serde_json::to_string(&absent).unwrap(),
+            "null",
+            "C4.DESKTOP.INTENT_ABSENCE_CROSSES_AS_JSON_NULL"
+        );
+
+        let request = beacond::CompletionIntentRequest {
+            mission_id: Uuid::new_v4(),
+            accountable_resident_id: Uuid::new_v4(),
+            disposition: "concluded".to_owned(),
+            condition_results: vec![beacond::ConditionResultDto {
+                ordinal: 0,
+                outcome: "met".to_owned(),
+                support: Vec::new(),
+                note: None,
+            }],
+            delivered_artifacts: Vec::new(),
+            unfinished_work: Vec::new(),
+            uncertainty: Vec::new(),
+            spend: beacond::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+            summary: "Shipped it.".to_owned(),
+        };
+
+        let preview_refusal = preview_mission_completion_value(&state.state, request.clone())
+            .expect_err("C4.DESKTOP.PREVIEW_REACHES_THE_OWNER");
+        assert_eq!(
+            (preview_refusal.code, preview_refusal.message),
+            (
+                "mission_completion_unavailable",
+                "The Mission completion could not be verified."
+            ),
+            "C4.DESKTOP.PREVIEW_REFUSAL_IS_THE_SHARED_LINE"
+        );
+
+        let record_refusal = record_mission_completion_value(&state.state, request, "a".repeat(64))
+            .expect_err("C4.DESKTOP.RECORD_REACHES_THE_OWNER");
+        assert_eq!(
+            (record_refusal.code, record_refusal.message),
+            (
+                "mission_completion_unavailable",
+                "The Mission completion could not be verified."
+            ),
+            "C4.DESKTOP.RECORD_REFUSAL_IS_THE_SHARED_LINE"
+        );
+        assert_eq!(
+            record_refusal.retry_after_ms, None,
+            "C4.DESKTOP.NO_RETRY_ADVICE"
+        );
+    }
+
+    /// The closed code and copy, as independent literals from `C3-interface.md`.
+    #[test]
+    fn c3_desktop_the_unavailable_code_and_copy_are_exactly_the_contract() {
+        let error: CommandError = LocalTransportError::Remote {
+            code: LocalErrorCode::MissionCompletionUnavailable,
+            retry_after_ms: None,
+        }
+        .into();
+        assert_eq!(error.code, "mission_completion_unavailable", "C3.WIRE.CODE");
+        assert_eq!(
+            error.message, "The Mission completion could not be verified.",
+            "C3.WIRE.COPY"
+        );
+        assert_eq!(error.retry_after_ms, None, "C3.WIRE.NO_RETRY_ADVICE");
     }
 
     struct TestState {
@@ -2785,9 +3316,10 @@ mod tests {
         };
     }
 
-    /// The 62 wire codes, as literal baseline contracts. These are the reviewed values, NOT the
-    /// output of the mapper under test: 55 of them must survive this slice byte-for-byte, and a
-    /// table generated by running the new code could not say that.
+    /// The wire codes, as literal baseline contracts. These are the reviewed values, NOT the output
+    /// of the mapper under test: a table generated by running the new code could not say that. The
+    /// eight completion rows are transcribed from `C4-interface.md`'s dated addendum, which is also
+    /// where the frontend's own copy comes from -- two independent transcriptions of one contract.
     macro_rules! remote_table {
         ( $( $case:literal | $variant:ident => ($code:literal, $message:literal, $retry:expr); )+ ) => {
             fn expected_remote(
@@ -2804,8 +3336,8 @@ mod tests {
         };
     }
 
-    /// The 21 local variants. The match also carries the `Remote` arm, delegating to the table
-    /// above -- which is what keeps it exhaustive and wildcard-free over all 22 variants.
+    /// The local variants. The match also carries the `Remote` arm, delegating to the table above --
+    /// which is what keeps it exhaustive and wildcard-free over every variant.
     macro_rules! local_table {
         (
             $( $case:literal | $pattern:pat => ($code:literal, $message:literal),
@@ -2885,6 +3417,33 @@ mod tests {
         "STALE_MISSION_TEAM" | StaleMissionTeam => ("stale_mission_team", "The Team or a Resident configuration changed. Reload before admitting the Mission.", None);
         "MISSION_MEMBER_INELIGIBLE" | MissionMemberIneligible => ("mission_member_ineligible", "A Team member is no longer eligible for Mission admission.", None);
         "MISSION_UNAVAILABLE" | MissionUnavailable => ("mission_unavailable", "Beacon could not verify Mission state.", None);
+        "MISSION_COMPLETION_UNAVAILABLE" | MissionCompletionUnavailable => ("mission_completion_unavailable", "The Mission completion could not be verified.", None);
+        "COMPLETION_INTENT_CHANGED" | CompletionIntentChanged => ("completion_intent_changed", "The reviewed details changed. Review the completion again.", None);
+        "COMPLETION_ALREADY_RECORDED" | CompletionAlreadyRecorded => ("completion_already_recorded", "A completion is already recorded for this Mission. Read the recorded completion.", None);
+        "COMPLETION_RESIDENT_NOT_IN_ADMISSION_ROSTER" | CompletionResidentNotInAdmissionRoster => ("completion_resident_not_in_admission_roster", "Choose a Resident admitted to this Mission.", None);
+        "COMPLETION_CONDITION_COVERAGE_INCOMPLETE" | CompletionConditionCoverageIncomplete => ("completion_condition_coverage_incomplete", "Assess every declared condition explicitly.", None);
+        "COMPLETION_SUPPORT_OVER_LIMIT" | CompletionSupportOverLimit => ("completion_support_over_limit", "This condition cites more support than a completion can record.", None);
+        "COMPLETION_TEXT_OVER_LIMIT" | CompletionTextOverLimit => ("completion_text_over_limit", "Some completion text exceeds the supported length.", None);
+        "COMPLETION_SPEND_REASON_REQUIRED" | CompletionSpendReasonRequired => ("completion_spend_reason_required", "Explain why spend was not measured.", None);
+        "COMPLETION_INVALID_DETAILS" | CompletionInvalidDetails => ("completion_invalid_details", "Some completion details are invalid. Review the completion again.", None);
+        "CLASSIFICATION_STALE_POLICY_REVISION" | ClassificationStalePolicyRevision => ("classification_stale_policy_revision", "The Project Policy changed. Review the Policy and classify again.", None);
+        "CLASSIFICATION_NO_POLICY_PUBLISHED" | ClassificationNoPolicyPublished => ("classification_no_policy_published", "No Team Lead Policy is published for this Project.", None);
+        "CLASSIFICATION_ALREADY_CLASSIFIED" | ClassificationAlreadyClassified => ("classification_already_classified", "A classification is already recorded for this Mission. Reclassify it by naming the recorded one.", None);
+        "CLASSIFICATION_PREDECESSOR_NOT_LATEST" | ClassificationPredecessorNotLatest => ("classification_predecessor_not_latest", "That classification is no longer the latest. Read the classification and name the current one.", None);
+        "CLASSIFICATION_PREDECESSOR_UNPROVEN" | ClassificationPredecessorUnproven => ("classification_predecessor_unproven", "The classification named as replaced could not be verified.", None);
+        "CLASSIFICATION_VERSION_CEILING_REACHED" | ClassificationVersionCeilingReached => ("classification_version_ceiling_reached", "This Mission cannot record another classification.", None);
+        "CLASSIFICATION_TEXT_OVER_LIMIT" | ClassificationTextOverLimit => ("classification_text_over_limit", "The reason exceeds the supported length.", None);
+        "CLASSIFICATION_INVALID_DETAILS" | ClassificationInvalidDetails => ("classification_invalid_details", "Some classification details are invalid. Review them and try again.", None);
+        "MISSION_CLASSIFICATION_UNAVAILABLE" | MissionClassificationUnavailable => ("mission_classification_unavailable", "The Mission classification could not be verified.", None);
+        "OUTCOME_NOT_COMPLETED" | OutcomeNotCompleted => ("outcome_not_completed", "This Mission has no recorded completion to prepare.", None);
+        "OUTCOME_NOT_CLASSIFIED" | OutcomeNotClassified => ("outcome_not_classified", "This Mission has no impact classification.", None);
+        "OUTCOME_NO_CLASSIFICATION_AT_COMPLETION" | OutcomeNoClassificationAtCompletion => ("outcome_no_classification_at_completion", "This Mission was classified only after completion. This completion cannot be prepared as an Outcome, and another classification will not change its boundary.", None);
+        "OUTCOME_PREPARATION_UNAVAILABLE" | OutcomePreparationUnavailable => ("outcome_preparation_unavailable", "Beacon could not verify the records needed to prepare this Outcome candidate.", None);
+        // C7's two, transcribed from `OutcomeCandidateDocument.tsx`'s own copy table, not from the
+        // Rust enum. "Not available in this Workspace" is deliberately not "does not exist": this
+        // answer is also what a foreign Workspace's real manifest returns.
+        "OUTCOME_CANDIDATE_NOT_FOUND" | OutcomeCandidateNotFound => ("outcome_candidate_not_found", "That Outcome candidate is not available in this Workspace.", None);
+        "OUTCOME_CANDIDATE_UNAVAILABLE" | OutcomeCandidateUnavailable => ("outcome_candidate_unavailable", "Beacon could not verify this Outcome candidate.", None);
         "SETUP_NOT_STARTED" | SetupNotStarted => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_ALREADY_EXISTS" | AccountAlreadyExists => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_MISSING" | AccountMissing => ("local_request_failed", "Beacon could not complete that local request.", None);
@@ -2925,6 +3484,38 @@ mod tests {
             LocalTransportError::Team(beacond::TeamError::Store(driver_error!())), &[NEEDLE_A];
         "MISSION" | LocalTransportError::Mission(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::Mission(beacond::MissionError::Store(driver_error!())), &[NEEDLE_A];
+        "MISSION_COMPLETION_READ" | LocalTransportError::MissionCompletionRead(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::MissionCompletionRead(beacond::MissionCompletionReadError::Unavailable(beacond::CompletionUnavailable::Store(driver_error!()))), &[NEEDLE_A];
+        "OUTCOME_PREPARATION" | LocalTransportError::OutcomePreparation(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomePreparation(beacond::PrepareRefusal::Render(needle_text())), &[NEEDLE_A];
+        "OUTCOME_PREPARATION_AFTER_COMMIT" | LocalTransportError::OutcomePreparationAfterCommit(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomePreparationAfterCommit(
+                beacond::PostPreparationFault::Identity {
+                    field: "manifestId",
+                    expected: needle_text(),
+                    observed: needle_text(),
+                },
+            ), &[NEEDLE_A];
+        // C7's read. Like every other transport carrier, it reaches a DESKTOP caller only as the
+        // generic local-request failure: the candidate codes above are `Remote` answers from the
+        // supervisor, and a carrier that arrived here instead would be a local fault, not a refusal
+        // the Operator can act on. The sample carries a needle at BOTH stages' shape.
+        "OUTCOME_CANDIDATE_DOCUMENT" | LocalTransportError::OutcomeCandidateDocument(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomeCandidateDocument(
+                beacond::CandidateDocumentFault::Identity {
+                    field: "manifestDigest",
+                    expected: needle_text(),
+                    observed: needle_text(),
+                },
+            ), &[NEEDLE_A];
+        "MISSION_IMPACT_CLASSIFICATION" | LocalTransportError::MissionImpactClassification(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::MissionImpactClassification(
+                beacond::ClassificationCommandError::MalformedRequest(NEEDLE_A),
+            ), &[NEEDLE_A];
+        "MISSION_COMPLETION_COMMAND" | LocalTransportError::MissionCompletionCommand(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::MissionCompletionCommand(
+                beacond::CompletionCommandError::MalformedRequest(NEEDLE_A),
+            ), &[NEEDLE_A];
         "CHECK_PREFLIGHT" | LocalTransportError::CheckPreflight(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::CheckPreflight(beacond::CheckPreflightError::Store(driver_error!())), &[NEEDLE_A];
         "RECENT_RECEIPT" | LocalTransportError::RecentReceipt(_) => ("local_request_failed", "Beacon could not complete that local request."),
@@ -3011,9 +3602,17 @@ mod tests {
     fn r42_desktop_projection_is_truthful() {
         let cases = desktop_cases();
 
-        assert_eq!(remote_rows().len(), 62, "R42S1.DESKTOP.CARDINALITY.REMOTE");
-        assert_eq!(local_rows().len(), 21, "R42S1.DESKTOP.CARDINALITY.LOCAL");
-        assert_eq!(cases.len(), 83, "R42S1.DESKTOP.CARDINALITY.CASES");
+        // Counted at THIS source, not carried forward: 63 + the eight completion codes, and 22 + the
+        // one completion-command carrier.
+        // Counted at THIS source: 71 + the nine classification codes, 23 + the one classification
+        // carrier, and their sum.
+        // Counted at THIS source: 80 + the four preparation codes, 24 + the two preparation carriers.
+        // 84 before C7, plus its two candidate-document codes.
+        assert_eq!(remote_rows().len(), 86, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        // 26 before C7, plus its `OutcomeCandidateDocument` carrier.
+        assert_eq!(local_rows().len(), 27, "R42S1.DESKTOP.CARDINALITY.LOCAL");
+        // 110 before C7: two new Remote codes and the new local carrier.
+        assert_eq!(cases.len(), 113, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");

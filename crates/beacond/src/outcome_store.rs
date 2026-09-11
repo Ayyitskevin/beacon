@@ -1654,6 +1654,71 @@ fn verify_one_manifest(
     workspace_id: Uuid,
     manifest_digest: &str,
 ) -> Result<(), ManifestStoreRefusal> {
+    verified_candidate_context_within(connection, workspace_id, manifest_digest).map(|_| ())
+}
+
+/// Unverified lookup keys used only to bound the new context read before owning values load.
+/// Every key is subsequently re-proved by the complete manifest owner and its referenced owners.
+pub(crate) enum CandidateContextReadPreflight {
+    Absent,
+    OverLimit,
+    Keys {
+        candidate_digest: String,
+        mission_id: Uuid,
+    },
+}
+
+pub(crate) fn candidate_context_read_preflight(
+    connection: &Connection,
+    workspace_id: Uuid,
+    manifest_digest: &str,
+) -> Result<CandidateContextReadPreflight, ManifestStoreRefusal> {
+    let lengths: Option<(i64, i64, i64)> = connection
+        .query_row(
+            "SELECT length(canonical_bytes), length(CAST(candidate_artifact_digest AS BLOB)),
+                length(CAST(mission_id AS BLOB))
+         FROM outcome_manifests WHERE workspace_id = ?1 AND manifest_digest = ?2",
+            params![workspace_id.to_string(), manifest_digest],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(store_error)?;
+    let Some((manifest_bytes, candidate_bytes, mission_bytes)) = lengths else {
+        return Ok(CandidateContextReadPreflight::Absent);
+    };
+    if manifest_bytes > MAX_STORED_MANIFEST_BYTES as i64
+        || candidate_bytes > 64
+        || mission_bytes > 36
+    {
+        return Ok(CandidateContextReadPreflight::OverLimit);
+    }
+    let (candidate_digest, mission_id): (String, String) = connection
+        .query_row(
+            "SELECT candidate_artifact_digest, mission_id FROM outcome_manifests
+         WHERE workspace_id = ?1 AND manifest_digest = ?2",
+            params![workspace_id.to_string(), manifest_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(store_error)?;
+    let mission_id =
+        Uuid::parse_str(&mission_id).map_err(|_| ManifestStoreRefusal::ColumnDisagrees {
+            column: "mission_id",
+        })?;
+    Ok(CandidateContextReadPreflight::Keys {
+        candidate_digest,
+        mission_id,
+    })
+}
+
+/// The complete manifest owner proof and its exact candidate, inside the caller's snapshot.
+///
+/// This is the same proof startup uses, including completion reconciliation and candidate scope
+/// and accountability. It neither collects the full frozen source packet nor grants authority.
+pub(crate) fn verified_candidate_context_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    manifest_digest: &str,
+) -> Result<(StoredOutcomeManifest, VerifiedArtifactRecord), ManifestStoreRefusal> {
     // The bytes first, through the same reader every caller uses: a row that cannot prove
     // itself is refused before anything is asked of the log about it.
     let stored = verified_manifest_within(connection, workspace_id, manifest_digest)?;
@@ -1733,7 +1798,7 @@ fn verify_one_manifest(
 
     // The CONTENT binding is not repeated here: `verified_manifest_within` above already made
     // it, on this exact row, and one rule with two implementations is two rules.
-    Ok(())
+    Ok((stored, candidate))
 }
 
 #[cfg(test)]

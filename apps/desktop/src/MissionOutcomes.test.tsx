@@ -676,3 +676,23 @@ it("ignores a history read that settles after the operator opened another Missio
     "N4.HISTORY.OLD_MISSION_CANNOT_WIN",
   ).toBeTruthy();
 });
+
+it("C6.MOUNT.PREPARATION_SITS_BESIDE_THE_PUBLISHED_HISTORY", async () => {
+  render(<MissionOutcomes missionId={missionId} />);
+
+  // The existing surface still loads and is still usable.
+  expect(await screen.findByRole("heading", { name: "Outcome Documents" }), "C6.MOUNT.HISTORY_IS_INTACT")
+    .toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Prepare Outcome candidate" }), "C6.MOUNT.PREPARATION_IS_PRESENT")
+    .toBeInTheDocument();
+  expect(
+    screen.getByText("Preparation status is not loaded."),
+    "C6.MOUNT.PREPARATION_RUNS_NOTHING_ON_MOUNT",
+  ).toBeInTheDocument();
+
+  // Mounting the panel added NO command to this screen's load.
+  expect(
+    invokeMock.mock.calls.filter(([command]) => command === "prepare_outcome_candidate"),
+    "C6.MOUNT.NO_NEW_INVOCATION_BEFORE_CLICK",
+  ).toHaveLength(0);
+});

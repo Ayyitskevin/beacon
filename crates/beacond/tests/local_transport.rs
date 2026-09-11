@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,17 +13,21 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
-    DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
+    AccessOrigin, AppendixRequestDto, AutonomyProfile, BeaconCapability, BudgetBoundary,
+    ClassificationIntentRequest, CompletionPreview, Conflicts, DeclaredCheck, DiscoveryStatus,
+    EvaluationDraft, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
+    Finding, FindingSeverity, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
     LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft,
-    MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
+    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
+    MissionCompletionCommandService, MissionDraft, MissionLifecycle, MissionMemberDraft,
+    ModelActivation, OperatorAccountService, OperatorSessionPhase, OutcomeService,
     PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
     ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+    ResidentConfigurationState, ResidentLifecycle, RubricDeclaration, SecretString,
+    StarterOrganizationDecision, StarterResidentDraft, StarterRole, SupersedesDto, TeamDraft,
+    TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind,
+    TrackRecordRequirement, Verdict, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1012,6 +1016,2848 @@ fn authenticated_client_forms_a_team_and_admits_a_mission_over_the_real_socket()
         LocalErrorCode::NotAuthenticated,
     );
     running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+/// The three completion commands over the REAL socket, with a record wide enough that the old
+/// 64 KiB frame could not have carried it.
+///
+/// This is the bar the ceiling exists for: every field, every citation and every narrative item
+/// survives the round trip, the reviewed token the Operator saw is the token the write is judged
+/// against, and the same token reads back afterwards. Sets are compared as SETS, because the owner
+/// sorts support and delivered Artifacts into its canonical order -- "unchanged" means nothing was
+/// dropped or truncated, not that the Operator's typing order is preserved.
+#[test]
+fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
+    let runtime = TestRuntime::new("completion");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    // Twenty declared conditions: the owner's cap, so the completion below is as wide as one can be.
+    let conditions: Vec<String> = (0..20)
+        .map(|index| format!("Declared condition {index} holds"))
+        .collect();
+    let admitted = client
+        .admit_mission(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: formed.id,
+            desired_outcome: "Ship one reviewed feature".to_owned(),
+            success_conditions: conditions.clone(),
+            constraints: vec!["Keep authority explicit".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![MissionMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+
+    let request = wide_completion_request(admitted.id, resident_id);
+    let sent_bytes = serde_json::to_vec(&request).unwrap().len();
+    assert!(
+        sent_bytes > 65_536,
+        "C4.WIDE.REQUEST_EXCEEDS_THE_OLD_FRAME: {sent_bytes} bytes"
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // PREMISE, before any transport claim: the OWNER and its codec accept this exact request.
+    //
+    // Without this the wide bar would prove only that something crossed a socket -- a refusal from
+    // the owner and a refusal from the transport would look alike. A second account service on the
+    // same store, authenticated the same way, calls `preview` directly.
+    // ---------------------------------------------------------------------------------------
+    let direct_accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    direct_accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let owner =
+        MissionCompletionCommandService::new(Arc::clone(&direct_accounts), project.workspace_id);
+    let direct_preview: CompletionPreview = owner
+        .preview(request.clone())
+        .expect("C4.PREMISE.OWNER_ACCEPTS_THE_WIDE_REQUEST");
+    assert_eq!(
+        direct_preview.intent_sha256.len(),
+        64,
+        "C4.PREMISE.OWNER_TOKEN_IS_HEX64"
+    );
+    assert_eq!(
+        owner.get_intent(admitted.id).unwrap(),
+        None,
+        "C4.PREMISE.PREVIEW_WROTE_NOTHING"
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // The PUBLIC boundary, in bytes. The envelope is assembled here rather than by the client, so
+    // this measures what a caller actually sends and what the supervisor actually answers.
+    //
+    // The auth token is read from its file and never printed: no assertion message, no failure dump
+    // and no log line below carries it.
+    // ---------------------------------------------------------------------------------------
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let request_bytes = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "preview_mission_completion",
+            "request": serde_json::to_value(&request).unwrap(),
+        },
+    }))
+    .unwrap();
+    assert!(
+        request_bytes.len() > 65_536,
+        "C4.RAW.REQUEST_IS_OVER_THE_OLD_FRAME: {} bytes",
+        request_bytes.len()
+    );
+    assert!(
+        request_bytes.len() <= 163_840,
+        "C4.RAW.REQUEST_IS_WITHIN_THE_COMPLETION_CEILING: {} bytes",
+        request_bytes.len()
+    );
+
+    let mut raw = UnixStream::connect(&runtime.socket).unwrap();
+    raw.write_all(&request_bytes)
+        .unwrap_or_else(|error| panic!("C4.RAW.SUPERVISOR_READS_THE_WIDE_BODY: write {error}"));
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    // Named, because a refused oversize body arrives here as a RESET rather than as a refusal
+    // envelope: an anonymous `unwrap` would report a ceiling regression as an I/O accident.
+    raw.read_to_end(&mut answer)
+        .unwrap_or_else(|error| panic!("C4.RAW.SUPERVISOR_READS_THE_WIDE_BODY: read {error}"));
+    assert!(
+        answer.len() > 65_536,
+        "C4.RAW.RESPONSE_IS_OVER_THE_OLD_FRAME: {} bytes",
+        answer.len()
+    );
+    assert!(
+        answer.len() <= 196_608,
+        "C4.RAW.RESPONSE_IS_WITHIN_THE_PREVIEW_CEILING: {} bytes",
+        answer.len()
+    );
+
+    // Parsed comparison, not a byte-order promise: JSON field order and whitespace are not a record
+    // identity, and asserting them would invent a contract nobody agreed. The expected object is the
+    // OWNER's own preview from the premise above -- so this compares what the transport delivered
+    // against what the owner produced, not against itself.
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered.get("error"),
+        Some(&serde_json::Value::Null),
+        "C4.RAW.NO_REFUSAL"
+    );
+    assert_eq!(
+        answered
+            .pointer("/result/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("mission_completion_preview"),
+        "C4.RAW.RESULT_KIND"
+    );
+    assert_eq!(
+        answered.pointer("/result/preview"),
+        Some(&serde_json::to_value(&direct_preview).unwrap()),
+        "C4.RAW.PREVIEW_EQUALS_THE_OWNERS_OWN_PREVIEW"
+    );
+
+    // And the literals themselves, in the delivered TEXT BYTES: a differential check alone would
+    // pass if both sides lost the same content.
+    let text = String::from_utf8(answer.clone()).unwrap();
+    for literal in [
+        &"s".repeat(500),
+        &"r".repeat(500),
+        &"n".repeat(500),
+        &"y".repeat(2_000),
+        &format!("{:064x}", 10_000u128),
+        // condition 19, slot 0: an Artifact citation, so this digest is in the record verbatim.
+        &format!("{:064x}", 19u128 * 100),
+        &admitted.id.to_string(),
+        &resident_id.to_string(),
+        &configuration.id.to_string(),
+        &project.workspace_id.to_string(),
+        &project.id.to_string(),
+        &direct_preview.intent_sha256,
+    ] {
+        assert!(
+            text.contains(literal.as_str()),
+            "C4.RAW.LITERAL_SURVIVES_THE_BOUNDARY: {} chars missing",
+            literal.chars().count()
+        );
+    }
+
+    let preview = client.preview_mission_completion(request.clone()).unwrap();
+    assert_eq!(preview, direct_preview, "C4.WIDE.CLIENT_AND_OWNER_AGREE");
+
+    // Bindings the client never sent and cannot forge.
+    assert_eq!(preview.actor, "operator", "C4.WIDE.ACTOR");
+    assert_eq!(preview.project_id, project.id, "C4.WIDE.PROJECT_BINDING");
+    assert_eq!(
+        preview.accountable_resident_configuration_id, configuration.id,
+        "C4.WIDE.HISTORICAL_CONFIGURATION"
+    );
+    assert_eq!(
+        preview.conditions, conditions,
+        "C4.WIDE.DECLARED_CONDITIONS"
+    );
+    assert_eq!(preview.intent_sha256.len(), 64, "C4.WIDE.TOKEN_IS_HEX64");
+
+    // Nothing dropped and nothing truncated. Scalar fields must be identical; the two SET fields are
+    // compared after sorting both sides, because the owner owns their order.
+    let echoed = &preview.request;
+    assert_eq!(echoed.mission_id, request.mission_id, "C4.WIDE.MISSION_ID");
+    assert_eq!(
+        echoed.accountable_resident_id, request.accountable_resident_id,
+        "C4.WIDE.ACCOUNTABLE_RESIDENT"
+    );
+    assert_eq!(
+        echoed.disposition, request.disposition,
+        "C4.WIDE.DISPOSITION"
+    );
+    assert_eq!(echoed.summary, request.summary, "C4.WIDE.SUMMARY");
+    assert_eq!(echoed.spend, request.spend, "C4.WIDE.SPEND");
+    assert_eq!(
+        echoed.unfinished_work, request.unfinished_work,
+        "C4.WIDE.UNFINISHED_WORK"
+    );
+    assert_eq!(
+        echoed.uncertainty, request.uncertainty,
+        "C4.WIDE.UNCERTAINTY"
+    );
+    assert_eq!(
+        echoed.condition_results.len(),
+        request.condition_results.len(),
+        "C4.WIDE.CONDITION_COUNT"
+    );
+    for (echoed_result, sent_result) in echoed
+        .condition_results
+        .iter()
+        .zip(request.condition_results.iter())
+    {
+        assert_eq!(
+            echoed_result.ordinal, sent_result.ordinal,
+            "C4.WIDE.ORDINAL"
+        );
+        assert_eq!(
+            echoed_result.outcome, sent_result.outcome,
+            "C4.WIDE.OUTCOME"
+        );
+        assert_eq!(echoed_result.note, sent_result.note, "C4.WIDE.NOTE");
+        assert_eq!(
+            echoed_result.support.len(),
+            sent_result.support.len(),
+            "C4.WIDE.SUPPORT_COUNT"
+        );
+        let mut echoed_support = format_support(&echoed_result.support);
+        let mut sent_support = format_support(&sent_result.support);
+        echoed_support.sort();
+        sent_support.sort();
+        assert_eq!(echoed_support, sent_support, "C4.WIDE.SUPPORT_SET");
+    }
+    let mut echoed_delivered = echoed.delivered_artifacts.clone();
+    let mut sent_delivered = request.delivered_artifacts.clone();
+    echoed_delivered.sort();
+    sent_delivered.sort();
+    assert_eq!(echoed_delivered, sent_delivered, "C4.WIDE.DELIVERED_SET");
+
+    // Nothing is recorded by a preview.
+    assert_eq!(
+        client.get_mission_completion_intent(admitted.id).unwrap(),
+        None,
+        "C4.WIDE.PREVIEW_WRITES_NOTHING"
+    );
+
+    // The REVIEWED token is what the write is judged against, and the frozen normalized request is
+    // what is sent.
+    let acknowledgement = client
+        .record_mission_completion(echoed.clone(), preview.intent_sha256.clone())
+        .unwrap_or_else(|error| {
+            // `Display` is the closed transport line; the request and the token never reach it.
+            panic!("C4.WIDE.RECORD_ACCEPTS_THE_REVIEWED_TOKEN: {error}")
+        });
+    assert_eq!(
+        acknowledgement.intent_sha256, preview.intent_sha256,
+        "C4.WIDE.ACKNOWLEDGEMENT_IS_THE_REVIEWED_TOKEN"
+    );
+    assert_eq!(
+        client
+            .get_mission_completion_intent(admitted.id)
+            .unwrap()
+            .map(|intent| intent.intent_sha256),
+        Some(preview.intent_sha256.clone()),
+        "C4.WIDE.READ_BACK_IS_THE_SAME_TOKEN"
+    );
+
+    // A second write does not overwrite, and says so by its own name.
+    assert_remote_code(
+        client.record_mission_completion(echoed.clone(), preview.intent_sha256.clone()),
+        LocalErrorCode::CompletionAlreadyRecorded,
+    );
+    // A stale reviewed token is refused as a changed intent, not as a malformed one.
+    assert_remote_code(
+        client.record_mission_completion(echoed.clone(), "0".repeat(64)),
+        LocalErrorCode::CompletionIntentChanged,
+    );
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+/// A stable, comparable spelling of one support reference, so a SET can be sorted without ordering
+/// the DTO itself.
+fn format_support(support: &[beacond::SupportRefDto]) -> Vec<String> {
+    support
+        .iter()
+        .map(|reference| match reference {
+            beacond::SupportRefDto::Artifact(digest) => format!("artifact:{digest}"),
+            beacond::SupportRefDto::Evaluation(digest) => format!("evaluation:{digest}"),
+            beacond::SupportRefDto::Ruling(digest) => format!("ruling:{digest}"),
+            beacond::SupportRefDto::Receipt {
+                run_id,
+                receipt_version,
+                receipt_bytes_sha256,
+            } => format!("receipt:{run_id}:{receipt_version}:{receipt_bytes_sha256}"),
+        })
+        .collect()
+}
+
+/// The widest completion this Mission can carry: every list at the owner's cap, every digest and run
+/// id UNIQUE (a repeated entry is a duplicate the owner refuses, not a wider record), and every text
+/// at its scalar bound.
+fn wide_completion_request(
+    mission_id: Uuid,
+    accountable_resident_id: Uuid,
+) -> beacond::CompletionIntentRequest {
+    let digest = |seed: u128| format!("{seed:064x}");
+    let condition_results = (0..20u32)
+        .map(|ordinal| beacond::ConditionResultDto {
+            ordinal,
+            outcome: "assessment_inconclusive".to_owned(),
+            support: (0..8u128)
+                .map(|slot| {
+                    let seed = u128::from(ordinal) * 100 + slot;
+                    match slot % 4 {
+                        0 => beacond::SupportRefDto::Artifact(digest(seed)),
+                        1 => beacond::SupportRefDto::Evaluation(digest(seed)),
+                        2 => beacond::SupportRefDto::Ruling(digest(seed)),
+                        _ => beacond::SupportRefDto::Receipt {
+                            run_id: Uuid::from_u128(seed + 1),
+                            receipt_version: u32::MAX,
+                            receipt_bytes_sha256: digest(seed + 2),
+                        },
+                    }
+                })
+                .collect(),
+            note: Some("n".repeat(500)),
+        })
+        .collect();
+    let narrative = |kind: &str| {
+        (0..32u32)
+            .map(|ordinal| beacond::NarrativeItemDto {
+                ordinal,
+                kind: kind.to_owned(),
+                condition_ordinal: Some(ordinal % 20),
+                summary: "s".repeat(500),
+            })
+            .collect::<Vec<_>>()
+    };
+    beacond::CompletionIntentRequest {
+        mission_id,
+        accountable_resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results,
+        delivered_artifacts: (0..32u128).map(|index| digest(index + 10_000)).collect(),
+        unfinished_work: narrative("blocked_dependency"),
+        uncertainty: narrative("outside_scope_of_checks"),
+        spend: beacond::SpendDto::NotMeasured("r".repeat(500)),
+        summary: "y".repeat(2_000),
+    }
+}
+
+/// The whole prepared Mission, end to end on a real store and socket, with every receipt field
+/// compared against separately retained owner records.
+///
+/// The fixture mints everything through the public services, in the order the owner requires: a
+/// published Policy, then the classification, then the completion — a classification AFTER the
+/// completion cannot be prepared, which is the sequencing the refusal bars below prove from the other
+/// side.
+#[test]
+fn a_prepared_candidate_receipt_equals_the_owners_own_records() {
+    let runtime = TestRuntime::new("c6live");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+
+    // Policy default on a HIGH-impact Mission: the request is `policy_default` and the resolved mode
+    // is `included`, which is exactly the pair that must not be conflated.
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C6T.PREPARE.THE_OWNER_ACCEPTS_THE_REQUEST: {error}"));
+
+    // The owner's own records, read independently of the transport on a second authenticated service.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), prepared_mission.workspace_id);
+    let stored = outcomes
+        .manifest(&receipt.manifest_digest.value)
+        .expect("C6T.PREPARE.THE_MANIFEST_IS_READABLE");
+    let record = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("C6T.PREPARE.THE_CANDIDATE_IS_READABLE");
+
+    assert_eq!(
+        receipt.mission_id, prepared_mission.mission_id,
+        "C6T.RECEIPT.MISSION_ID"
+    );
+    assert_eq!(
+        receipt.manifest_id,
+        stored.manifest_id(),
+        "C6T.RECEIPT.MANIFEST_ID_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            receipt.manifest_digest.algorithm.as_str(),
+            receipt.manifest_digest.canonicalizer.as_str(),
+            receipt.manifest_digest.value.as_str(),
+        ),
+        (
+            stored.digest().algorithm.as_str(),
+            stored.digest().canonicalizer.as_str(),
+            stored.digest().value.as_str(),
+        ),
+        "C6T.RECEIPT.MANIFEST_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            receipt.candidate_artifact_digest.algorithm.as_str(),
+            receipt.candidate_artifact_digest.canonicalizer.as_str(),
+            receipt.candidate_artifact_digest.value.as_str(),
+        ),
+        (
+            record.digest().algorithm.as_str(),
+            record.digest().canonicalizer.as_str(),
+            record.digest().value.as_str(),
+        ),
+        "C6T.RECEIPT.ARTIFACT_RECORD_DIGEST_IS_THE_OWNERS"
+    );
+    let payload = record.payload();
+    assert_eq!(
+        (
+            receipt.candidate_content_digest.algorithm.as_str(),
+            receipt.candidate_content_digest.canonicalizer.as_str(),
+            receipt.candidate_content_digest.value.as_str(),
+        ),
+        (
+            payload.content_digest.algorithm.as_str(),
+            payload.content_digest.canonicalizer.as_str(),
+            payload.content_digest.value.as_str(),
+        ),
+        "C6T.RECEIPT.CONTENT_DIGEST_IS_THE_OWNERS"
+    );
+    // The two digests are DIFFERENT things under DIFFERENT canonicalizers. A caller that verified the
+    // wrong one would be checking the record against content bytes, or the reverse.
+    assert_ne!(
+        receipt.candidate_artifact_digest.value, receipt.candidate_content_digest.value,
+        "C6T.RECEIPT.THE_RECORD_AND_CONTENT_DIGESTS_ARE_NOT_THE_SAME_VALUE"
+    );
+    assert_eq!(
+        receipt.candidate_artifact_digest.canonicalizer, "beacon.artifact.v1",
+        "C6T.RECEIPT.THE_RECORD_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.candidate_content_digest.canonicalizer, "beacon.raw.v1",
+        "C6T.RECEIPT.THE_CONTENT_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.manifest_digest.canonicalizer, "beacon.outcome.manifest.v2",
+        "C6T.RECEIPT.THE_MANIFEST_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.candidate_content_bytes, payload.content_bytes,
+        "C6T.RECEIPT.CONTENT_BYTES_ARE_THE_OWNERS"
+    );
+    assert_eq!(
+        receipt.media_type, payload.media_type,
+        "C6T.RECEIPT.MEDIA_TYPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        receipt.media_type, "text/markdown; charset=utf-8",
+        "C6T.RECEIPT.MEDIA_TYPE_IS_MARKDOWN"
+    );
+    assert!(
+        receipt.candidate_content_bytes > 0 && receipt.candidate_content_bytes <= 1_048_576,
+        "C6T.RECEIPT.CONTENT_BYTES_ARE_INSIDE_THE_OWNING_BOUND: {}",
+        receipt.candidate_content_bytes
+    );
+    assert_eq!(
+        serde_json::to_value(receipt.appendix_request).unwrap(),
+        serde_json::Value::from("policy_default"),
+        "C6T.RECEIPT.THE_APPENDIX_REQUEST_IS_WHAT_THE_MANIFEST_HOLDS"
+    );
+    assert_eq!(
+        serde_json::to_value(receipt.appendix_mode).unwrap(),
+        serde_json::Value::from("included"),
+        "C6T.RECEIPT.THE_MODE_IS_THE_MANIFESTS_OWN_RESOLUTION"
+    );
+
+    // The whole receipt, as a daemon response envelope, stays inside the existing 64 KiB domain.
+    let envelope_bytes = serde_json::to_vec(&serde_json::json!({
+        "protocol": 1,
+        "result": { "kind": "prepared_outcome_candidate", "candidate": receipt },
+        "error": null,
+    }))
+    .unwrap()
+    .len();
+    assert!(
+        envelope_bytes < 65_536,
+        "C6T.RECEIPT.THE_RESPONSE_STAYS_IN_THE_OLD_DOMAIN: {envelope_bytes} bytes"
+    );
+
+    // An explicit identical repeat returns the SAME identity and writes nothing: the Artifact's
+    // creation Event sequence is where a second write would show.
+    let first_event_seq = record.creation_event_seq();
+    let repeat = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C6T.REPEAT.AN_IDENTICAL_REQUEST_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        repeat, receipt,
+        "C6T.REPEAT.THE_SAME_REQUEST_RETURNS_THE_SAME_RECEIPT"
+    );
+    let after = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("the candidate is still readable");
+    assert_eq!(
+        after.creation_event_seq(),
+        first_event_seq,
+        "C6T.REPEAT.NO_SECOND_WRITE_AND_NO_SECOND_EVENT"
+    );
+
+    // An explicit `include` on the SAME Mission is a DIFFERENT manifest identity, even though this
+    // Mission is high-impact and both requests resolve to `included`: the request is inside the bytes.
+    let included = client
+        .prepare_outcome_candidate(prepared_mission.mission_id, AppendixRequestDto::Include)
+        .unwrap_or_else(|error| panic!("C6T.APPENDIX.AN_EXPLICIT_INCLUDE_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        serde_json::to_value(included.appendix_request).unwrap(),
+        serde_json::Value::from("include"),
+        "C6T.APPENDIX.THE_EXPLICIT_REQUEST_IS_REPORTED"
+    );
+    assert_eq!(
+        serde_json::to_value(included.appendix_mode).unwrap(),
+        serde_json::Value::from("included"),
+        "C6T.APPENDIX.BOTH_RESOLVE_TO_INCLUDED_HERE"
+    );
+    assert_ne!(
+        included.manifest_digest.value, receipt.manifest_digest.value,
+        "C6T.APPENDIX.THE_TWO_REQUESTS_ARE_DISTINCT_IDENTITIES"
+    );
+    assert_ne!(
+        included.manifest_id, receipt.manifest_id,
+        "C6T.APPENDIX.THE_TWO_REQUESTS_ARE_DISTINCT_IDENTITIES"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The three row counts this bar's no-write claim is actually ABOUT, read from the isolated store.
+///
+/// Read-only, and read from the STORE rather than from the receipt: a count derived from the reply
+/// would be the reply agreeing with itself. One Deferred read transaction, so the three counts are
+/// one consistent picture rather than three moments; and the connection is opened AND dropped inside
+/// this call, so no transaction of this test's is ever live across the command under test — holding
+/// one there would turn a measurement into interference.
+///
+/// `busy_timeout` follows the existing read pattern in this file (see the repository-revision read
+/// below); no sleep and no retry loop is invented here.
+fn domain_row_counts(store: &std::path::Path) -> (i64, i64, i64) {
+    let mut connection = rusqlite::Connection::open(store).expect("the isolated store opens");
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .expect("the read waits rather than failing fast");
+    let read = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+        .expect("one read transaction over the three tables");
+    let count = |table: &str| -> i64 {
+        read.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|error| panic!("counting {table}: {error}"))
+    };
+    let counts = (
+        count("outcome_manifests"),
+        count("artifacts"),
+        count("events"),
+    );
+    read.commit().expect("a read transaction commits");
+    counts
+}
+
+/// Re-preparing an ALREADY PUBLISHED candidate: the same identities come back, nothing is written
+/// again, and the publication that exists is untouched.
+///
+/// The published initial state is established through PUBLIC owner commands only —
+/// `EvaluationService::record` with an explicit test draft by an independent Resident, then
+/// `OutcomeService::publish` — which is the same shape the existing `outcome_closure` suite uses. No
+/// publication relation is planted, no Run or Receipt is invented, and nothing here claims a real
+/// evaluator or a model did any work: it is fixture data for the one scenario this bar is about.
+#[test]
+fn re_preparing_a_published_candidate_changes_nothing_that_is_published() {
+    let runtime = TestRuntime::new("c6repub");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let fixture = prepare_c6_fixture_with_reviewer(&client);
+
+    // 1. Prepare over the REAL socket.
+    let first = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLISHED.THE_FIRST_PREPARE_IS_ACCEPTED: {error}"));
+
+    // 2. Publish it, through public owner commands on a second authenticated service.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), fixture.workspace_id);
+    let record = outcomes
+        .candidate(&first.manifest_digest.value)
+        .expect("C6T.PUBLISHED.THE_CANDIDATE_IS_READABLE");
+    let evaluation = EvaluationService::new(Arc::clone(&accounts), fixture.workspace_id)
+        .record(EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(
+                first.candidate_artifact_digest.value.clone(),
+            ),
+            evaluator: Evaluator {
+                // An INDEPENDENT Resident: not the one accountable for the completion.
+                resident_id: fixture.reviewer_resident_id,
+                configuration_id: fixture.reviewer_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "outcome-document-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+            },
+            cited_runs: Vec::new(),
+            verdict: Verdict::Meets,
+            findings: vec![Finding {
+                severity: FindingSeverity::Note,
+                summary: "Read the exact Artifact bytes.".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "An independent Resident read the exact Artifact bytes.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        })
+        .expect("C6T.PUBLISHED.THE_EVALUATION_IS_RECORDED");
+    let published = outcomes
+        .publish(fixture.mission_id, record.digest(), evaluation.digest())
+        .expect("C6T.PUBLISHED.THE_CANDIDATE_IS_PUBLISHED");
+    let published_version = published.publication_version();
+    let published_count = published.publication_version_count();
+    let exported = outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("C6T.PUBLISHED.THE_EXPORT_IS_READABLE");
+    let published_bytes = exported.bytes().to_vec();
+    let creation_event_seq = record.creation_event_seq();
+    let summaries = client.mission_publications(fixture.mission_id).unwrap();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "C6T.PUBLISHED.THE_FIXTURE_HAS_EXACTLY_ONE_PUBLICATION"
+    );
+
+    // 3. Re-prepare the SAME request over the socket. Owner idempotence is the only repeat mechanism.
+    //    The store is counted immediately before and immediately after, and nothing else runs
+    //    between the two snapshots and the command.
+    let before_repeat = domain_row_counts(&runtime.store);
+    let repeat = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLISHED.THE_REPEAT_IS_ACCEPTED: {error}"));
+    let after_repeat = domain_row_counts(&runtime.store);
+
+    assert_eq!(
+        repeat, first,
+        "C6T.PUBLISHED.THE_REPEAT_RETURNS_THE_SAME_RECEIPT"
+    );
+    assert_eq!(
+        (
+            repeat.manifest_id,
+            repeat.manifest_digest.value.clone(),
+            repeat.candidate_artifact_digest.value.clone(),
+            repeat.candidate_content_digest.value.clone(),
+            repeat.candidate_content_bytes,
+        ),
+        (
+            first.manifest_id,
+            first.manifest_digest.value.clone(),
+            first.candidate_artifact_digest.value.clone(),
+            first.candidate_content_digest.value.clone(),
+            first.candidate_content_bytes,
+        ),
+        "C6T.PUBLISHED.EVERY_HELD_IDENTITY_IS_UNCHANGED"
+    );
+
+    // 4. Nothing was written again -- MEASURED, on the three tables the claim names. An unmoved
+    //    creation Event says the re-read returned the original Artifact; it cannot fail on a second
+    //    manifest row, a second Artifact row, or a new Event anywhere else, so it kept a promise it
+    //    was not making (non-author review, DC6T). Both facts are now asserted, each under the name
+    //    that is true of it.
+    assert_eq!(
+        after_repeat, before_repeat,
+        "C6T.PUBLISHED.NO_SECOND_MANIFEST_ARTIFACT_OR_EVENT_WRITE"
+    );
+    let after = outcomes
+        .candidate(&first.manifest_digest.value)
+        .expect("the candidate is still readable");
+    assert_eq!(
+        after.creation_event_seq(),
+        creation_event_seq,
+        "C6T.PUBLISHED.THE_ORIGINAL_ARTIFACT_CREATION_EVENT_IS_UNMOVED"
+    );
+
+    // 5. And the publication is exactly as it was: same version, same count, same bytes.
+    let still = outcomes
+        .get(fixture.mission_id)
+        .expect("C6T.PUBLISHED.THE_PUBLICATION_IS_STILL_READABLE");
+    assert_eq!(
+        (
+            still.publication_version(),
+            still.publication_version_count()
+        ),
+        (published_version, published_count),
+        "C6T.PUBLISHED.THE_PUBLICATION_VERSION_IS_UNCHANGED"
+    );
+    assert_eq!(
+        outcomes
+            .export_markdown(fixture.mission_id)
+            .expect("the export is still readable")
+            .bytes(),
+        published_bytes.as_slice(),
+        "C6T.PUBLISHED.THE_PUBLISHED_BYTES_ARE_UNCHANGED"
+    );
+    assert_eq!(
+        client.mission_publications(fixture.mission_id).unwrap(),
+        summaries,
+        "C6T.PUBLISHED.THE_PUBLICATION_HISTORY_IS_UNCHANGED"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The C6 fixture plus a SECOND, independent Resident, so an Evaluation can name an evaluator that is
+/// not the Resident accountable for the completion.
+///
+/// Public constructors only: `accept_starter_organization` with two drafts, `activate_resident`,
+/// `inspect_local_model`/`activate_local_model`, `configure_resident` — the same client methods the
+/// single-Resident fixture uses, called once more.
+fn prepare_c6_fixture_with_reviewer(client: &LocalSupervisorClient) -> PreparedC6Fixture {
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let residents = client
+        .accept_starter_organization(
+            1,
+            vec![
+                draft(StarterRole::Lead, Some("Northstar")),
+                draft(StarterRole::Reviewer, Some("Second Reader")),
+            ],
+        )
+        .unwrap()
+        .residents;
+    let lead = residents[0].id;
+    let reviewer = residents[1].id;
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configure = |resident_id: Uuid| {
+        client.activate_resident(resident_id, None).unwrap();
+        client
+            .configure_resident(
+                resident_id,
+                None,
+                activation.id,
+                vec![BeaconCapability::WorkCreateMission],
+            )
+            .unwrap()
+            .id
+    };
+    let lead_configuration = configure(lead);
+    let reviewer_configuration = configure(reviewer);
+
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            // Both Residents: a Mission's members must be the Team's, and the evaluator has to be on
+            // the Mission's admission roster for its configuration to be citable.
+            members: vec![
+                TeamMemberDraft {
+                    resident_id: lead,
+                    expected_configuration_id: lead_configuration,
+                },
+                TeamMemberDraft {
+                    resident_id: reviewer,
+                    expected_configuration_id: reviewer_configuration,
+                },
+            ],
+        })
+        .unwrap();
+    let fixture = PreparedC6Fixture {
+        workspace_id: project.workspace_id,
+        project_id: project.id,
+        charter_revision: project.charter.revision,
+        policy_revision: policy.revision,
+        team_id: formed.id,
+        resident_id: lead,
+        configuration_id: lead_configuration,
+        reviewer_resident_id: reviewer,
+        reviewer_configuration_id: reviewer_configuration,
+        mission_id: Uuid::nil(),
+    };
+    let mission_id = admit_another_mission(client, &fixture, "Ship one reviewed feature");
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_CLASSIFICATION_IS_RECORDED: {error}"));
+    complete_mission(client, &fixture, mission_id);
+    PreparedC6Fixture {
+        mission_id,
+        ..fixture
+    }
+}
+
+/// Preparing, and re-preparing, leaves the publication relation exactly as it was.
+///
+/// The reachable state here is "no publication", and that is what the bar proves: preparing a
+/// candidate twice adds nothing to the Mission's publication history. Publishing itself needs a real
+/// independent Evaluation, which is a later prerequisite outside this lane, so the already-PUBLISHED
+/// variant of this bar is reported NOT PROBED rather than faked with a planted relation.
+#[test]
+fn preparing_a_candidate_changes_no_publication_history() {
+    let runtime = TestRuntime::new("c6pub");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let fixture = prepare_c6_fixture(&client);
+
+    let before = client.mission_publications(fixture.mission_id).unwrap();
+    assert!(
+        before.is_empty(),
+        "C6T.PUBLICATION.THE_FIXTURE_HAS_NO_PUBLICATION"
+    );
+
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_FIRST_PREPARE_IS_ACCEPTED: {error}"));
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_REPEAT_IS_ACCEPTED: {error}"));
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::Include)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_OTHER_APPENDIX_IS_ACCEPTED: {error}"));
+
+    assert_eq!(
+        client.mission_publications(fixture.mission_id).unwrap(),
+        before,
+        "C6T.PUBLICATION.PREPARING_PUBLISHES_NOTHING"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The three sequencing refusals, each by its own name, and the opacity of a Mission this Workspace
+/// never admitted.
+#[test]
+fn the_preparation_sequencing_refusals_are_separately_named() {
+    let runtime = TestRuntime::new("c6seq");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let base = prepare_c6_fixture(&client);
+
+    // 1. A Mission with no completion at all.
+    let bare = admit_another_mission(&client, &base, "Ship a second reviewed feature");
+    assert_remote_code(
+        client.prepare_outcome_candidate(bare, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNotCompleted,
+    );
+
+    // 2. Completed, never classified.
+    let unclassified = admit_another_mission(&client, &base, "Ship a third reviewed feature");
+    complete_mission(&client, &base, unclassified);
+    assert_remote_code(
+        client.prepare_outcome_candidate(unclassified, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNotClassified,
+    );
+
+    // 3. Classified only AFTER the completion: the boundary cannot be rewritten, and another
+    // classification will not change it.
+    let late = admit_another_mission(&client, &base, "Ship a fourth reviewed feature");
+    complete_mission(&client, &base, late);
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: late,
+            impact: "high".to_owned(),
+            reason: "Classified after the completion was recorded.".to_owned(),
+            expected_policy_revision: Some(base.policy_revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| {
+            panic!("C6T.SEQUENCE.THE_LATE_CLASSIFICATION_IS_RECORDED: {error}")
+        });
+    assert_remote_code(
+        client.prepare_outcome_candidate(late, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNoClassificationAtCompletion,
+    );
+
+    // 4. A Mission this Workspace never admitted is opaque: it answers exactly as an absent one, and
+    // neither says whether it exists anywhere.
+    let unknown =
+        client.prepare_outcome_candidate(Uuid::new_v4(), AppendixRequestDto::PolicyDefault);
+    let foreign = client.prepare_outcome_candidate(Uuid::new_v4(), AppendixRequestDto::Include);
+    let line = |result: &Result<beacond::PreparedOutcomeCandidateDto, LocalTransportError>| {
+        result.as_ref().err().map(std::string::ToString::to_string)
+    };
+    assert_eq!(
+        line(&unknown),
+        line(&foreign),
+        "C6T.SCOPE.ABSENCE_AND_FOREIGN_ARE_BYTE_IDENTICAL"
+    );
+    assert_remote_code(unknown, LocalErrorCode::OutcomeNotCompleted);
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// What one C6 fixture holds: the Workspace and Project it minted, the Policy revision in force, the
+/// Resident and configuration every later Mission reuses, and one Mission already classified and
+/// completed in the order the owner requires.
+struct PreparedC6Fixture {
+    workspace_id: Uuid,
+    project_id: Uuid,
+    charter_revision: u32,
+    policy_revision: u32,
+    team_id: Uuid,
+    resident_id: Uuid,
+    configuration_id: Uuid,
+    /// A SECOND Resident, for a bar that needs an evaluator who is not the accountable Resident. The
+    /// single-Resident fixture fills these with the lead's own ids and no bar of its own uses them.
+    reviewer_resident_id: Uuid,
+    reviewer_configuration_id: Uuid,
+    mission_id: Uuid,
+}
+
+/// Everything through the PUBLIC services, in the owner's required order: Policy, then classification,
+/// then completion. No SQL planting anywhere in this path.
+fn prepare_c6_fixture(client: &LocalSupervisorClient) -> PreparedC6Fixture {
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    let fixture = PreparedC6Fixture {
+        workspace_id: project.workspace_id,
+        project_id: project.id,
+        charter_revision: project.charter.revision,
+        policy_revision: policy.revision,
+        team_id: formed.id,
+        resident_id,
+        configuration_id: configuration.id,
+        reviewer_resident_id: resident_id,
+        reviewer_configuration_id: configuration.id,
+        mission_id: Uuid::nil(),
+    };
+    let mission_id = admit_another_mission(client, &fixture, "Ship one reviewed feature");
+
+    // HIGH impact, so `policy_default` already resolves to `included` -- which is what makes the
+    // distinct-identity bar above meaningful.
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_CLASSIFICATION_IS_RECORDED: {error}"));
+    complete_mission(client, &fixture, mission_id);
+
+    PreparedC6Fixture {
+        mission_id,
+        ..fixture
+    }
+}
+
+fn admit_another_mission(
+    client: &LocalSupervisorClient,
+    fixture: &PreparedC6Fixture,
+    outcome: &str,
+) -> Uuid {
+    client
+        .admit_mission(MissionDraft {
+            project_id: fixture.project_id,
+            expected_charter_revision: fixture.charter_revision,
+            team_id: fixture.team_id,
+            desired_outcome: outcome.to_owned(),
+            success_conditions: vec!["Relevant gates pass".to_owned()],
+            constraints: vec![],
+            prohibitions: vec![],
+            members: if fixture.reviewer_resident_id == fixture.resident_id {
+                vec![MissionMemberDraft {
+                    resident_id: fixture.resident_id,
+                    expected_configuration_id: fixture.configuration_id,
+                }]
+            } else {
+                // The evaluator's configuration is keyed at THIS Mission's admission -- the store's
+                // own foreign key says so -- so an independent evaluator has to be admitted with it.
+                vec![
+                    MissionMemberDraft {
+                        resident_id: fixture.resident_id,
+                        expected_configuration_id: fixture.configuration_id,
+                    },
+                    MissionMemberDraft {
+                        resident_id: fixture.reviewer_resident_id,
+                        expected_configuration_id: fixture.reviewer_configuration_id,
+                    },
+                ]
+            },
+        })
+        .unwrap()
+        .id
+}
+
+/// Preview, then record with the token the preview returned: the C4 path, unchanged.
+fn complete_mission(client: &LocalSupervisorClient, fixture: &PreparedC6Fixture, mission_id: Uuid) {
+    let request = beacond::CompletionIntentRequest {
+        mission_id,
+        accountable_resident_id: fixture.resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results: vec![beacond::ConditionResultDto {
+            ordinal: 0,
+            outcome: "met".to_owned(),
+            support: Vec::new(),
+            note: None,
+        }],
+        delivered_artifacts: Vec::new(),
+        unfinished_work: Vec::new(),
+        uncertainty: Vec::new(),
+        spend: beacond::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+        summary: "Shipped it.".to_owned(),
+    };
+    let preview = client
+        .preview_mission_completion(request.clone())
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_COMPLETION_PREVIEWS: {error}"));
+    client
+        .record_mission_completion(preview.request.clone(), preview.intent_sha256)
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_COMPLETION_IS_RECORDED: {error}"));
+}
+
+/// C6's preparation command is KNOWN to the wire, for BOTH appendix choices, and answers with the
+/// account's own refusal.
+///
+/// The smallest real socket bar for this slice and the one that must be RED before any wiring exists:
+/// today `prepare_outcome_candidate` does not parse, so the supervisor answers `protocol_error` from
+/// its own `Json` refusal. "No such command" and "that command refused you" are different answers,
+/// and making that difference is exactly what the connection does.
+///
+/// Raw bytes rather than a client method, for the reason the C5 bar used them: at the moment this is
+/// written there is no client method to call, and a test that cannot compile cannot be RED by a named
+/// behaviour. Both closed appendix strings are exercised at the wire seam, because a route that
+/// accepts one spelling and not the other is half a route.
+#[test]
+fn the_preparation_command_is_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c6route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let mission_id = Uuid::new_v4();
+
+    for appendix_request in ["policy_default", "include"] {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": {
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission_id,
+                "appendix_request": appendix_request,
+            },
+        }))
+        .unwrap();
+
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+
+        assert_eq!(
+            answered
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("not_authenticated"),
+            "C6T.ROUTE.IS_A_KNOWN_COMMAND: {appendix_request}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C6T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT: {appendix_request}"
+        );
+    }
+
+    // An appendix value outside the closed pair is refused as a malformed envelope, not silently
+    // defaulted: there is no `omit`, no `default` and no third arm on this wire.
+    let widened = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "prepare_outcome_candidate",
+            "mission_id": mission_id,
+            "appendix_request": "omit",
+        },
+    }))
+    .unwrap();
+    let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+    stream.write_all(&widened).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("protocol_error"),
+        "C6T.ROUTE.THE_APPENDIX_CHOICE_IS_A_CLOSED_PAIR"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The document that crosses the socket IS the owner's stored bytes, and reading changes nothing.
+///
+/// The premise is established independently: a second authenticated `OutcomeService` on the same
+/// store reads the same manifest and candidate, and every one of the eight fields is compared against
+/// THAT, never against the reply's own other fields. The bytes are compared after a base64 decode --
+/// byte for byte, not by length or by digest, because a digest comparison would pass on two encodings
+/// of the same content and the point is that the encoding round trip is exact.
+#[test]
+fn the_candidate_document_crosses_the_socket_as_the_owners_exact_bytes() {
+    let runtime = TestRuntime::new("c7bytes");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.READ.THE_CANDIDATE_IS_PREPARED: {error}"));
+
+    // Counted BEFORE the read, on the settled store. The Artifact creation sequence alone would not
+    // prove a read writes nothing -- these counts bracket the read itself.
+    let before = domain_row_counts(&runtime.store);
+
+    let document = client
+        .read_outcome_candidate_document(&receipt.manifest_digest.value)
+        .unwrap_or_else(|error| panic!("C7T.READ.THE_OWNER_ANSWERS: {error}"));
+
+    let after = domain_row_counts(&runtime.store);
+    assert_eq!(
+        after, before,
+        "C7T.READ.A_READ_WRITES_NOTHING: manifests/artifacts/events moved"
+    );
+
+    // The owner's own records, read independently of the transport.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), prepared_mission.workspace_id);
+    let stored = outcomes
+        .manifest(&receipt.manifest_digest.value)
+        .expect("C7T.READ.THE_MANIFEST_IS_READABLE");
+    let record = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("C7T.READ.THE_CANDIDATE_IS_READABLE");
+    let payload = record.payload();
+
+    assert_eq!(
+        document.mission_id, prepared_mission.mission_id,
+        "C7T.DOCUMENT.MISSION_ID_IS_THE_FIXTURES"
+    );
+    assert_eq!(
+        document.manifest_id,
+        stored.manifest_id(),
+        "C7T.DOCUMENT.MANIFEST_ID_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.manifest_digest.algorithm.as_str(),
+            document.manifest_digest.canonicalizer.as_str(),
+            document.manifest_digest.value.as_str(),
+        ),
+        (
+            stored.digest().algorithm.as_str(),
+            stored.digest().canonicalizer.as_str(),
+            stored.digest().value.as_str(),
+        ),
+        "C7T.DOCUMENT.MANIFEST_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.candidate_artifact_digest.algorithm.as_str(),
+            document.candidate_artifact_digest.canonicalizer.as_str(),
+            document.candidate_artifact_digest.value.as_str(),
+        ),
+        (
+            record.digest().algorithm.as_str(),
+            record.digest().canonicalizer.as_str(),
+            record.digest().value.as_str(),
+        ),
+        "C7T.DOCUMENT.ARTIFACT_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            document.candidate_content_digest.algorithm.as_str(),
+            document.candidate_content_digest.canonicalizer.as_str(),
+            document.candidate_content_digest.value.as_str(),
+        ),
+        (
+            payload.content_digest.algorithm.as_str(),
+            payload.content_digest.canonicalizer.as_str(),
+            payload.content_digest.value.as_str(),
+        ),
+        "C7T.DOCUMENT.CONTENT_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    // TWO different envelopes over two different things. A DTO that filled both from one source
+    // would satisfy every equality above only if the owner's two digests happened to agree -- they do
+    // not, and this says so out loud.
+    assert_ne!(
+        document.candidate_artifact_digest.value, document.candidate_content_digest.value,
+        "C7T.DOCUMENT.THE_RECORD_AND_ITS_CONTENT_ARE_DIFFERENT_IDENTITIES"
+    );
+    assert_ne!(
+        document.candidate_artifact_digest.canonicalizer,
+        document.candidate_content_digest.canonicalizer,
+        "C7T.DOCUMENT.THE_TWO_DIGESTS_ARE_UNDER_DIFFERENT_CANONICALIZERS"
+    );
+    assert_eq!(
+        document.candidate_content_bytes, payload.content_bytes,
+        "C7T.DOCUMENT.CONTENT_BYTES_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        document.media_type, payload.media_type,
+        "C7T.DOCUMENT.MEDIA_TYPE_IS_THE_OWNERS"
+    );
+    // The receipt C6 handed the Operator and the document C7 answered with name the same records.
+    assert_eq!(
+        (
+            document.manifest_digest.value.as_str(),
+            document.candidate_artifact_digest.value.as_str(),
+            document.candidate_content_digest.value.as_str(),
+            document.candidate_content_bytes,
+        ),
+        (
+            receipt.manifest_digest.value.as_str(),
+            receipt.candidate_artifact_digest.value.as_str(),
+            receipt.candidate_content_digest.value.as_str(),
+            receipt.candidate_content_bytes,
+        ),
+        "C7T.DOCUMENT.THE_HELD_RECEIPT_AND_THE_DOCUMENT_AGREE"
+    );
+
+    // And the bytes themselves.
+    let decoded = data_encoding::BASE64
+        .decode(document.candidate_content_base64.as_bytes())
+        .unwrap_or_else(|error| panic!("C7T.DOCUMENT.THE_BODY_IS_CANONICAL_BASE64: {error}"));
+    assert_eq!(
+        decoded.as_slice(),
+        record.content(),
+        "C7T.DOCUMENT.THE_BYTES_ARE_THE_OWNERS_EXACTLY"
+    );
+    assert_eq!(
+        decoded.len() as u64,
+        document.candidate_content_bytes,
+        "C7T.DOCUMENT.THE_DECODED_LENGTH_IS_THE_DECLARED_COUNT"
+    );
+    assert!(
+        std::str::from_utf8(&decoded).is_ok(),
+        "C7T.DOCUMENT.THE_BYTES_ARE_TEXT"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The Command journey retains its completion and candidate across a real stop, reopen and sign-in.
+/// C6/C7 own the individual command and encoding cases; this bar owns their restart seam. All domain
+/// setup uses their public-Command fixture, including classification BEFORE completion. The local
+/// HTTP stub supplies model metadata only; there is no model invocation or live provider activation.
+#[test]
+fn the_command_journey_retains_completion_and_candidate_bytes_across_server_restart() {
+    // Keep both servers joined even when a retention assertion panics. serve_until polls a
+    // nonblocking listener, so setting its flag is sufficient; this guard adds no sleep or wake peer.
+    struct ServerSession {
+        running: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<Result<(), LocalTransportError>>>,
+    }
+
+    impl ServerSession {
+        fn start(server: LocalSupervisorServer) -> Self {
+            let running = Arc::new(AtomicBool::new(true));
+            let server_running = Arc::clone(&running);
+            Self {
+                running,
+                thread: Some(thread::spawn(move || server.serve_until(server_running))),
+            }
+        }
+
+        fn stop(&mut self) {
+            self.running.store(false, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread
+                    .join()
+                    .expect("B14.JOURNEY.SERVER_THREAD_JOINS")
+                    .expect("B14.JOURNEY.SERVER_STOPS_CLEANLY");
+            }
+        }
+    }
+
+    impl Drop for ServerSession {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                // Cleanup must not replace the first assertion failure with a second panic.
+                let _ = thread.join();
+            }
+        }
+    }
+
+    let runtime = TestRuntime::new("b14journey");
+    let address = serve_ollama_inspections(2);
+    let bind_server = |phase| {
+        LocalSupervisorServer::bind(LocalServerConfig {
+            store_path: runtime.store.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: runtime.socket.clone(),
+            auth_token_path: runtime.token.clone(),
+            lock_path: runtime.lock.clone(),
+            local_model_endpoint: LocalModelEndpoint::new(address)
+                .expect("B14.JOURNEY.METADATA_ENDPOINT_IS_LOCAL"),
+        })
+        .unwrap_or_else(|error| panic!("B14.JOURNEY.SERVER_BINDS: {phase}: {error}"))
+    };
+    let mut original_server = ServerSession::start(bind_server("original"));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
+        .expect("B14.JOURNEY.ORIGINAL_CLIENT_CONNECTS");
+    let fixture = prepare_c6_fixture(&client);
+    let completion_before = client
+        .mission_completion(fixture.mission_id)
+        .expect("B14.JOURNEY.COMPLETION_READS_BEFORE_RESTART")
+        .expect("B14.JOURNEY.COMPLETION_EXISTS_BEFORE_RESTART");
+    let intent_before = client
+        .get_mission_completion_intent(fixture.mission_id)
+        .expect("B14.JOURNEY.INTENT_READS_BEFORE_RESTART")
+        .expect("B14.JOURNEY.INTENT_EXISTS_BEFORE_RESTART");
+    let receipt_before = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .expect("B14.JOURNEY.CANDIDATE_PREPARES_BEFORE_RESTART");
+    let document_before = client
+        .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+        .expect("B14.JOURNEY.DOCUMENT_READS_BEFORE_RESTART");
+
+    // Independent immutable records, not expectations reconstructed from transport fields. The
+    // public completion view is deliberately partial, so its owner's verified reader supplies the
+    // whole completion. This read-only connection executes no test SQL and plants no domain state.
+    // Each call drops its services/connections, leaving only owned values across the server stop.
+    let read_owner_records = |phase| {
+        let accounts = Arc::new(
+            OperatorAccountService::open(&runtime.store).expect("B14.JOURNEY.OWNER_STORE_OPENS"),
+        );
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("B14.JOURNEY.OWNER_AUTHENTICATES");
+        let outcomes = OutcomeService::new(accounts, fixture.workspace_id);
+        let manifest = outcomes
+            .manifest(&receipt_before.manifest_digest.value)
+            .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_MANIFEST_READS: {phase}: {error}"));
+        let candidate = outcomes
+            .candidate(&receipt_before.manifest_digest.value)
+            .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_CANDIDATE_READS: {phase}: {error}"));
+        let connection = rusqlite::Connection::open_with_flags(
+            &runtime.store,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("B14.JOURNEY.COMPLETION_READER_OPENS_READ_ONLY");
+        let completion = beacond::verified_completion_within(
+            &connection,
+            fixture.workspace_id,
+            &manifest.manifest().completion.digest.value,
+        )
+        .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_COMPLETION_READS: {phase}: {error}"));
+        (manifest, candidate, completion)
+    };
+    let (manifest_before, candidate_before, full_completion_before) =
+        read_owner_records("before restart");
+    let bytes_before = data_encoding::BASE64
+        .decode(document_before.candidate_content_base64.as_bytes())
+        .expect("B14.JOURNEY.DOCUMENT_DECODES_BEFORE_RESTART");
+    assert_eq!(
+        bytes_before.as_slice(),
+        candidate_before.content(),
+        "B14.JOURNEY.INITIAL_DOCUMENT_IS_THE_OWNERS_BYTES"
+    );
+
+    drop(client);
+    original_server.stop();
+    assert!(
+        !runtime.socket.exists(),
+        "B14.JOURNEY.ORIGINAL_SERVER_RELEASES_ITS_SOCKET"
+    );
+    let mut reopened_server = ServerSession::start(bind_server("reopened same store"));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
+        .expect("B14.JOURNEY.REOPENED_CLIENT_CONNECTS");
+    assert_eq!(
+        client
+            .status()
+            .expect("B14.JOURNEY.REOPENED_STATUS_READS")
+            .phase,
+        OperatorSessionPhase::Locked,
+        "B14.JOURNEY.REOPENED_SESSION_REQUIRES_SIGN_IN"
+    );
+    let locked_read = client.mission_completion(fixture.mission_id);
+    assert!(
+        matches!(
+            locked_read,
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            })
+        ),
+        "B14.JOURNEY.REOPENED_COMPLETION_REQUIRES_SIGN_IN: {locked_read:?}"
+    );
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("B14.JOURNEY.REOPENED_SESSION_AUTHENTICATES");
+
+    // Read the held records BEFORE repeating prepare; a repeat must not repair lost retention.
+    assert_eq!(
+        client
+            .mission_completion(fixture.mission_id)
+            .expect("B14.JOURNEY.COMPLETION_READS_AFTER_RESTART"),
+        Some(completion_before),
+        "B14.JOURNEY.COMPLETION_VIEW_SURVIVES_RESTART"
+    );
+    assert_eq!(
+        client
+            .get_mission_completion_intent(fixture.mission_id)
+            .expect("B14.JOURNEY.INTENT_READS_AFTER_RESTART"),
+        Some(intent_before),
+        "B14.JOURNEY.REVIEWED_INTENT_SURVIVES_RESTART"
+    );
+    let document_after = client
+        .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+        .expect("B14.JOURNEY.HELD_DOCUMENT_READS_BEFORE_REPEAT");
+    assert_eq!(
+        document_after, document_before,
+        "B14.JOURNEY.FULL_DOCUMENT_AND_BYTES_SURVIVE_RESTART"
+    );
+    let (manifest_after, candidate_after, full_completion_after) =
+        read_owner_records("after restart before repeat");
+    assert_eq!(
+        full_completion_after, full_completion_before,
+        "B14.JOURNEY.FULL_COMPLETION_RECORD_SURVIVES_RESTART"
+    );
+    assert_eq!(
+        manifest_after, manifest_before,
+        "B14.JOURNEY.FULL_MANIFEST_AND_CANONICAL_BYTES_SURVIVE_RESTART"
+    );
+    assert_eq!(
+        candidate_after, candidate_before,
+        "B14.JOURNEY.FULL_CANDIDATE_AND_CREATION_EVENT_SURVIVE_RESTART"
+    );
+
+    let receipt_after = client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .expect("B14.JOURNEY.REPEAT_PREPARE_ACCEPTED_AFTER_RESTART");
+    assert_eq!(
+        receipt_after, receipt_before,
+        "B14.JOURNEY.REPEAT_PREPARE_RETURNS_THE_SAME_IDENTITY"
+    );
+    assert_eq!(
+        client
+            .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
+            .expect("B14.JOURNEY.HELD_DOCUMENT_READS_AFTER_REPEAT"),
+        document_before,
+        "B14.JOURNEY.REPEAT_PREPARE_PRESERVES_FULL_DOCUMENT_AND_BYTES"
+    );
+    assert_eq!(
+        read_owner_records("after repeat"),
+        (manifest_before, candidate_before, full_completion_before),
+        "B14.JOURNEY.REPEAT_PREPARE_PRESERVES_FULL_OWNER_RECORDS"
+    );
+    // The same receipt/document is public observational idempotence. The owner equality also
+    // retains the Artifact creation event; neither proves that no unrelated row or Event was written.
+    reopened_server.stop();
+}
+
+/// A foreign Workspace's REAL manifest and a digest that never existed answer with the same bytes.
+///
+/// Compared as whole serialized replies, not as enum arms, because the disclosure this bar exists to
+/// prevent is a difference a caller can SEE. The owner returns two distinct refusals for these two
+/// cases (`verified_manifest_within` selects on the digest alone and only then compares the stored
+/// Workspace), so the sameness is the transport's doing and has to be witnessed at the wire.
+///
+/// THE ONE FIXTURE WRITE NO PUBLIC OWNER CAN PRODUCE, and why it is unavoidable: this store bootstraps
+/// exactly ONE Workspace, and the supervisor binds to it, so no sequence of public commands can put a
+/// second Workspace's manifest in it. The manifest below is minted by the real owner through public
+/// commands and remains in its original Workspace. The fixture inserts one second Workspace row so
+/// the next supervisor bootstrap binds to that Workspace instead. The canonical records are untouched;
+/// only the asking Workspace changes. The happy path is the separate bar above.
+#[test]
+fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
+    let runtime = TestRuntime::new("c7opaque");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_CANDIDATE_IS_PREPARED: {error}"));
+    let real_digest = receipt.manifest_digest.value.clone();
+
+    // It reads as this Workspace's own first; the second Workspace below changes who is asking.
+    client
+        .read_outcome_candidate_document(&real_digest)
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_MANIFEST_IS_OURS_FIRST: {error}"));
+
+    // Stop the first supervisor before touching the store.
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+
+    // The second Workspace, inserted the way every multi-Workspace fixture in this crate inserts one
+    // (`sample_project.rs:3159-3166` records why: `Supervisor::bootstrap` is the ONLY site that
+    // creates a Workspace, and only when the store has none). Its `created_at_ms` is 0 so the next
+    // bootstrap's `ORDER BY created_at_ms, id LIMIT 1` (`lib.rs:1730-1740`) binds to IT.
+    //
+    // NOTHING canonical is fabricated: the manifest, its Artifact and its whole Mission chain are the
+    // real ones the owner minted above, and they keep belonging to the first Workspace. What changes
+    // is only WHO is asking.
+    let elsewhere = Uuid::new_v4();
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Second', 0)",
+            rusqlite::params![elsewhere.to_string()],
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_SECOND_WORKSPACE_INSERTS: {error}"));
+    drop(connection);
+
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_SESSION_REOPENS: {error}"));
+
+    // Raw bytes on both sides: the comparison is of what the caller receives, not of what it parses.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let ask = |digest: &str| -> Vec<u8> {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": {
+                "name": "read_outcome_candidate_document",
+                "manifest_digest": digest,
+            },
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        answer
+    };
+
+    // The control that makes this a CROSS-WORKSPACE bar rather than a second absence bar: the row is
+    // STILL THERE, under the first Workspace, while the service now asking is the second. Without
+    // this the two replies could be identical simply because both manifests were gone.
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    let owner: String = connection
+        .query_row(
+            "SELECT workspace_id FROM outcome_manifests WHERE manifest_digest = ?1",
+            rusqlite::params![real_digest],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|error| {
+            panic!("C7T.OPACITY.THE_REAL_MANIFEST_ROW_IS_STILL_PRESENT: {error}")
+        });
+    drop(connection);
+    assert_eq!(
+        owner,
+        prepared_mission.workspace_id.to_string(),
+        "C7T.OPACITY.THE_REAL_MANIFEST_STILL_BELONGS_TO_THE_FIRST_WORKSPACE"
+    );
+    assert_ne!(
+        owner,
+        elsewhere.to_string(),
+        "C7T.OPACITY.THE_ASKING_WORKSPACE_IS_NOT_THE_OWNING_ONE"
+    );
+
+    let foreign = ask(&real_digest);
+    let never_existed = ask("00000000000000000000000000000000000000000000000000000000000000ab");
+    assert_eq!(
+        String::from_utf8_lossy(&foreign),
+        String::from_utf8_lossy(&never_existed),
+        "C7T.OPACITY.A_FOREIGN_MANIFEST_AND_AN_ABSENT_ONE_ARE_ONE_ANSWER"
+    );
+    let answered: serde_json::Value = serde_json::from_slice(&foreign).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_not_found"),
+        "C7T.OPACITY.THE_SHARED_ANSWER_IS_NOT_FOUND"
+    );
+    // And the answer names nothing the caller did not send.
+    let text = String::from_utf8_lossy(&foreign);
+    for leaked in [
+        elsewhere.to_string(),
+        prepared_mission.mission_id.to_string(),
+        prepared_mission.project_id.to_string(),
+        prepared_mission.workspace_id.to_string(),
+        real_digest.clone(),
+    ] {
+        assert!(
+            !text.contains(&leaked),
+            "C7T.OPACITY.THE_REFUSAL_NAMES_NOTHING_ELSE: {leaked}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// A candidate Artifact that has gone missing is `unavailable`, never absence -- and the stage the
+/// fault ACTUALLY arises at, measured rather than assumed.
+///
+/// This bar first claimed the fault was `candidate()`'s `Artifact(NotFound)` at the second read. It is
+/// not, and root's narrowing is what exposed it: calling the owner's own verifier after the deletion
+/// returns `ManifestStoreRefusal::CandidateNotAccounted`, so the manifest **stops verifying at the
+/// FIRST read**. A manifest's candidate Artifact IS its accounting -- there is no `outcome.prepared`
+/// Event, so the Artifact is the manifest's position in the log (R18.7,
+/// `outcome_store.rs:146-152`) -- and removing it makes the manifest unaccounted, not merely
+/// candidate-less.
+///
+/// **Consequence, stated rather than papered over:** a genuine stage-2 `Artifact(NotFound)` is
+/// structurally unreachable while the manifest verifies, because the state it needs -- a verifying
+/// manifest whose Artifact is absent -- is the state the owner refuses to call verified. The stage-2
+/// vocabulary is therefore witnessed by the labelled mapper bar
+/// `the_candidate_read_stages_map_to_their_own_answers`, and reported NOT PROBED live with this
+/// reason.
+///
+/// The same accounting is why a live non-UTF-8 candidate is unreachable too: `candidate_proves_manifest`
+/// decodes the content and returns false when it is not UTF-8 (`outcome_store.rs:529-537`), and
+/// `verified_manifest_within` calls it -- so such a store fails the FIRST read as well. The
+/// transport's own decode check is defensive, and no bar here claims to have reached it.
+///
+/// What this bar DOES prove, and it is the behaviour that matters to a caller: a first-read refusal
+/// that is not `Absent`/`CrossWorkspace` answers `outcome_candidate_unavailable` and never
+/// `outcome_candidate_not_found`, so a broken record is never reported as an absent one.
+///
+/// THE CORRUPTION FIXTURE, labelled and bounded. The candidate is minted by the real owner through
+/// public commands first; only then is one row removed. `artifacts` carries an unconditional
+/// `BEFORE DELETE` trigger that aborts with "Artifacts are immutable"
+/// (`migrations/0027_artifacts.sql:186-190`) -- the product's anti-tamper guard, and it refused this
+/// delete when it was first attempted. The fixture therefore DROPS that one trigger, deletes the one
+/// row, and RECREATES the trigger verbatim, asserting each step. Nothing in production changes, no
+/// failpoint is added, and the owner happy path above is untouched: this store is already corrupt by
+/// the time the read runs, which is the whole point.
+#[test]
+fn a_missing_candidate_artifact_is_unavailable_and_never_absence() {
+    let runtime = TestRuntime::new("c7broken");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_CANDIDATE_IS_PREPARED: {error}"));
+
+    // It reads as a real document FIRST, so what changes the answer below is the missing row and
+    // nothing else.
+    client
+        .read_outcome_candidate_document(&receipt.manifest_digest.value)
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_DOCUMENT_READS_FIRST: {error}"));
+    let before = domain_row_counts(&runtime.store);
+
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    // The guard refuses this delete while it stands -- asserted, not assumed, so the fixture cannot
+    // quietly stop needing the drop.
+    let guarded = connection.execute(
+        "DELETE FROM artifacts WHERE digest_value = ?1",
+        rusqlite::params![receipt.candidate_artifact_digest.value],
+    );
+    assert!(
+        guarded
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("Artifacts are immutable")),
+        "C7T.BROKEN.THE_STORES_OWN_GUARD_REFUSES_FIRST: {guarded:?}"
+    );
+    connection
+        .execute_batch("DROP TRIGGER artifacts_no_delete")
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_FIXTURE_DROPS_ONE_TRIGGER: {error}"));
+    // The manifest's own foreign key to its candidate Artifact refuses the delete as well -- which is
+    // the point of the state being built: a manifest cannot legally exist without its candidate. The
+    // pragma is per-CONNECTION and belongs to this fixture connection alone; no product code and no
+    // other connection is affected.
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap_or_else(|error| {
+            panic!("C7T.BROKEN.THE_FIXTURE_SUSPENDS_ITS_OWN_FK_CHECK: {error}")
+        });
+    let removed = connection
+        .execute(
+            "DELETE FROM artifacts WHERE digest_value = ?1",
+            rusqlite::params![receipt.candidate_artifact_digest.value],
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_ARTIFACT_IS_REMOVED: {error}"));
+    assert_eq!(removed, 1, "C7T.BROKEN.EXACTLY_ONE_ARTIFACT_REMOVED");
+    // Put the product's guard back, verbatim from `0027_artifacts.sql:186-190`.
+    connection
+        .execute_batch(
+            "CREATE TRIGGER artifacts_no_delete
+             BEFORE DELETE ON artifacts
+             BEGIN
+                 SELECT RAISE(ABORT, 'Artifacts are immutable');
+             END;",
+        )
+        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_GUARD_IS_RESTORED: {error}"));
+    drop(connection);
+
+    // WHICH STAGE, measured through the owner's own verifier -- the same `verified_manifest_within`
+    // that `OutcomeService::manifest` calls. A row count is presence, not verification.
+    let verifying = rusqlite::Connection::open(&runtime.store).unwrap();
+    let refusal = beacond::verified_manifest_within(
+        &verifying,
+        prepared_mission.workspace_id,
+        &receipt.manifest_digest.value,
+    )
+    .expect_err("C7T.BROKEN.THE_MANIFEST_NO_LONGER_VERIFIES");
+    drop(verifying);
+    assert!(
+        matches!(
+            refusal,
+            beacond::ManifestStoreRefusal::CandidateNotAccounted { .. }
+        ),
+        "C7T.BROKEN.THE_FAULT_IS_THE_UNACCOUNTED_CANDIDATE_AT_THE_FIRST_READ: {refusal:?}"
+    );
+    // And it is emphatically NOT the absence vocabulary, which is why the wire answer below is
+    // unavailable rather than not-found.
+    assert!(
+        !matches!(
+            refusal,
+            beacond::ManifestStoreRefusal::Absent | beacond::ManifestStoreRefusal::CrossWorkspace
+        ),
+        "C7T.BROKEN.A_BROKEN_RECORD_IS_NOT_AN_ABSENT_ONE: {refusal:?}"
+    );
+
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let body = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": receipt.manifest_digest.value,
+        },
+    }))
+    .unwrap();
+    let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+    stream.write_all(&body).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_unavailable"),
+        "C7T.BROKEN.A_MISSING_CANDIDATE_IS_UNAVAILABLE_NOT_ABSENT"
+    );
+    assert_eq!(
+        answered.get("result"),
+        Some(&serde_json::Value::Null),
+        "C7T.BROKEN.NO_DOCUMENT_IS_RETURNED"
+    );
+    // The manifest is still there and still readable as a manifest: this is NOT an absent manifest
+    // dressed up as a broken candidate.
+    let still_there = rusqlite::Connection::open(&runtime.store).unwrap();
+    let manifests: i64 = still_there
+        .query_row(
+            "SELECT count(*) FROM outcome_manifests WHERE manifest_digest = ?1",
+            rusqlite::params![receipt.manifest_digest.value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(still_there);
+    assert_eq!(manifests, 1, "C7T.BROKEN.THE_MANIFEST_ROW_IS_STILL_PRESENT");
+    // And the refused read wrote nothing of its own: only the fixture's one deletion moved.
+    let after = domain_row_counts(&runtime.store);
+    assert_eq!(
+        after,
+        (before.0, before.1 - 1, before.2),
+        "C7T.BROKEN.THE_REFUSAL_WRITES_NOTHING"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The request is exactly one required field, and what a MALFORMED digest actually answers.
+///
+/// Stated as observed, not as designed: `verified_manifest_within` does no upfront hex validation
+/// (`outcome_store.rs:554-581` selects on the string it was given), so a digest that could never be a
+/// digest finds no row and returns the owner's real `Absent` -- which this transport answers as
+/// `outcome_candidate_not_found`. That is the current behaviour and this bar pins it.
+///
+/// A TINY CONTRACT ISSUE, flagged rather than closed here: the brief asks for an "invalid digest
+/// domain" to be refused before a document can return, and today it is refused by finding nothing
+/// rather than by a domain check. The observable outcome is the same opaque not-found, and adding a
+/// length/alphabet guard would introduce a NEW outward answer (`protocol_error`) for input the owner
+/// currently treats as a miss -- a contract change, not an implementation detail. Not taken
+/// unilaterally.
+#[test]
+fn the_candidate_read_request_is_one_required_field() {
+    let runtime = TestRuntime::new("c7request");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C7T.REQUEST.THE_CANDIDATE_IS_PREPARED: {error}"));
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let ask = |command: serde_json::Value| -> serde_json::Value {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": command,
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).unwrap()
+    };
+    let code_of = |answer: &serde_json::Value| -> Option<String> {
+        answer
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+
+    // An authenticated session: the reply carries all eight keys and nothing else.
+    let answered = ask(json!({
+        "name": "read_outcome_candidate_document",
+        "manifest_digest": receipt.manifest_digest.value,
+    }));
+    assert_eq!(
+        answered
+            .pointer("/result/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("outcome_candidate_document"),
+        "C7T.REQUEST.THE_RESULT_NAMES_ITS_OWN_KIND"
+    );
+    let document = answered
+        .pointer("/result/document")
+        .unwrap_or_else(|| panic!("C7T.REQUEST.THE_RESULT_CARRIES_A_DOCUMENT"));
+    let mut keys = document
+        .as_object()
+        .expect("the document is an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "candidateArtifactDigest".to_owned(),
+            "candidateContentBase64".to_owned(),
+            "candidateContentBytes".to_owned(),
+            "candidateContentDigest".to_owned(),
+            "manifestDigest".to_owned(),
+            "manifestId".to_owned(),
+            "mediaType".to_owned(),
+            "missionId".to_owned(),
+        ],
+        "C7T.REQUEST.EXACTLY_EIGHT_CAMELCASE_KEYS"
+    );
+    for (field, canonicalizer) in [
+        ("manifestDigest", "beacon.outcome.manifest.v2"),
+        ("candidateArtifactDigest", "beacon.artifact.v1"),
+        ("candidateContentDigest", "beacon.raw.v1"),
+    ] {
+        let envelope = document.get(field).unwrap();
+        let mut envelope_keys = envelope
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        envelope_keys.sort();
+        assert_eq!(
+            envelope_keys,
+            vec![
+                "algorithm".to_owned(),
+                "canonicalizer".to_owned(),
+                "value".to_owned()
+            ],
+            "C7T.REQUEST.THE_DIGEST_ENVELOPE_IS_WHOLE: {field}"
+        );
+        assert_eq!(
+            envelope
+                .get("algorithm")
+                .and_then(serde_json::Value::as_str),
+            Some("sha256"),
+            "C7T.REQUEST.THE_ALGORITHM_IS_NAMED: {field}"
+        );
+        assert_eq!(
+            envelope
+                .get("canonicalizer")
+                .and_then(serde_json::Value::as_str),
+            Some(canonicalizer),
+            "C7T.REQUEST.THE_CANONICALIZER_IS_ITS_OWN: {field}"
+        );
+        let value = envelope
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(
+            value.len() == 64
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "C7T.REQUEST.THE_VALUE_IS_LOWER_HEX_64: {field}"
+        );
+    }
+    assert_eq!(
+        document
+            .get("mediaType")
+            .and_then(serde_json::Value::as_str),
+        Some("text/markdown; charset=utf-8"),
+        "C7T.REQUEST.THE_MEDIA_TYPE_IS_FIXED"
+    );
+
+    // A MALFORMED digest: the observed answer, which is the opaque not-found the owner's miss
+    // produces. See the tiny contract issue in this test's own documentation.
+    for malformed in [
+        "not-a-digest",
+        "",
+        "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+        "zz00000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        let answered = ask(json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": malformed,
+        }));
+        assert_eq!(
+            code_of(&answered).as_deref(),
+            Some("outcome_candidate_not_found"),
+            "C7T.REQUEST.A_MALFORMED_DIGEST_IS_THE_SAME_OPAQUE_MISS: {malformed:?}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C7T.REQUEST.A_MALFORMED_DIGEST_RETURNS_NO_DOCUMENT: {malformed:?}"
+        );
+    }
+
+    // A wrong TYPE is a malformed envelope, not a miss: the field is a string.
+    for wrong in [json!(7), json!(null), json!(["a"])] {
+        let answered = ask(json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": wrong,
+        }));
+        assert_eq!(
+            code_of(&answered).as_deref(),
+            Some("protocol_error"),
+            "C7T.REQUEST.THE_DIGEST_IS_A_STRING: {wrong}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// A document response may cross the socket larger than the default frame -- and its ceiling is still
+/// finite.
+///
+/// The response ceiling is a CLIENT-side bound (`response_max` is read in `send_within` before the
+/// reply is taken), so this bar uses a CONTROLLED LOCAL PEER rather than the supervisor: what is under
+/// test is which frame the client accepts for which command, not how a document is produced. The peer
+/// is a plain `UnixListener` replying with bytes this test wrote.
+///
+/// Two sides of the same ceiling, because one side alone would pass with no ceiling at all:
+/// a reply well past the 64 KiB default is ACCEPTED, and a reply past
+/// `MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES` is REFUSED.
+///
+/// What this bar deliberately does NOT claim: that an old command's refusal of the same bytes isolates
+/// the frame. The client answers `Protocol` both for an over-frame reply and for a reply whose result
+/// arm is simply the wrong one, so that comparison would prove nothing -- an earlier version of this
+/// test asserted it anyway and was wrong. That every other command keeps the default domain is proved
+/// directly instead, by the lib bar
+/// `the_largest_candidate_document_fits_its_own_ceiling_and_not_the_default` reading `response_max`
+/// for each family.
+#[test]
+fn a_document_response_may_exceed_the_default_frame_and_its_ceiling_is_finite() {
+    let runtime = TestRuntime::new("c7frame");
+    initialize_local_auth_token(&runtime.token).unwrap();
+    let listener = UnixListener::bind(&runtime.socket).unwrap();
+
+    // One document envelope whose body is `content_bytes` bytes of content, serialized as the wire
+    // would carry it. Written here, never produced by the transport under test.
+    fn document_reply(content_bytes: usize) -> Vec<u8> {
+        let content = vec![b'x'; content_bytes];
+        let digest = |canonicalizer: &str| {
+            json!({
+                "algorithm": "sha256",
+                "canonicalizer": canonicalizer,
+                "value": "f".repeat(64),
+            })
+        };
+        serde_json::to_vec(&json!({
+            "protocol": 1,
+            "result": {
+                "kind": "outcome_candidate_document",
+                "document": {
+                    "missionId": Uuid::new_v4(),
+                    "manifestId": Uuid::new_v4(),
+                    "manifestDigest": digest("beacon.outcome.manifest.v2"),
+                    "candidateArtifactDigest": digest("beacon.artifact.v1"),
+                    "candidateContentDigest": digest("beacon.raw.v1"),
+                    "candidateContentBytes": content.len(),
+                    "mediaType": "text/markdown; charset=utf-8",
+                    "candidateContentBase64": data_encoding::BASE64.encode(&content),
+                },
+            },
+            "error": null,
+        }))
+        .unwrap()
+    }
+
+    // The LARGEST accepted document: the owner's whole 1 MiB content ceiling, crossing a real socket.
+    //
+    // SYNTHETIC, and labelled: this body is 1,048,576 bytes written by this test, NOT a candidate any
+    // renderer produced. No such fixture exists and none is claimed. What it proves is that the real
+    // client accepts the real maximum over the real transport.
+    let accepted = document_reply(1_048_576);
+    assert!(
+        accepted.len() > 64 * 1024 && accepted.len() < 1_403_904,
+        "C7T.FRAME.THE_ACCEPTED_FIXTURE_IS_BETWEEN_THE_TWO_CEILINGS: {}",
+        accepted.len()
+    );
+    // And one past the read's own ceiling.
+    let refused = document_reply(1_060_000);
+    assert!(
+        refused.len() > 1_403_904,
+        "C7T.FRAME.THE_REFUSED_FIXTURE_IS_PAST_THE_READS_CEILING: {}",
+        refused.len()
+    );
+
+    let replies = vec![accepted.clone(), refused.clone()];
+    let peer = thread::spawn(move || {
+        for reply in replies {
+            let (mut stream, _) = listener.accept().expect("the peer accepts");
+            let mut request = Vec::new();
+            // Read the request first: the client shuts its write half before reading.
+            stream.read_to_end(&mut request).expect("the peer reads");
+            // A client that refuses the frame stops reading, so a broken pipe here is that refusal
+            // arriving, not a fixture fault.
+            let _ = stream.write_all(&reply);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    let document = client
+        .read_outcome_candidate_document(&"a".repeat(64))
+        .unwrap_or_else(|error| panic!("C7T.FRAME.THE_READ_ACCEPTS_A_LARGE_REPLY: {error}"));
+    // Both counts written out as literals rather than derived from the reply.
+    assert_eq!(
+        document.candidate_content_bytes, 1_048_576,
+        "C7T.FRAME.THE_WHOLE_BODY_ARRIVED"
+    );
+    assert_eq!(
+        document.candidate_content_base64.len(),
+        1_398_104,
+        "C7T.FRAME.THE_BODY_IS_WHOLE_NOT_TRUNCATED"
+    );
+    assert_eq!(
+        data_encoding::BASE64
+            .decode(document.candidate_content_base64.as_bytes())
+            .expect("C7T.FRAME.THE_LARGEST_BODY_IS_CANONICAL_BASE64")
+            .len(),
+        1_048_576,
+        "C7T.FRAME.THE_LARGEST_BODY_DECODES_TO_ITS_DECLARED_COUNT"
+    );
+
+    let over = client
+        .read_outcome_candidate_document(&"b".repeat(64))
+        .expect_err("C7T.FRAME.THE_READS_CEILING_IS_FINITE");
+    assert!(
+        matches!(over, LocalTransportError::Protocol),
+        "C7T.FRAME.A_REPLY_PAST_THE_CEILING_IS_REFUSED: {over:?}"
+    );
+
+    peer.join().unwrap();
+}
+
+/// C7's candidate-document read is KNOWN to the wire, and answers with the account's own refusal.
+///
+/// The smallest real socket bar for this slice and the one that must be RED before any wiring exists:
+/// today `read_outcome_candidate_document` does not parse, so the supervisor answers `protocol_error`
+/// from its own `Json` refusal. "No such command" and "that command exists and refused you" are
+/// different answers, and making that difference is the whole of what the route adds.
+///
+/// Raw bytes rather than a client method, for the reason the C5 and C6 route bars used them: at the
+/// moment this is written there is no client method to call, and a test that cannot compile cannot be
+/// RED by a named behaviour.
+///
+/// The request carries exactly ONE field, and this bar pins that shape at the wire seam before any
+/// reader exists, because the shape is what a later guard can only narrow: a bare lower-case 64-hex
+/// manifest digest -- the value the accepted frontend loader already sends
+/// (`session.ts` `readOutcomeCandidateDocument`, which passes `held.manifestDigest.value`) -- with no
+/// Mission id, no appendix request and no evidence field. A route that tolerated those would accept a
+/// request the client never sends and give a future caller somewhere to put a fact this command must
+/// not take from it.
+///
+/// An ABSENT digest is used on purpose. The session is locked, so the account refuses before any
+/// store read, and this bar therefore says nothing about whether a candidate exists -- which is
+/// correct, because a locked caller must not be able to learn that either.
+#[test]
+fn the_candidate_document_read_is_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c7route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    // A syntactically legal digest this store does not hold. Written out rather than derived, so the
+    // bar does not depend on a helper that could change what it sends.
+    let absent_digest = "00000000000000000000000000000000000000000000000000000000000000ab";
+    assert_eq!(
+        absent_digest.len(),
+        64,
+        "C7T.ROUTE.THE_REQUEST_CARRIES_A_64_HEX_DIGEST"
+    );
+
+    let ask = |command: serde_json::Value| -> serde_json::Value {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": command,
+        }))
+        .unwrap();
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        serde_json::from_slice(&answer).unwrap()
+    };
+
+    let answered = ask(json!({
+        "name": "read_outcome_candidate_document",
+        "manifest_digest": absent_digest,
+    }));
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("not_authenticated"),
+        "C7T.ROUTE.IS_A_KNOWN_COMMAND"
+    );
+    assert_eq!(
+        answered.get("result"),
+        Some(&serde_json::Value::Null),
+        "C7T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT"
+    );
+
+    // The one field is REQUIRED: there is no default digest, and an omitted key is a malformed
+    // envelope rather than a read of something unnamed.
+    let without = ask(json!({ "name": "read_outcome_candidate_document" }));
+    assert_eq!(
+        without
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("protocol_error"),
+        "C7T.ROUTE.THE_DIGEST_IS_REQUIRED"
+    );
+
+    // And the request is CLOSED. Each of these three is a fact the command must read from the
+    // verified records instead, so each is refused at the envelope rather than ignored.
+    for extra in [
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "mission_id": Uuid::new_v4(),
+        }),
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "appendix_request": "policy_default",
+        }),
+        json!({
+            "name": "read_outcome_candidate_document",
+            "manifest_digest": absent_digest,
+            "candidate_content_base64": "aGk=",
+        }),
+    ] {
+        let label = extra
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "name" && *key != "manifest_digest")
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
+        let widened = ask(extra);
+        assert_eq!(
+            widened
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("protocol_error"),
+            "C7T.ROUTE.THE_REQUEST_IS_CLOSED: {label}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// C5's two commands are KNOWN to the wire, and answer with the account's own refusal.
+///
+/// The smallest real socket bar for this slice, and the one that must be RED before any wiring
+/// exists: today neither name parses, so the supervisor answers `protocol_error` from its own
+/// `Json` refusal. A command that is merely unknown and a command that exists and refused the caller
+/// are different answers, and this is the difference the wiring has to make.
+///
+/// Deliberately raw bytes rather than a client method: at the moment this test is written there is no
+/// client method to call, and a test that cannot compile cannot be RED by a named behaviour.
+#[test]
+fn the_classification_commands_are_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c5route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+
+    let mission_id = Uuid::new_v4();
+    let cases: [(&str, serde_json::Value); 2] = [
+        (
+            "classify_mission_impact",
+            json!({
+                "request": {
+                    "missionId": mission_id,
+                    "impact": "ordinary",
+                    "reason": "No operator-visible surface changed.",
+                    "expectedPolicyRevision": null,
+                    "supersedes": { "kind": "none" },
+                },
+            }),
+        ),
+        (
+            "get_mission_classification",
+            json!({ "mission_id": mission_id }),
+        ),
+    ];
+
+    for (name, fields) in cases {
+        let mut command = serde_json::Map::new();
+        command.insert("name".to_owned(), serde_json::Value::from(name));
+        for (key, value) in fields.as_object().expect("the fields are an object") {
+            command.insert(key.clone(), value.clone());
+        }
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": serde_json::Value::Object(command),
+        }))
+        .unwrap();
+
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+
+        assert_eq!(
+            answered
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("not_authenticated"),
+            "C5T.ROUTE.IS_A_KNOWN_COMMAND: {name}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C5T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT: {name}"
+        );
+    }
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The classification write and its bounded observation, end to end on a real store and socket.
+///
+/// One Mission, one Project, one published Policy, through the public services that mint real records.
+/// Everything asserted here came back over the socket from the REAL owner; nothing is stubbed.
+#[test]
+fn classification_crosses_the_socket_and_its_observation_is_bounded() {
+    let runtime = TestRuntime::new("c5live");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    let admitted = client
+        .admit_mission(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: formed.id,
+            desired_outcome: "Ship one reviewed feature".to_owned(),
+            success_conditions: vec!["Relevant gates pass".to_owned()],
+            constraints: vec![],
+            prohibitions: vec![],
+            members: vec![MissionMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+
+    // Before any Policy: the observation is four fields, all proved absences except its own cursor.
+    let empty = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(empty.mission_id, admitted.id, "C5T.OBSERVE.ITS_OWN_MISSION");
+    assert_eq!(empty.latest, None, "C5T.OBSERVE.ABSENCE_IS_PROVED");
+    assert_eq!(
+        empty.published_policy, None,
+        "C5T.OBSERVE.NO_POLICY_IS_ITS_OWN_ANSWER"
+    );
+    assert!(
+        empty
+            .observed_at_event_seq
+            .chars()
+            .all(|character| character.is_ascii_digit()),
+        "C5T.OBSERVE.THE_CURSOR_IS_A_CANONICAL_DECIMAL_STRING: {:?}",
+        empty.observed_at_event_seq
+    );
+
+    // Publishing a Policy is the prerequisite the surface routes to, and the observation reports it.
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let with_policy = client.get_mission_classification(admitted.id).unwrap();
+    let cited = with_policy
+        .published_policy
+        .clone()
+        .expect("C5T.OBSERVE.A_PUBLISHED_POLICY_IS_REPORTED");
+    assert_eq!(
+        (
+            cited.project_id,
+            cited.policy_revision,
+            cited.charter_revision
+        ),
+        (project.id, policy.revision, policy.charter_revision),
+        "C5T.OBSERVE.THE_PUBLISHED_POLICY_IS_THE_STORES"
+    );
+
+    // The write: the Operator's five keys, and nothing else.
+    let recorded = client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C5T.CLASSIFY.THE_OWNER_ACCEPTS_THE_REQUEST: {error}"));
+    assert_eq!(recorded.version, 1, "C5T.CLASSIFY.THE_FIRST_VERSION_IS_ONE");
+    assert_eq!(
+        recorded.impact, "high",
+        "C5T.CLASSIFY.THE_JUDGMENT_IS_THE_OPERATORS"
+    );
+    assert_eq!(
+        recorded.reason, "Touches the operator credential path.",
+        "C5T.CLASSIFY.THE_REASON_CROSSES_VERBATIM"
+    );
+    assert_eq!(
+        recorded.basis, "operator_declared",
+        "C5T.CLASSIFY.A_NEW_WRITE_IS_OPERATOR_DECLARED"
+    );
+    assert_eq!(
+        recorded.rule_id, None,
+        "C5T.CLASSIFY.A_NEW_WRITE_NAMES_NO_RULE"
+    );
+    assert_eq!(
+        recorded.classified_by, "operator",
+        "C5T.CLASSIFY.THE_ACTOR_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            recorded.policy.policy_revision,
+            recorded.policy.charter_revision
+        ),
+        (policy.revision, policy.charter_revision),
+        "C5T.CLASSIFY.THE_CITATION_IS_THE_STORES"
+    );
+    assert_eq!(
+        recorded.supersedes,
+        SupersedesDto::None,
+        "C5T.CLASSIFY.IT_REPLACES_NOTHING"
+    );
+    assert_eq!(
+        recorded.digest.canonicalizer, "beacon.mission-impact.v1",
+        "C5T.CLASSIFY.THE_DIGEST_CARRIES_ITS_CANONICALIZER"
+    );
+
+    // The observation now reports it, whole, and the cursor has moved forward.
+    let after = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(
+        after.latest.as_ref(),
+        Some(&recorded),
+        "C5T.OBSERVE.THE_LATEST_IS_THE_RECORD_THAT_WAS_WRITTEN"
+    );
+    assert!(
+        after.observed_at_event_seq.parse::<u64>().unwrap()
+            > with_policy.observed_at_event_seq.parse::<u64>().unwrap(),
+        "C5T.OBSERVE.THE_CURSOR_MOVES_WITH_THE_CHAIN"
+    );
+
+    // A second `supersedes: none` is refused by name, and the reclassification names its predecessor.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "ordinary".to_owned(),
+            reason: "A second first classification.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        }),
+        LocalErrorCode::ClassificationAlreadyClassified,
+    );
+    let reclassified = client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "ordinary".to_owned(),
+            reason: "A later review found no operator-visible surface.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: recorded.digest.value.clone(),
+            },
+        })
+        .unwrap_or_else(|error| panic!("C5T.RECLASSIFY.THE_PREDECESSOR_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        reclassified.version, 2,
+        "C5T.RECLASSIFY.THE_LADDER_ADVANCES"
+    );
+    assert_eq!(
+        reclassified.supersedes,
+        SupersedesDto::Record {
+            predecessor_digest: recorded.digest.value.clone()
+        },
+        "C5T.RECLASSIFY.IT_NAMES_WHAT_IT_REPLACES"
+    );
+    // And naming the SUPERSEDED record again is refused by its own name.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Naming a predecessor that is no longer latest.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: recorded.digest.value.clone(),
+            },
+        }),
+        LocalErrorCode::ClassificationPredecessorNotLatest,
+    );
+
+    // Current versus historical Policy: revise the Charter, publish revision 2, and the observation
+    // reports the NEW published Policy beside a record that still cites the OLD one.
+    let revised = client
+        .revise_project_charter(
+            project.id,
+            project.charter.revision,
+            ProjectCharterDraft {
+                purpose: "Prove the classification transport.".to_owned(),
+                desired_outcomes: vec!["Classification crosses the socket".to_owned()],
+                constraints: vec![],
+                prohibitions: vec![],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        )
+        .unwrap();
+    let second_policy = client
+        .publish_project_policy(
+            project.id,
+            revised.charter.revision,
+            Some(policy.revision),
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 2,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let moved = client.get_mission_classification(admitted.id).unwrap();
+    assert_eq!(
+        moved
+            .published_policy
+            .as_ref()
+            .map(|policy| policy.policy_revision),
+        Some(second_policy.revision),
+        "C5T.OBSERVE.THE_PUBLISHED_POLICY_IS_THE_CURRENT_ONE"
+    );
+    assert_eq!(
+        moved
+            .latest
+            .as_ref()
+            .map(|record| record.policy.policy_revision),
+        Some(policy.revision),
+        "C5T.OBSERVE.THE_RECORDS_CITATION_STAYS_HISTORICAL"
+    );
+    assert_ne!(
+        moved
+            .published_policy
+            .as_ref()
+            .map(|policy| policy.policy_revision),
+        moved
+            .latest
+            .as_ref()
+            .map(|record| record.policy.policy_revision),
+        "C5T.OBSERVE.THE_TWO_CITATIONS_ARE_DISTINCT"
+    );
+    // An echoed revision that is no longer current is refused by name, without writing.
+    assert_remote_code(
+        client.classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "high".to_owned(),
+            reason: "Echoing a Policy revision that has moved.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::Record {
+                predecessor_digest: reclassified.digest.value.clone(),
+            },
+        }),
+        LocalErrorCode::ClassificationStalePolicyRevision,
+    );
+
+    // Scope opacity, byte for byte: a Mission this Workspace never admitted answers exactly as an
+    // unknown one does, and neither says whether it exists.
+    let unknown = client.get_mission_classification(Uuid::new_v4());
+    let foreign = client.get_mission_classification(Uuid::new_v4());
+    let line = |result: &Result<beacond::ClassificationObservation, LocalTransportError>| {
+        result.as_ref().err().map(std::string::ToString::to_string)
+    };
+    assert_eq!(
+        line(&unknown),
+        line(&foreign),
+        "C5T.SCOPE.ABSENCE_AND_FOREIGN_ARE_BYTE_IDENTICAL"
+    );
+    assert_remote_code(unknown, LocalErrorCode::MissionClassificationUnavailable);
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
     thread.join().unwrap().unwrap();
 }
 
