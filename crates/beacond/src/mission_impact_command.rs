@@ -360,7 +360,7 @@ impl MissionImpactCommandService {
         }
 
         // The ladder, proven before ANY of it is judged.
-        let ladder = self.proven_ladder(transaction, request.mission_id)?;
+        let ladder = Self::proven_ladder(transaction, self.workspace_id, request.mission_id)?;
         let (version, supersedes) = self.ladder_position(named_predecessor, &ladder)?;
 
         let record = MissionImpactClassificationV1 {
@@ -392,7 +392,7 @@ impl MissionImpactCommandService {
             return Err(unavailable(Unprovable::WriteReadBackDisagrees));
         }
         // The record just written proves itself the same way every older one had to.
-        self.prove_owning_event(transaction, &recorded)?;
+        Self::prove_owning_event(transaction, self.workspace_id, &recorded)?;
         Ok(view_of(&recorded))
     }
 
@@ -442,7 +442,7 @@ impl MissionImpactCommandService {
             charter_revision,
         });
 
-        let ladder = self.proven_ladder(transaction, mission_id)?;
+        let ladder = Self::proven_ladder(transaction, self.workspace_id, mission_id)?;
         let latest = ladder.last().map(view_of);
 
         // The cursor, in its own domain, stringified exactly. No lossy cast anywhere on this path.
@@ -471,9 +471,12 @@ impl MissionImpactCommandService {
     /// Discovery selects candidates; it decides nothing. An unreadable row is `Unavailable`, never
     /// an empty ladder -- collapsing those two would let a corrupt latest row turn a
     /// reclassification into a silent "first" classification at the wrong version.
-    fn proven_ladder(
-        &self,
+    /// ONE crate-private interface, so a second owner -- B15's completion-order guard -- asks the
+    /// SAME question this one asks instead of inventing a weaker "a row exists" check beside it.
+    /// Associated rather than a method for exactly that reason: the caller supplies the Workspace.
+    pub(crate) fn proven_ladder(
         transaction: &Transaction<'_>,
+        workspace_id: Uuid,
         mission_id: Uuid,
     ) -> Result<Vec<MissionImpactClassification>, ClassificationCommandError> {
         let candidates = {
@@ -484,7 +487,7 @@ impl MissionImpactCommandService {
             )?;
             statement
                 .query_map(
-                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    rusqlite::params![workspace_id.to_string(), mission_id.to_string()],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -529,14 +532,14 @@ impl MissionImpactCommandService {
 
         let mut proven = Vec::with_capacity(candidates.len());
         for (digest, _, _) in &candidates {
-            let record = verified_classification_within(transaction, self.workspace_id, digest)
+            let record = verified_classification_within(transaction, workspace_id, digest)
                 .map_err(|error| {
                     unavailable(Unprovable::LadderUnprovable(format!("{digest}: {error:?}")))
                 })?
                 .ok_or_else(|| {
                     unavailable(Unprovable::LadderUnprovable(format!("{digest} vanished")))
                 })?;
-            self.prove_owning_event(transaction, &record)?;
+            Self::prove_owning_event(transaction, workspace_id, &record)?;
             proven.push(record);
         }
 
@@ -559,7 +562,7 @@ impl MissionImpactCommandService {
             )?;
             statement
                 .query_map(
-                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    rusqlite::params![workspace_id.to_string(), mission_id.to_string()],
                     |row| row.get::<_, Option<String>>(0),
                 )?
                 .collect::<Result<Vec<_>, _>>()?
@@ -585,9 +588,9 @@ impl MissionImpactCommandService {
     ///
     /// `verified_classification_within` proves the row against its own bytes and does not look at
     /// the log at all. This is the half it does not do, added at THIS command's perimeter only.
-    fn prove_owning_event(
-        &self,
+    pub(crate) fn prove_owning_event(
         transaction: &Transaction<'_>,
+        workspace_id: Uuid,
         record: &MissionImpactClassification,
     ) -> Result<(), ClassificationCommandError> {
         let digest = record.digest().value.as_str();
@@ -603,16 +606,13 @@ impl MissionImpactCommandService {
                    AND json_extract(payload_json, '$.digest.value') = ?2",
             )?;
             statement
-                .query_map(
-                    rusqlite::params![self.workspace_id.to_string(), digest],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )?
+                .query_map(rusqlite::params![workspace_id.to_string(), digest], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
         };
         // Zero is a row the log does not account for; more than one is two claims about one record.

@@ -163,6 +163,7 @@ pub enum LocalErrorCode {
     CompletionSupportOverLimit,
     CompletionTextOverLimit,
     CompletionSpendReasonRequired,
+    CompletionClassificationRequired,
     CompletionInvalidDetails,
     ClassificationStalePolicyRevision,
     ClassificationNoPolicyPublished,
@@ -3652,6 +3653,11 @@ fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> W
         crate::CompletionCommandError::Account(error) => return wire_error_from_account(error),
         crate::CompletionCommandError::IntentChanged => LocalErrorCode::CompletionIntentChanged,
         crate::CompletionCommandError::AlreadyRecorded => LocalErrorCode::CompletionAlreadyRecorded,
+        // B15 F1: its own closed code. Not `CompletionInvalidDetails` -- nothing about the request
+        // is invalid, and the caller's next action is a different screen.
+        crate::CompletionCommandError::ClassificationRequired => {
+            LocalErrorCode::CompletionClassificationRequired
+        }
         crate::CompletionCommandError::ResidentNotInAdmissionRoster => {
             LocalErrorCode::CompletionResidentNotInAdmissionRoster
         }
@@ -4801,6 +4807,9 @@ mod tests {
             => "IntentChanged", crate::CompletionCommandError::IntentChanged, &[];
         "AlreadyRecorded" | crate::CompletionCommandError::AlreadyRecorded
             => "AlreadyRecorded", crate::CompletionCommandError::AlreadyRecorded, &[];
+        "ClassificationRequired" | crate::CompletionCommandError::ClassificationRequired
+            => "ClassificationRequired",
+            crate::CompletionCommandError::ClassificationRequired, &[];
         "ResidentNotInAdmissionRoster" | crate::CompletionCommandError::ResidentNotInAdmissionRoster
             => "ResidentNotInAdmissionRoster",
             crate::CompletionCommandError::ResidentNotInAdmissionRoster, &[];
@@ -4983,6 +4992,7 @@ mod tests {
         "CompletionSupportOverLimit" | LocalErrorCode::CompletionSupportOverLimit => "CompletionSupportOverLimit", LocalErrorCode::CompletionSupportOverLimit, &[];
         "CompletionTextOverLimit" | LocalErrorCode::CompletionTextOverLimit => "CompletionTextOverLimit", LocalErrorCode::CompletionTextOverLimit, &[];
         "CompletionSpendReasonRequired" | LocalErrorCode::CompletionSpendReasonRequired => "CompletionSpendReasonRequired", LocalErrorCode::CompletionSpendReasonRequired, &[];
+        "CompletionClassificationRequired" | LocalErrorCode::CompletionClassificationRequired => "CompletionClassificationRequired", LocalErrorCode::CompletionClassificationRequired, &[];
         "CompletionInvalidDetails" | LocalErrorCode::CompletionInvalidDetails => "CompletionInvalidDetails", LocalErrorCode::CompletionInvalidDetails, &[];
         "ClassificationStalePolicyRevision" | LocalErrorCode::ClassificationStalePolicyRevision => "ClassificationStalePolicyRevision", LocalErrorCode::ClassificationStalePolicyRevision, &[];
         "ClassificationNoPolicyPublished" | LocalErrorCode::ClassificationNoPolicyPublished => "ClassificationNoPolicyPublished", LocalErrorCode::ClassificationNoPolicyPublished, &[];
@@ -6734,7 +6744,7 @@ mod tests {
         // `outcome_candidate_unavailable`.
         assert_eq!(
             code_rows().len(),
-            86,
+            87,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
         // 23 before this slice, plus the `MissionCompletionCommand` carrier. 27 before C7, plus its
@@ -6763,7 +6773,7 @@ mod tests {
         // each over all eighteen account rows. 1006 + 2 + 5 + 36 = 1049. Counted on this head.
         // C2 adds four Supervisor cases and one StoredIdentityUnreadable startup-pass case.
         // Preserve every C3-C7 case: 1049 + 4 + 1 = 1054.
-        assert_eq!(cases.len(), 1054, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 1056, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             79,
@@ -6890,7 +6900,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 199] = [
+    const WIRE_MAP: [(&str, WireExpectation); 200] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -7464,6 +7474,10 @@ mod tests {
             WireExpectation::Code("completion_spend_reason_required"),
         ),
         (
+            "MissionCompletionCommand.ClassificationRequired",
+            WireExpectation::Code("completion_classification_required"),
+        ),
+        (
             "MissionCompletionCommand.MalformedRequest",
             WireExpectation::Code("completion_invalid_details"),
         ),
@@ -7632,7 +7646,7 @@ mod tests {
     /// read off the enum: a spelling that agreed with the code because it was generated from it
     /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
     /// without a spelling; that gap is C3's to close, not this slice's to edit.)
-    const CODE_SPELLINGS: [(&str, &str, &str); 85] = [
+    const CODE_SPELLINGS: [(&str, &str, &str); 86] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -7924,6 +7938,11 @@ mod tests {
             "CompletionSpendReasonRequired",
         ),
         (
+            "CompletionClassificationRequired",
+            "completion_classification_required",
+            "CompletionClassificationRequired",
+        ),
+        (
             "CompletionInvalidDetails",
             "completion_invalid_details",
             "CompletionInvalidDetails",
@@ -8055,8 +8074,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 199, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 85, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 200, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 86, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
@@ -8170,7 +8189,7 @@ mod tests {
             }
         }
         // 135 before this slice, plus the completion family's eleven owner arms.
-        assert_eq!(checked, 174, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+        assert_eq!(checked, 175, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
 
         // All 18 account faults at the root...
         for (variant, account, _) in account_rows() {

@@ -13,13 +13,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, ClassificationCommandError, ClassificationIntentRequest,
-    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionImpactCommandService,
-    MissionMemberDraft, MissionService, MissionView, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService,
-    ProjectView, ProviderFeature, ResidentConfiguration, ResidentConfigurationService,
-    ResidentLifecycleService, SecretString, StarterOrganizationService, StarterResidentDraft,
-    StarterRole, StartupConfig, SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    AppendixRequest, AutonomyProfile, BeaconCapability, ClassificationCommandError,
+    ClassificationIntentRequest, CompletionIntentRequest, ConditionResultDto,
+    LocalModelActivationService, LocalModelEndpoint, MissionCompletionCommandService, MissionDraft,
+    MissionImpactCommandService, MissionMemberDraft, MissionService, MissionView,
+    OperatorAccountService, OperatorSessionPhase, PrepareRefusal, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProjectView,
+    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
+    SecretString, SpendDto, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
     TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
     TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
@@ -1552,5 +1554,268 @@ fn astra_c5_a_missing_latest_policy_row_cannot_revive_an_older_revision() {
         f.counts(),
         before,
         "C5.ASTRA.LOST_POLICY_HEAD_REFUSAL_WRITES_NOTHING"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// B15 F1 — a completion may not be recorded before the Mission is classified.
+//
+// Kevin's g6caf4c260a7 is OPEN and this lane builds REQUIRE as reversible preparation. The reason
+// require is recommended is measured, not argued: a classification recorded after a completion can
+// never repair that completion's frozen boundary (C4's two-Mission probe, and
+// `outcome_prepare.rs`'s committed `MissionNotClassifiedAtBoundary` bar).
+// ---------------------------------------------------------------------------------------------
+
+fn b15_completion_owner(fixture: &Fixture) -> MissionCompletionCommandService {
+    MissionCompletionCommandService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+}
+
+/// One completion of the fixture's single declared condition. The Operator's judgment, minimal.
+fn b15_completion_request(mission: &MissionView) -> CompletionIntentRequest {
+    CompletionIntentRequest {
+        mission_id: mission.id,
+        accountable_resident_id: mission.members[0].resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results: vec![ConditionResultDto {
+            ordinal: 0,
+            outcome: "met".to_owned(),
+            support: vec![],
+            note: None,
+        }],
+        delivered_artifacts: vec![],
+        unfinished_work: vec![],
+        uncertainty: vec![],
+        spend: SpendDto::NotMeasured("no spend record exists".to_owned()),
+        summary: "One reviewed feature shipped.".to_owned(),
+    }
+}
+
+/// Completions and Events, read from the isolated store in ONE read transaction. Read from the
+/// STORE, never from a reply.
+fn b15_completion_counts(fixture: &Fixture) -> (i64, i64) {
+    let mut connection = fixture.store.connect();
+    let read = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+        .expect("one read transaction");
+    let count = |table: &str| -> i64 {
+        read.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|error| panic!("counting {table}: {error}"))
+    };
+    let counts = (count("mission_completions"), count("events"));
+    read.commit().expect("a read transaction commits");
+    counts
+}
+
+#[test]
+fn b15_order_required_before_write() {
+    let fixture = fixture("b15-required");
+    let owner = b15_completion_owner(&fixture);
+    let request = b15_completion_request(&fixture.mission);
+    // The review itself is a READ and is not the guard: it still answers, so the token below is a
+    // real one and the refusal that follows is the WRITE refusing.
+    let token = owner
+        .preview(request.clone())
+        .expect("B15.ORDER.REQUIRED_BEFORE_WRITE: the preview is a read")
+        .intent_sha256;
+    let before = b15_completion_counts(&fixture);
+
+    let refusal = owner
+        .record(request, &token)
+        .expect_err("B15.ORDER.REQUIRED_BEFORE_WRITE: an unclassified Mission must refuse");
+    assert_eq!(
+        refusal.name(),
+        "ClassificationRequired",
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: {refusal:?}"
+    );
+    assert_eq!(
+        b15_completion_counts(&fixture),
+        before,
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: the refusal wrote a completion or an Event"
+    );
+    assert_eq!(
+        b15_completion_counts(&fixture).0,
+        0,
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: zero completion rows"
+    );
+}
+
+#[test]
+fn b15_order_proved_record_permits() {
+    let fixture = fixture("b15-permits");
+    fixture
+        .owner()
+        .classify(high_declaration(fixture.mission.id))
+        .expect("B15.ORDER.PROVED_RECORD_PERMITS: the Mission is classified first");
+    let owner = b15_completion_owner(&fixture);
+    let request = b15_completion_request(&fixture.mission);
+    let token = owner
+        .preview(request.clone())
+        .expect("B15.ORDER.PROVED_RECORD_PERMITS")
+        .intent_sha256;
+    let before = b15_completion_counts(&fixture);
+
+    let recorded = owner
+        .record(request, &token)
+        .expect("B15.ORDER.PROVED_RECORD_PERMITS: a proved ladder permits the existing write");
+    assert_eq!(
+        recorded.intent_sha256, token,
+        "B15.ORDER.PROVED_RECORD_PERMITS: the reviewed intent is what was recorded"
+    );
+    assert_eq!(
+        b15_completion_counts(&fixture),
+        (before.0 + 1, before.1 + 1),
+        "B15.ORDER.PROVED_RECORD_PERMITS: one completion, one owning Event"
+    );
+}
+
+#[test]
+fn b15_order_broken_ladder_is_unavailable() {
+    let fixture = fixture("b15-broken");
+    fixture
+        .owner()
+        .classify(high_declaration(fixture.mission.id))
+        .expect("B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE control");
+    let owner = b15_completion_owner(&fixture);
+    let request = b15_completion_request(&fixture.mission);
+    let token = owner
+        .preview(request.clone())
+        .expect("B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE")
+        .intent_sha256;
+
+    // INTENTIONAL CORRUPTION after a real mint. The immutability trigger is dropped and recreated
+    // BYTE-IDENTICALLY to 0025's own text, so the schema signature is unchanged.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_impact_classifications_no_update;
+             UPDATE mission_impact_classifications SET canonical_bytes = zeroblob(64);",
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER mission_impact_classifications_no_update\nBEFORE UPDATE ON mission_impact_classifications\nBEGIN\n    SELECT RAISE(ABORT, 'Mission impact classifications are immutable');\nEND;",
+        )
+        .unwrap();
+    drop(connection);
+    let before = b15_completion_counts(&fixture);
+
+    let refusal = owner
+        .record(request, &token)
+        .expect_err("B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE: a broken ladder is not a missing one: {refusal:?}"
+    );
+    assert_ne!(
+        refusal.name(),
+        "ClassificationRequired",
+        "B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE: broken must never read as required"
+    );
+    assert_eq!(
+        b15_completion_counts(&fixture),
+        before,
+        "B15.ORDER.BROKEN_LADDER_IS_UNAVAILABLE: the refusal wrote something"
+    );
+}
+
+#[test]
+fn b15_order_no_retroactive_repair() {
+    let fixture = fixture("b15-retro");
+    // A LEGACY completion, planted through the shipped byte writer rather than the guarded command:
+    // exactly the data that already exists in a store written before this guard.
+    let boundary = {
+        let connection = fixture.store.connect();
+        connection
+            .query_row(
+                "SELECT min(sequence) FROM events WHERE kind = 'mission.admitted'
+                   AND json_extract(payload_json, '$.mission.id') = ?1",
+                [fixture.mission.id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|sequence| u64::try_from(sequence).unwrap())
+            .unwrap()
+    };
+    let member = &fixture.mission.members[0];
+    let record = beacond::MissionCompletionV1 {
+        workspace_id: fixture.store.workspace_id,
+        project_id: fixture.mission.project_id,
+        mission_id: fixture.mission.id,
+        completion_id: Uuid::new_v4(),
+        actor: beacond::CompletionActor::Operator,
+        accountable_resident_id: member.resident_id,
+        accountable_resident_configuration_id: member.admission_configuration_id,
+        boundary_event_seq: boundary,
+        disposition: beacond::CompletionDisposition::Concluded,
+        declared_conditions_sha256: beacond::declared_conditions_digest(
+            &fixture.mission.success_conditions,
+        ),
+        condition_results: vec![beacond::ConditionResultRecord {
+            ordinal: 0,
+            outcome: beacond::ConditionOutcome::Met,
+            support: vec![],
+            note: None,
+        }],
+        delivered_artifacts: vec![],
+        unfinished_work: vec![],
+        uncertainty: vec![],
+        spend: beacond::SpendReference::NotMeasured("no spend record exists".to_owned()),
+        supersedes: beacond::CompletionSupersedes::None,
+        summary: "A completion written before the guard existed.".to_owned(),
+        completed_at_ms: 9_000,
+    };
+    let mut connection = fixture.store.connect();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    beacond::record_completion(&mut connection, &record)
+        .expect("B15.ORDER.NO_RETROACTIVE_REPAIR: the legacy completion is planted");
+    drop(connection);
+
+    // NOW classify, after that cut is frozen.
+    fixture
+        .owner()
+        .classify(high_declaration(fixture.mission.id))
+        .expect("B15.ORDER.NO_RETROACTIVE_REPAIR: a later classification records fine");
+
+    // And the frozen completion is still unpreparable, exactly as C4's probe showed.
+    let refusal =
+        beacond::OutcomeService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .prepare_for_mission(fixture.mission.id, AppendixRequest::PolicyDefault)
+            .expect_err(
+                "B15.ORDER.NO_RETROACTIVE_REPAIR: a later classification cannot repair the cut",
+            );
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::MissionNotClassifiedAtBoundary { mission_id, .. }
+                if mission_id == fixture.mission.id
+        ),
+        "B15.ORDER.NO_RETROACTIVE_REPAIR: {refusal:?}"
+    );
+}
+
+/// The guard's PLACEMENT, made observable.
+///
+/// Row and Event counts cannot see where inside one Immediate transaction the guard sits -- a
+/// refusal drops the transaction either way. What an Operator sees is the CODE, and that is decided
+/// by which refusal runs first. An unclassified Mission whose reviewed token is also stale must be
+/// told to classify, because that is the step that has to happen first; being told the token
+/// changed would send them to re-review a completion they cannot record yet.
+#[test]
+fn b15_order_required_before_write_is_the_first_refusal() {
+    let fixture = fixture("b15-first");
+    let owner = b15_completion_owner(&fixture);
+    let request = b15_completion_request(&fixture.mission);
+
+    let refusal = owner
+        .record(request, &"0".repeat(64))
+        .expect_err("B15.ORDER.REQUIRED_BEFORE_WRITE: an unclassified Mission must refuse");
+    assert_eq!(
+        refusal.name(),
+        "ClassificationRequired",
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: the order is decided before the review: {refusal:?}"
     );
 }
