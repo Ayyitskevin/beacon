@@ -175,6 +175,11 @@ pub enum CompletionCommandError {
     IntentChanged,
     /// A completion is already recorded for this Mission. Nothing is overwritten.
     AlreadyRecorded,
+    /// This Mission has no classification, and a completion recorded now would freeze a cut no
+    /// classification was current at. A classification added afterwards CANNOT repair that cut --
+    /// measured, not argued (C4's two-Mission probe, and `outcome_prepare.rs`'s committed
+    /// `MissionNotClassifiedAtBoundary` bar). So the order is required rather than warned about.
+    ClassificationRequired,
     /// The chosen Resident is not on this Mission's admission roster.
     ResidentNotInAdmissionRoster,
     /// The condition results are not exactly the declared set, once each.
@@ -204,6 +209,10 @@ pub enum CompletionCommandUnavailable {
     MissionAbsent,
     /// The record the writer just stored does not read back as what was written.
     WriteReadBackDisagrees,
+    /// The Mission's classification ladder did not prove. **Never `ClassificationRequired`**: a
+    /// broken record and an absent one are different states, and telling an Operator to classify a
+    /// Mission that already is would send them to do the wrong thing.
+    ClassificationUnprovable(String),
 }
 
 impl CompletionCommandError {
@@ -213,6 +222,7 @@ impl CompletionCommandError {
             Self::Account(_) => "Account",
             Self::IntentChanged => "IntentChanged",
             Self::AlreadyRecorded => "AlreadyRecorded",
+            Self::ClassificationRequired => "ClassificationRequired",
             Self::ResidentNotInAdmissionRoster => "ResidentNotInAdmissionRoster",
             Self::ConditionCoverageIncomplete => "ConditionCoverageIncomplete",
             Self::SupportOverLimit => "SupportOverLimit",
@@ -744,6 +754,32 @@ impl MissionCompletionCommandService {
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let outcome = (|| {
                 let bindings = owner_bindings(&transaction, self.workspace_id, &request)?;
+
+                // B15 F1. The order guard, in THIS transaction, after the Mission is proved and
+                // before any identity, time or boundary is assigned -- because the boundary is the
+                // thing a late classification cannot reach. It asks the classification owner's own
+                // proved-ladder interface rather than a weaker "a row exists" query, so an
+                // unprovable ladder is `Unavailable` and only a genuinely empty one is `Required`.
+                //
+                // `preview` is deliberately NOT gated: it writes nothing, and gating it would make
+                // this guard unreachable through the public API without a token side channel.
+                match crate::mission_impact_command::MissionImpactCommandService::proven_ladder(
+                    &transaction,
+                    self.workspace_id,
+                    request.mission_id,
+                ) {
+                    Ok(ladder) if ladder.is_empty() => {
+                        return Err(CompletionCommandError::ClassificationRequired);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Err(CompletionCommandError::Unavailable(
+                            CompletionCommandUnavailable::ClassificationUnprovable(format!(
+                                "{error:?}"
+                            )),
+                        ));
+                    }
+                }
 
                 // The token is compared over the SENTINEL-normalized record, so a transient change
                 // in identity, time or boundary cannot invalidate a review.

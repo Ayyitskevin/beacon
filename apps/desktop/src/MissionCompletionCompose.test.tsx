@@ -1017,3 +1017,38 @@ it("renders the fixed line and nothing the payload carried with it", async () =>
     "C4.COPY.RAW_PAYLOAD_IS_NOT_RENDERED",
   ).not.toContain("conditionResults[3]");
 });
+
+it("names the action when a classification is required, and recovers by reading again", async () => {
+  const previews: unknown[] = [];
+  const user = userEvent.setup();
+  await recordWith(user, {
+    preview_mission_completion: (args) => {
+      previews.push(args);
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    },
+    record_mission_completion: () =>
+      Promise.reject({ code: "completion_classification_required" }),
+  });
+
+  // The copy names the ACTION, and is not the generic invalid-details sentence.
+  expect(
+    await screen.findByText(
+      "Classify this Mission's impact first, then record the completion.",
+    ),
+    "B15.ORDER.THE_COPY_NAMES_THE_ACTION",
+  ).toBeVisible();
+  expect(
+    screen.queryByText("Some completion details are invalid. Review the completion again."),
+    "B15.ORDER.NEVER_THE_GENERIC_ERROR",
+  ).toBeNull();
+
+  // Recovery is an explicit READ, and the control is enabled -- the guard is not a disabled button.
+  const again = screen.getByRole("button", { name: "Check the classification again" });
+  expect(again, "B15.ORDER.THE_GUARD_IS_NOT_A_DISABLED_BUTTON").toBeEnabled();
+  const before = previews.length;
+  await user.click(again);
+  expect(
+    previews.length,
+    "B15.ORDER.RECOVERY_RE_READS",
+  ).toBe(before + 1);
+});

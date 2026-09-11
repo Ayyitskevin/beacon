@@ -1097,6 +1097,37 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
         })
         .unwrap();
 
+    // B15 F1: a completion may not be recorded before its Mission is classified. One published
+    // Policy to cite, then the Operator's own ordinary judgment.
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap_or_else(|error| panic!("C4.WIDE.A_POLICY_IS_PUBLISHED: {error}"));
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: admitted.id,
+            impact: "ordinary".to_owned(),
+            reason: "One reviewed change, fully reversible.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C4.WIDE.THE_MISSION_IS_CLASSIFIED: {error}"));
+
     let request = wide_completion_request(admitted.id, resident_id);
     let sent_bytes = serde_json::to_vec(&request).unwrap().len();
     assert!(
@@ -1995,7 +2026,7 @@ fn the_preparation_sequencing_refusals_are_separately_named() {
 
     // 2. Completed, never classified.
     let unclassified = admit_another_mission(&client, &base, "Ship a third reviewed feature");
-    complete_mission(&client, &base, unclassified);
+    plant_legacy_completion(&runtime.store, &client, unclassified);
     assert_remote_code(
         client.prepare_outcome_candidate(unclassified, AppendixRequestDto::PolicyDefault),
         LocalErrorCode::OutcomeNotClassified,
@@ -2004,7 +2035,7 @@ fn the_preparation_sequencing_refusals_are_separately_named() {
     // 3. Classified only AFTER the completion: the boundary cannot be rewritten, and another
     // classification will not change it.
     let late = admit_another_mission(&client, &base, "Ship a fourth reviewed feature");
-    complete_mission(&client, &base, late);
+    plant_legacy_completion(&runtime.store, &client, late);
     client
         .classify_mission_impact(ClassificationIntentRequest {
             mission_id: late,
@@ -2154,6 +2185,67 @@ fn prepare_c6_fixture(client: &LocalSupervisorClient) -> PreparedC6Fixture {
     }
 }
 
+/// A completion written the way a PRE-GUARD store already holds one: through the shipped byte
+/// writer, with no classification. B15 F1 makes this state unreachable through the command, and the
+/// prepare-sequencing refusals still have to be reachable to be proved.
+fn plant_legacy_completion(
+    store: &std::path::Path,
+    client: &LocalSupervisorClient,
+    mission_id: Uuid,
+) {
+    let mission = client
+        .mission(mission_id)
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_MISSION_READS: {error}"));
+    let member = &mission.members[0];
+    let mut connection = rusqlite::Connection::open(store).unwrap();
+    let boundary: u64 = connection
+        .query_row(
+            "SELECT min(sequence) FROM events WHERE kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?1",
+            [mission_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|sequence| u64::try_from(sequence).unwrap())
+        .unwrap();
+    let record = beacond::MissionCompletionV1 {
+        workspace_id: mission.workspace_id,
+        project_id: mission.project_id,
+        mission_id,
+        completion_id: Uuid::new_v4(),
+        actor: beacond::CompletionActor::Operator,
+        accountable_resident_id: member.resident_id,
+        accountable_resident_configuration_id: member.admission_configuration_id,
+        boundary_event_seq: boundary,
+        disposition: beacond::CompletionDisposition::Concluded,
+        declared_conditions_sha256: beacond::declared_conditions_digest(
+            &mission.success_conditions,
+        ),
+        condition_results: mission
+            .success_conditions
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| beacond::ConditionResultRecord {
+                ordinal: u32::try_from(ordinal).unwrap(),
+                outcome: beacond::ConditionOutcome::Met,
+                support: Vec::new(),
+                note: None,
+            })
+            .collect(),
+        delivered_artifacts: Vec::new(),
+        unfinished_work: Vec::new(),
+        uncertainty: Vec::new(),
+        spend: beacond::SpendReference::NotMeasured("no meter on this Mission".to_owned()),
+        supersedes: beacond::CompletionSupersedes::None,
+        summary: "A completion written before the order guard existed.".to_owned(),
+        completed_at_ms: 9_000,
+    };
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    beacond::record_completion(&mut connection, &record)
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_LEGACY_COMPLETION_IS_PLANTED: {error:?}"));
+}
+
 fn admit_another_mission(
     client: &LocalSupervisorClient,
     fixture: &PreparedC6Fixture,
@@ -2192,8 +2284,29 @@ fn admit_another_mission(
         .id
 }
 
-/// Preview, then record with the token the preview returned: the C4 path, unchanged.
+/// Classify, then preview, then record with the token the preview returned.
+///
+/// B15 F1 added the classification step: a completion may not be recorded before its Mission is
+/// classified, so the ordinary path now begins one step earlier. Bars that need a
+/// completed-but-unclassified Mission -- a state only a pre-guard store can hold -- use
+/// `plant_legacy_completion` instead.
 fn complete_mission(client: &LocalSupervisorClient, fixture: &PreparedC6Fixture, mission_id: Uuid) {
+    // Only if this Mission has none: several fixtures classify deliberately (a HIGH impact, say)
+    // before completing, and a second classification would be `AlreadyClassified`.
+    let observed = client
+        .get_mission_classification(mission_id)
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_CLASSIFICATION_READS: {error}"));
+    if observed.latest.is_none() {
+        client
+            .classify_mission_impact(ClassificationIntentRequest {
+                mission_id,
+                impact: "ordinary".to_owned(),
+                reason: "One reviewed change, fully reversible.".to_owned(),
+                expected_policy_revision: Some(fixture.policy_revision),
+                supersedes: SupersedesDto::None,
+            })
+            .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_MISSION_IS_CLASSIFIED: {error}"));
+    }
     let request = beacond::CompletionIntentRequest {
         mission_id,
         accountable_resident_id: fixture.resident_id,
@@ -4272,4 +4385,73 @@ fn a_long_diagnostic_label_still_binds_the_local_socket() {
         "B8.SOCKET_PATH_FITS_SUN_LEN: {socket_len} bytes: {}",
         runtime.socket.display()
     );
+}
+
+/// B15 F1 over the real socket: an unclassified Mission cannot be completed, and classifying it
+/// makes the very same request record.
+///
+/// The ordinary command, the ordinary client method, the ordinary code -- no raw bytes needed,
+/// because the guard is reached through the same path an Operator uses.
+#[test]
+fn classification_then_completion_is_required_over_the_real_socket() {
+    let runtime = TestRuntime::new("b15order");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let fixture = prepare_c6_fixture(&client);
+
+    // A SECOND Mission on the same fixture, deliberately left unclassified.
+    let mission_id = admit_another_mission(&client, &fixture, "Ship a second reviewed feature");
+    let request = beacond::CompletionIntentRequest {
+        mission_id,
+        accountable_resident_id: fixture.resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results: vec![beacond::ConditionResultDto {
+            ordinal: 0,
+            outcome: "met".to_owned(),
+            support: Vec::new(),
+            note: None,
+        }],
+        delivered_artifacts: Vec::new(),
+        unfinished_work: Vec::new(),
+        uncertainty: Vec::new(),
+        spend: beacond::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+        summary: "Shipped it.".to_owned(),
+    };
+    let preview = client
+        .preview_mission_completion(request.clone())
+        .unwrap_or_else(|error| panic!("B15.ORDER.THE_REVIEW_IS_STILL_A_READ: {error}"));
+
+    let refusal = client
+        .record_mission_completion(preview.request.clone(), preview.intent_sha256.clone())
+        .expect_err("B15.ORDER.REQUIRED_BEFORE_WRITE: the socket must refuse an unclassified cut");
+    assert!(
+        matches!(
+            &refusal,
+            LocalTransportError::Remote { code, .. }
+                if *code == LocalErrorCode::CompletionClassificationRequired
+        ),
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: {refusal:?}"
+    );
+
+    // Classify, and the SAME request records: the guard is an order, not a block.
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id,
+            impact: "ordinary".to_owned(),
+            reason: "One reviewed file, fully reversible.".to_owned(),
+            expected_policy_revision: Some(fixture.policy_revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("B15.ORDER.PROVED_RECORD_PERMITS: {error}"));
+    client
+        .record_mission_completion(preview.request, preview.intent_sha256)
+        .unwrap_or_else(|error| panic!("B15.ORDER.PROVED_RECORD_PERMITS: {error}"));
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
 }
