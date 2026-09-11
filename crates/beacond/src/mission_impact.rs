@@ -1974,7 +1974,6 @@ mod display_tests {
 /// A distinct type rather than a new arm on [`ClassificationStoreError`]: the existing enum is
 /// matched exhaustively in twenty-six places outside this module, and a new failure mode that only
 /// this reader can raise belongs beside this reader.
-#[derive(Debug)]
 pub(crate) enum ClassificationEventProof {
     Store(ClassificationStoreError),
     /// No `mission.impact_classified` Event in this Workspace names this digest, or more than one
@@ -1983,6 +1982,18 @@ pub(crate) enum ClassificationEventProof {
     RecordingEventUnaccounted,
     /// The Event exists, and what it carries disagrees with the verified record.
     DivergentEvidence,
+}
+
+/// Written out rather than derived, so `name()` and the payload are real reads (R78). Output is
+/// byte-identical to the derived form in both the normal and the alternate mode; the equivalence
+/// test below holds the strings the derived impl produced.
+impl fmt::Debug for ClassificationEventProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(inner) => f.debug_tuple(self.name()).field(inner).finish(),
+            Self::RecordingEventUnaccounted | Self::DivergentEvidence => f.write_str(self.name()),
+        }
+    }
 }
 
 impl ClassificationEventProof {
@@ -2059,4 +2070,29 @@ pub(crate) fn verified_classification_with_event_within(
         return Err(ClassificationEventProof::DivergentEvidence);
     }
     Ok(Some(record))
+}
+
+/// R78: Debug equivalence for `ClassificationEventProof`.
+///
+/// The expected strings are the ones the DERIVED impl produced at 7195e8c3, observed by a
+/// throwaway probe before any edit and recorded in the R78 evidence directory. They are literals
+/// here and are NOT recomputed from the formatter under test, so this test can disagree with it.
+#[cfg(test)]
+mod r78_debug_equivalence {
+    use super::{ClassificationEventProof, ClassificationStoreError};
+
+    #[test]
+    fn s4_gate_debug_output_unchanged_for_classification_event_proof() {
+        let payload = ClassificationEventProof::Store(ClassificationStoreError::DigestMismatch);
+        assert_eq!(format!("{payload:?}"), "Store(DigestMismatch)");
+        assert_eq!(format!("{payload:#?}"), "Store(\n    DigestMismatch,\n)");
+
+        let unaccounted = ClassificationEventProof::RecordingEventUnaccounted;
+        assert_eq!(format!("{unaccounted:?}"), "RecordingEventUnaccounted");
+        assert_eq!(format!("{unaccounted:#?}"), "RecordingEventUnaccounted");
+
+        let divergent = ClassificationEventProof::DivergentEvidence;
+        assert_eq!(format!("{divergent:?}"), "DivergentEvidence");
+        assert_eq!(format!("{divergent:#?}"), "DivergentEvidence");
+    }
 }

@@ -1330,13 +1330,24 @@ impl MissionCompletionReadService {
 // ---------------------------------------------------------------------------------------------
 
 /// Why a completion did not prove itself WITH its recording Event.
-#[derive(Debug)]
 pub(crate) enum CompletionEventProof {
     Owner(CompletionReadRefusal),
     /// No `mission.completed` Event in this Workspace names this digest, or more than one does.
     RecordingEventUnaccounted,
     /// The Event exists, and the owning verifier or a redundant selector refuses it.
     DivergentEvidence,
+}
+
+/// Written out rather than derived, so `name()` and the payload are real reads (R78). Output is
+/// byte-identical to the derived form in both the normal and the alternate mode; the equivalence
+/// test below holds the strings the derived impl produced.
+impl fmt::Debug for CompletionEventProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owner(inner) => f.debug_tuple(self.name()).field(inner).finish(),
+            Self::RecordingEventUnaccounted | Self::DivergentEvidence => f.write_str(self.name()),
+        }
+    }
 }
 
 impl CompletionEventProof {
@@ -1431,4 +1442,29 @@ pub(crate) fn verified_completion_with_event_bytes(
         return Err(CompletionEventProof::DivergentEvidence);
     }
     Ok(Some(bytes))
+}
+
+/// R78: Debug equivalence for `CompletionEventProof`.
+///
+/// The expected strings are the ones the DERIVED impl produced at 7195e8c3, observed by a
+/// throwaway probe before any edit and recorded in the R78 evidence directory. They are literals
+/// here and are NOT recomputed from the formatter under test, so this test can disagree with it.
+#[cfg(test)]
+mod r78_debug_equivalence {
+    use super::{CompletionEventProof, CompletionReadRefusal};
+
+    #[test]
+    fn s4_gate_debug_output_unchanged_for_completion_event_proof() {
+        let payload = CompletionEventProof::Owner(CompletionReadRefusal::Absent);
+        assert_eq!(format!("{payload:?}"), "Owner(Absent)");
+        assert_eq!(format!("{payload:#?}"), "Owner(\n    Absent,\n)");
+
+        let unaccounted = CompletionEventProof::RecordingEventUnaccounted;
+        assert_eq!(format!("{unaccounted:?}"), "RecordingEventUnaccounted");
+        assert_eq!(format!("{unaccounted:#?}"), "RecordingEventUnaccounted");
+
+        let divergent = CompletionEventProof::DivergentEvidence;
+        assert_eq!(format!("{divergent:?}"), "DivergentEvidence");
+        assert_eq!(format!("{divergent:#?}"), "DivergentEvidence");
+    }
 }

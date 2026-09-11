@@ -2176,13 +2176,24 @@ mod nil_sentinel {
 /// A distinct type rather than a new arm on [`SpendStoreError`], for the same reason the
 /// classification reader has one: a failure mode only this reader can raise belongs beside this
 /// reader, not on an enum matched exhaustively across the crate.
-#[derive(Debug)]
 pub(crate) enum SpendEventProof {
     Store(SpendStoreError),
     /// No `spend.measured` Event in this Workspace names this digest, or more than one does.
     RecordingEventUnaccounted,
     /// The Event exists, and what it carries disagrees with the verified record.
     DivergentEvidence,
+}
+
+/// Written out rather than derived, so `name()` and the payload are real reads (R78). Output is
+/// byte-identical to the derived form in both the normal and the alternate mode; the equivalence
+/// test below holds the strings the derived impl produced.
+impl fmt::Debug for SpendEventProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(inner) => f.debug_tuple(self.name()).field(inner).finish(),
+            Self::RecordingEventUnaccounted | Self::DivergentEvidence => f.write_str(self.name()),
+        }
+    }
 }
 
 impl SpendEventProof {
@@ -2252,4 +2263,29 @@ pub(crate) fn verified_spend_with_event_within(
         return Err(SpendEventProof::DivergentEvidence);
     }
     Ok(Some(record))
+}
+
+/// R78: Debug equivalence for `SpendEventProof`.
+///
+/// The expected strings are the ones the DERIVED impl produced at 7195e8c3, observed by a
+/// throwaway probe before any edit and recorded in the R78 evidence directory. They are literals
+/// here and are NOT recomputed from the formatter under test, so this test can disagree with it.
+#[cfg(test)]
+mod r78_debug_equivalence {
+    use super::{SpendEventProof, SpendStoreError};
+
+    #[test]
+    fn s4_gate_debug_output_unchanged_for_spend_event_proof() {
+        let payload = SpendEventProof::Store(SpendStoreError::DigestMismatch);
+        assert_eq!(format!("{payload:?}"), "Store(DigestMismatch)");
+        assert_eq!(format!("{payload:#?}"), "Store(\n    DigestMismatch,\n)");
+
+        let unaccounted = SpendEventProof::RecordingEventUnaccounted;
+        assert_eq!(format!("{unaccounted:?}"), "RecordingEventUnaccounted");
+        assert_eq!(format!("{unaccounted:#?}"), "RecordingEventUnaccounted");
+
+        let divergent = SpendEventProof::DivergentEvidence;
+        assert_eq!(format!("{divergent:?}"), "DivergentEvidence");
+        assert_eq!(format!("{divergent:#?}"), "DivergentEvidence");
+    }
 }
