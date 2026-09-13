@@ -3321,9 +3321,10 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::MissionCompletionEventMismatch(sequence))?;
             }
-            // These two arms verify NOTHING beyond admission: the spend and classification
-            // modules have no replay or startup-state verification yet (that is their lane's
-            // follow-on, not this one's). The arms exist because the alternative was worse:
+            // These two replay arms only admit the Event vocabulary. Classification rows and
+            // their Events are reconciled separately by `verify_classification_state` inside
+            // the startup verification snapshot; this no-op arm does not bypass that owner pass.
+            // The arms exist because the alternative was worse:
             // 0025 admitted both kinds into the events CHECK without teaching the replay
             // vocabulary to parse them, so a store holding either Event refused every
             // subsequent startup with InvalidEventKind -- proven on main at 7b19355 by
