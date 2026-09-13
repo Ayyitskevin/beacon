@@ -2301,9 +2301,9 @@ mod display_tests {
 
 /// Why a classification did not prove itself WITH its recording Event.
 ///
-/// A distinct type rather than a new arm on [`ClassificationStoreError`]: the existing enum is
-/// matched exhaustively in twenty-six places outside this module, and a new failure mode that only
-/// this reader can raise belongs beside this reader.
+/// This selected-record reader keeps its own `RecordingEventUnaccounted` and `DivergentEvidence`
+/// faults separate from the whole-store startup relation's `EventAbsent` and `EventDuplicated`
+/// arms on [`ClassificationStoreError`]. Neither proof vocabulary substitutes for the other.
 pub(crate) enum ClassificationEventProof {
     Store(ClassificationStoreError),
     /// No `mission.impact_classified` Event in this Workspace names this digest, or more than one
@@ -2339,9 +2339,10 @@ impl ClassificationEventProof {
 /// The verified classification AND the `mission.impact_classified` Event that recorded it.
 ///
 /// `verified_classification_within` proves the bytes, the digest and the projections and returns
-/// without ever asking the ledger about them; even the startup pass calls only that one. For a
-/// packet that calls itself independent owner evidence, a digest is not sufficient provenance
-/// (R68/H1), so this composes the existing reader with its recording Event in the SAME snapshot.
+/// without asking the ledger about them. Startup separately reconciles the whole-store Event
+/// relation after verifying the rows. For a packet that calls itself independent owner evidence,
+/// a digest is not sufficient provenance (R68/H1), so this reader composes the existing row reader
+/// with its recording Event in the SAME snapshot.
 pub(crate) fn verified_classification_with_event_within(
     connection: &Connection,
     workspace_id: Uuid,
