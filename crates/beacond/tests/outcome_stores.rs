@@ -1303,42 +1303,76 @@ fn a_store_holding_spend_or_classification_events_restarts() {
     // Regression for the gap kimi's 0027 kind-list tripwire exposed: 0025 admitted
     // 'spend.measured' and 'mission.impact_classified' into the events CHECK without teaching
     // the replay vocabulary to parse them, so a store holding either Event refused every
-    // subsequent startup with InvalidEventKind. These arms still verify nothing beyond
-    // admission; startup verification for the two tables is the spend lane's follow-on.
-    let store = TestStore::new("spend-event-restart");
-    let connection = Connection::open(&store.path).unwrap();
-    for (kind, marker) in [
-        ("spend.measured", "{\"marker\":\"spend\"}"),
-        ("mission.impact_classified", "{\"marker\":\"impact\"}"),
-    ] {
-        connection
-            .execute(
-                "INSERT INTO events (
-                 workspace_id, kind, payload_json, occurred_at_ms,
-                 predecessor_kind, predecessor_digest, link_digest
-             )
-                 VALUES (?1, ?2, ?3, 1, 'unchained', NULL, NULL)",
-                params![store.workspace_id.to_string(), kind, marker],
+    // subsequent startup with InvalidEventKind. The question this test asks is still exactly
+    // that one: are both kinds ADMITTED by a restart?
+    //
+    // R58.3 changed what a store must hold for the question to be askable. The two Events used to
+    // be marker plants -- `{"marker":"impact"}` and its twin -- and the comment here said the arms
+    // "verify nothing beyond admission". That is no longer true of the classification arm: the
+    // owner relation reconciles every stored classification against exactly one coherent Event, so
+    // a marker payload is now `Malformed` and the store refuses. The plants were the stale half,
+    // not the expectation.
+    //
+    // Both records are therefore minted through their own public services, which write the real
+    // Events with real payloads. The store is genuinely chained, no plant is needed, and admission
+    // is still what is measured: a restart that reaches Ready with both kinds present is a restart
+    // that parsed both.
+    let stored = stored("spend-event-restart");
+    // Published through its own service, not seeded. This test restarts the whole store, and
+    // startup re-verifies Project Policy against its Events -- a hand-written row fails that, which
+    // is the same lesson as the classification half below and is already written down at the
+    // `classification-across-0032` bar.
+    let revision =
+        ProjectPolicyService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+            .publish(
+                stored.project_id,
+                stored.charter_revision,
+                None,
+                ProjectPolicyDraft {
+                    team_lead_selection: TeamLeadSelectionPolicy {
+                        required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                        availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                        track_record_requirements: vec![TrackRecordRequirement {
+                            evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                            minimum_count: 1,
+                        }],
+                        conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                        ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                    },
+                },
+            )
+            .expect("the Project Policy publishes")
+            .revision;
+
+    let spend = stored.spend_record(Uuid::new_v4(), 1);
+    stored
+        .spend_service()
+        .record(&spend.canonical_bytes().unwrap())
+        .expect("the spend records through its own service");
+
+    let classification = stored.classification_record(Uuid::new_v4(), revision);
+    stored
+        .impact_service()
+        .classify(&classification.canonical_bytes().unwrap())
+        .expect("the classification records through its own service");
+
+    // Both kinds are actually in the log before the restart is asked to admit them; without this
+    // the test could pass on a store that holds neither.
+    let connection = stored.connection();
+    for kind in ["spend.measured", "mission.impact_classified"] {
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = ?1",
+                params![kind],
+                |row| row.get(0),
             )
             .unwrap();
+        assert_eq!(count, 1, "the store must hold exactly one {kind} Event");
     }
-    // R58: these are plants, and this test expects the store to RESTART. A store carrying rows
-    // written around the append path is not a chained store, so it says so.
-    connection
-        .execute_batch(
-            "UPDATE events
-                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
-             UPDATE event_chain_state
-                SET genesis_kind = 'migrated',
-                    migrated_through_sequence = (SELECT max(sequence) FROM events),
-                    head_digest = NULL,
-                    head_sequence = (SELECT max(sequence) FROM events)
-              WHERE id = 1;",
-        )
-        .unwrap();
     drop(connection);
+
     Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
+        store_path: stored.store.path.clone(),
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store holding spend and classification Events must restart");

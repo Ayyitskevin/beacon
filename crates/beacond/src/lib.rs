@@ -173,8 +173,9 @@ pub use mission_impact::{
     MissionImpactClassificationV1, PolicyRevisionRef, enumerate_classifications,
 };
 pub use mission_impact::{
-    ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
-    MissionImpactService, verified_classification_for_citation, verified_classification_within,
+    ClassificationEventError, ClassificationEventField, ClassificationRecordError,
+    ClassificationStoreError, MissionImpactClassification, MissionImpactService,
+    verified_classification_for_citation, verified_classification_within,
 };
 pub use mission_impact_command::{
     ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
@@ -686,6 +687,18 @@ pub enum SupervisorError {
     /// corrupt store from a forged link from a bug in the reader, and cannot say which row. This is
     /// the shape the others move to (R27.2), taken pass by pass; it is a surfaced break from the
     /// convention, not a silent fork (R11).
+    /// **B6/R58.3.** One stored `mission.impact_classified` Event does not account for a
+    /// classification.
+    ///
+    /// Keyed by the Event's own stored `sequence` and nothing else. An orphan or unreadable Event
+    /// has no classification row to borrow a digest from, and taking one out of the unverified
+    /// payload would be inventing the key. The value is the real signed `i64` the column holds:
+    /// `AUTOINCREMENT` does not constrain it to be positive, so a row at 0 or below is named as it
+    /// actually is rather than cast or replaced by a sentinel.
+    MissionImpactClassificationEventMismatch {
+        sequence: i64,
+        cause: mission_impact::ClassificationEventError,
+    },
     MissionImpactClassificationStateMismatch {
         workspace_id: Uuid,
         digest: String,
@@ -1007,6 +1020,20 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
         SupervisorError::ArtifactRelationMismatch(cause) => {
             format!("ArtifactRelationMismatch.{}", cause.name())
         }
+        // The field label is part of the code, not free text: a caller can match on
+        // `…EventMismatch.disagrees.version` without parsing a sentence.
+        SupervisorError::MissionImpactClassificationEventMismatch { cause, .. } => match cause {
+            mission_impact::ClassificationEventError::Malformed => {
+                "MissionImpactClassificationEventMismatch.malformed".to_owned()
+            }
+            mission_impact::ClassificationEventError::Unaccounted => {
+                "MissionImpactClassificationEventMismatch.unaccounted".to_owned()
+            }
+            mission_impact::ClassificationEventError::Disagrees { field } => format!(
+                "MissionImpactClassificationEventMismatch.disagrees.{}",
+                field.as_str()
+            ),
+        },
         SupervisorError::MissionImpactClassificationStateMismatch { cause, .. } => {
             format!(
                 "MissionImpactClassificationStateMismatch.{}",
@@ -1058,6 +1085,10 @@ fn classification_tag(cause: &mission_impact::ClassificationStoreError) -> Strin
     use mission_impact::ClassificationStoreError as Fault;
     match cause {
         Fault::DigestMismatch => "digest_mismatch".to_owned(),
+        // The count is a diagnostic, not a wire code: the tag stays stable so a caller matching on
+        // it does not have to parse a number out of it (B6.11).
+        Fault::EventAbsent => "event_absent".to_owned(),
+        Fault::EventDuplicated { .. } => "event_duplicated".to_owned(),
         Fault::Malformed(reason) => format!("malformed.{reason}"),
         Fault::ColumnsDisagree => "columns_disagree".to_owned(),
         Fault::CitedIdentityMismatch => "cited_identity_mismatch".to_owned(),
@@ -1545,6 +1576,11 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "the Artifact supersession relation does not re-prove: {}",
                 cause.name()
+            ),
+            // R58.2/B6: PROPOSED words, Kevin signs or rewrites before the bar.
+            Self::MissionImpactClassificationEventMismatch { sequence, cause } => write!(
+                formatter,
+                "Event sequence {sequence} does not account for a classification: {cause}"
             ),
             Self::MissionImpactClassificationStateMismatch {
                 workspace_id,
@@ -2431,6 +2467,9 @@ fn map_classification_state_fault(
             digest,
             cause,
         },
+        mission_impact::ClassificationStateFault::Event { sequence, cause } => {
+            SupervisorError::MissionImpactClassificationEventMismatch { sequence, cause }
+        }
     }
 }
 
@@ -3282,9 +3321,10 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::MissionCompletionEventMismatch(sequence))?;
             }
-            // These two arms verify NOTHING beyond admission: the spend and classification
-            // modules have no replay or startup-state verification yet (that is their lane's
-            // follow-on, not this one's). The arms exist because the alternative was worse:
+            // These two replay arms only admit the Event vocabulary. Classification rows and
+            // their Events are reconciled separately by `verify_classification_state` inside
+            // the startup verification snapshot; this no-op arm does not bypass that owner pass.
+            // The arms exist because the alternative was worse:
             // 0025 admitted both kinds into the events CHECK without teaching the replay
             // vocabulary to parse them, so a store holding either Event refused every
             // subsequent startup with InvalidEventKind -- proven on main at 7b19355 by
@@ -8120,7 +8160,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 79] = [
+    const STARTUP_LINES: [(&str, &str); 80] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -8356,6 +8396,13 @@ mod tests {
         (
             "ArtifactRelationMismatch",
             "the Artifact supersession relation does not re-prove: NotFound",
+        ),
+        // R58.2/B6: PROPOSED text -- Kevin signs or rewrites before the bar. One row per root, so
+        // this pins `Unaccounted` as the representative (B6.11); the other thirteen labels are
+        // pinned label by label in the transport table.
+        (
+            "MissionImpactClassificationEventMismatch",
+            "Event sequence 4242 does not account for a classification: unaccounted",
         ),
         (
             "MissionImpactClassificationStateMismatch",
@@ -8650,6 +8697,12 @@ mod tests {
         "ArtifactRelationMismatch" | SupervisorError::ArtifactRelationMismatch(..)
             => startup_line("ArtifactRelationMismatch"),
             SupervisorError::ArtifactRelationMismatch(crate::ArtifactError::NotFound), &[];
+        "MissionImpactClassificationEventMismatch" | SupervisorError::MissionImpactClassificationEventMismatch { .. }
+            => startup_line("MissionImpactClassificationEventMismatch"),
+            SupervisorError::MissionImpactClassificationEventMismatch {
+                sequence: R42S2_SEQUENCE_I64,
+                cause: crate::ClassificationEventError::Unaccounted,
+            }, &[];
         "MissionImpactClassificationStateMismatch" | SupervisorError::MissionImpactClassificationStateMismatch { .. }
             => startup_line("MissionImpactClassificationStateMismatch"),
             SupervisorError::MissionImpactClassificationStateMismatch { workspace_id: r42s2_uuid(), digest: r42s2_digest(), cause: crate::ClassificationStoreError::ColumnsDisagree }, &[];
@@ -8717,14 +8770,255 @@ mod tests {
             SupervisorError::ForeignKeyViolations(R42S2_SEQUENCE), &[];
     }
 
+    use crate::{ClassificationEventError, ClassificationEventField, ClassificationStoreError};
+
+    // ---- B6/R58.3 fold: the OPERATOR projection, which is not the transport projection --------
+    //
+    // Sol1 measured the gap at `ae395663`: changing `ClassificationEventError::Malformed`'s
+    // `Display` word left the behaviour suite, the startup representative, the transport table and
+    // the classification-name witness all GREEN. `supervisor_caller_tag` (`:941-954`) selects a
+    // closed code from the typed cause and deliberately DROPS the sequence, so no assertion over
+    // that projection can see the operator's words or the key. This table walks the other path:
+    // the real `SupervisorError` `Display`, whole line, one row per child.
+    //
+    // Every expectation below is a HELD LITERAL. None is built from `as_str()`, `name()`, `ALL`
+    // or a format string mirroring the code under test -- an expectation generated from the thing
+    // it checks cannot fail when that thing's words change, which is precisely the defect found.
+    /// The real signed Event key, at its extreme. A `sequence as u32` or `as u64` cast in the
+    /// `Display` arm cannot reproduce this line, so the signed-key claim is pinned by a value that
+    /// narrowing destroys -- the ordinary startup representative is only 4242.
+    const OPERATOR_SEQUENCE: i64 = i64::MIN;
+
+    fn operator_uuid() -> uuid::Uuid {
+        uuid::Uuid::parse_str(R42S2_UUID).expect("a fixture UUID parses")
+    }
+
+    /// The closed child vocabulary, held here so the compiler enforces exhaustiveness: adding an
+    /// arm to `ClassificationEventError` or `ClassificationEventField` fails to build this match
+    /// until the new case is given a row above.
+    fn operator_child_is_covered(cause: &ClassificationEventError) -> &'static str {
+        match cause {
+            ClassificationEventError::Malformed => "malformed",
+            ClassificationEventError::Unaccounted => "unaccounted",
+            ClassificationEventError::Disagrees { field } => match field {
+                ClassificationEventField::OuterOccurredAtMs => "disagrees.outer_occurred_at_ms",
+                ClassificationEventField::PayloadWorkspaceId => "disagrees.payload_workspace_id",
+                ClassificationEventField::ClassificationId => "disagrees.classification_id",
+                ClassificationEventField::MissionId => "disagrees.mission_id",
+                ClassificationEventField::ProjectId => "disagrees.project_id",
+                ClassificationEventField::Version => "disagrees.version",
+                ClassificationEventField::Impact => "disagrees.impact",
+                ClassificationEventField::Basis => "disagrees.basis",
+                ClassificationEventField::PolicyRevision => "disagrees.policy_revision",
+                ClassificationEventField::CharterRevision => "disagrees.charter_revision",
+                ClassificationEventField::ClassifiedAtMs => "disagrees.classified_at_ms",
+                ClassificationEventField::CanonicalBytesBase64 => {
+                    "disagrees.canonical_bytes_base64"
+                }
+            },
+        }
+    }
+
+    #[test]
+    fn b6_operator_display_pins_every_classification_child_line() {
+        let table: Vec<(&str, SupervisorError, &str)> = vec![
+            (
+                "malformed",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Malformed,
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: malformed",
+            ),
+            (
+                "unaccounted",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Unaccounted,
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: unaccounted",
+            ),
+            (
+                "disagrees.outer_occurred_at_ms",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::OuterOccurredAtMs,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: outer_occurred_at_ms",
+            ),
+            (
+                "disagrees.payload_workspace_id",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::PayloadWorkspaceId,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: payload_workspace_id",
+            ),
+            (
+                "disagrees.classification_id",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::ClassificationId,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: classification_id",
+            ),
+            (
+                "disagrees.mission_id",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::MissionId,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: mission_id",
+            ),
+            (
+                "disagrees.project_id",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::ProjectId,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: project_id",
+            ),
+            (
+                "disagrees.version",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::Version,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: version",
+            ),
+            (
+                "disagrees.impact",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::Impact,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: impact",
+            ),
+            (
+                "disagrees.basis",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::Basis,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: basis",
+            ),
+            (
+                "disagrees.policy_revision",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::PolicyRevision,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: policy_revision",
+            ),
+            (
+                "disagrees.charter_revision",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::CharterRevision,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: charter_revision",
+            ),
+            (
+                "disagrees.classified_at_ms",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::ClassifiedAtMs,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: classified_at_ms",
+            ),
+            (
+                "disagrees.canonical_bytes_base64",
+                SupervisorError::MissionImpactClassificationEventMismatch {
+                    sequence: OPERATOR_SEQUENCE,
+                    cause: ClassificationEventError::Disagrees {
+                        field: ClassificationEventField::CanonicalBytesBase64,
+                    },
+                },
+                "Event sequence -9223372036854775808 does not account for a classification: disagrees: canonical_bytes_base64",
+            ),
+            (
+                "row.event_absent",
+                SupervisorError::MissionImpactClassificationStateMismatch {
+                    workspace_id: operator_uuid(),
+                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                    cause: ClassificationStoreError::EventAbsent,
+                },
+                "Mission impact classification cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: event_absent",
+            ),
+            (
+                "row.event_duplicated",
+                SupervisorError::MissionImpactClassificationStateMismatch {
+                    workspace_id: operator_uuid(),
+                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                    cause: ClassificationStoreError::EventDuplicated { count: 2 },
+                },
+                "Mission impact classification cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: event_duplicated: 2",
+            ),
+        ];
+
+        assert_eq!(table.len(), 16, "B6.OP.CARDINALITY");
+        let ids: std::collections::BTreeSet<&str> =
+            table.iter().map(|(case, _, _)| *case).collect();
+        assert_eq!(ids.len(), 16, "B6.OP.CASE_IDS_UNIQUE");
+
+        for (case, value, expected) in &table {
+            assert_eq!(&value.to_string(), expected, "B6.OP.LINE.{case}");
+        }
+
+        // The fourteen Event-side rows are the whole closed child vocabulary, checked against a
+        // match the compiler will not let go stale.
+        let mut covered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (_, value, _) in &table {
+            if let SupervisorError::MissionImpactClassificationEventMismatch { cause, .. } = value {
+                covered.insert(operator_child_is_covered(cause));
+            }
+        }
+        assert_eq!(
+            covered.len(),
+            14,
+            "B6.OP.EVENT_CHILDREN_COVERED: {covered:?}"
+        );
+
+        // And the key is really carried: the line for a child names the extreme signed value, so a
+        // narrowing cast would have to reproduce `i64::MIN` to pass.
+        assert!(
+            table[0].2.contains("-9223372036854775808"),
+            "B6.OP.SIGNED_KEY_PRESENT"
+        );
+    }
+
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 79, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 79, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 80, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 80, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 79, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 80, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);

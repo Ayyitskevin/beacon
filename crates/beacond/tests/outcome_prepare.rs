@@ -44,6 +44,7 @@ use beacond::{
     VerifiedSources, VerifiedText, declared_conditions_digest, initialize_local_auth_token,
     publication_candidacy, record_completion, render, verified_manifest_within,
 };
+use data_encoding::BASE64;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
@@ -776,6 +777,72 @@ impl Fixture {
                 ],
             )
             .expect("the row is storable: every projection agrees with its bytes");
+        digest
+    }
+
+    /// A planted classification **with the Event it is owed** (R58.3).
+    ///
+    /// `plant_classification` above is unchanged and still plants a row alone: that is the shape
+    /// every corruption fixture in this file depends on, and turning it valid globally would quietly
+    /// repair stores those tests exist to break.
+    ///
+    /// This wrapper is for the two bars whose subject is a SUPPORTED store -- a fork that must
+    /// reopen Ready, and concurrent supervisors that must not be refused. Under the owner relation a
+    /// stored classification must be accounted for by exactly one coherent Event, so a supported
+    /// store has to have one. The payload is exactly what `MissionImpactService::classify` writes,
+    /// and `occurred_at_ms` is the record's own `classified_at_ms` because the owner compares those
+    /// two.
+    ///
+    /// ERA AND CHAIN COHERENCE, stated rather than assumed: `append_event` is crate-internal, so a
+    /// test cannot mint a linked row. The Event is planted `unchained` and the store then says so --
+    /// `genesis_kind = 'migrated'` with the boundary moved to this row -- the same declaration
+    /// `astra_control_a_candidate_event_in_another_workspace_refuses_startup` makes at :2932. An
+    /// `unchained` row at or below the boundary is a pre-migration Event the chain makes no byte
+    /// claim about; one above it is `UnchainedAfterBoundary`, which is why the boundary moves with
+    /// the plant. Rows already chained stay chained and still verify against the stored head.
+    fn plant_supported_classification(&self, record: &MissionImpactClassificationV1) -> String {
+        let digest = self.plant_classification(record);
+        let bytes = record.canonical_bytes().unwrap();
+        let connection = self.store.connect();
+        connection
+            .execute(
+                "INSERT INTO events (
+                     workspace_id, kind, payload_json, occurred_at_ms,
+                     predecessor_kind, predecessor_digest, link_digest
+                 ) VALUES (?1, 'mission.impact_classified', ?2, ?3, 'unchained', NULL, NULL)",
+                params![
+                    self.workspace_id.to_string(),
+                    serde_json::json!({
+                        "workspace_id": self.workspace_id.to_string(),
+                        "classification_id": record.classification_id.to_string(),
+                        "mission_id": record.mission_id.to_string(),
+                        "project_id": record.policy.project_id.to_string(),
+                        "version": record.version,
+                        "impact": record.impact.as_str(),
+                        "basis": "operator_declared",
+                        "policy_revision": record.policy.policy_revision,
+                        "charter_revision": record.policy.charter_revision,
+                        "digest": {
+                            "algorithm": "sha256",
+                            "canonicalizer": "beacon.mission-impact.v1",
+                            "value": digest,
+                        },
+                        "canonical_bytes_base64": BASE64.encode(&bytes),
+                        "classified_at_ms": record.classified_at_ms,
+                    })
+                    .to_string(),
+                    i64::try_from(record.classified_at_ms).unwrap(),
+                ],
+            )
+            .expect("the Event this classification is owed plants beside it");
+        connection
+            .execute_batch(
+                "UPDATE event_chain_state
+                    SET genesis_kind = 'migrated',
+                        migrated_through_sequence = (SELECT max(sequence) FROM events)
+                  WHERE id = 1;",
+            )
+            .expect("the store declares the era the plant put it in");
         digest
     }
 
@@ -6247,7 +6314,7 @@ fn sol1_concurrent_supervisors_are_not_refused_while_the_classification_pass_run
     const SUPERVISORS: usize = 8;
     let fixture = admitted_mission("sol1-classification-concurrent-startup");
     for version in 1..=128 {
-        fixture.plant_classification(&sol1_classification_record(
+        fixture.plant_supported_classification(&sol1_classification_record(
             &fixture,
             fixture.mission_id,
             version,
@@ -6283,21 +6350,21 @@ fn sol1_concurrent_supervisors_are_not_refused_while_the_classification_pass_run
 #[test]
 fn sol1_a_forked_classification_chain_reopens_ready_by_ruling() {
     let fixture = admitted_mission("sol1-classification-fork-known-nonfinding");
-    let first = fixture.plant_classification(&sol1_classification_record(
+    let first = fixture.plant_supported_classification(&sol1_classification_record(
         &fixture,
         fixture.mission_id,
         1,
         ClassificationSupersedes::None,
         "The common root",
     ));
-    fixture.plant_classification(&sol1_classification_record(
+    fixture.plant_supported_classification(&sol1_classification_record(
         &fixture,
         fixture.mission_id,
         2,
         ClassificationSupersedes::Record(first.clone()),
         "The first child",
     ));
-    fixture.plant_classification(&sol1_classification_record(
+    fixture.plant_supported_classification(&sol1_classification_record(
         &fixture,
         fixture.mission_id,
         3,
