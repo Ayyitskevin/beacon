@@ -25,6 +25,7 @@
 //! record whose bit cannot be read without also reading the identity and digest it belongs to.
 
 use crate::spend::PredecessorFault;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use std::sync::Arc;
@@ -644,12 +645,26 @@ pub enum ClassificationStoreError {
         fault: PredecessorFault,
     },
     Store(String),
+    /// **B6/R58.3.** No Event accounts for this verified classification.
+    ///
+    /// Row-keyed: raised only where the classification has already re-proved itself, so the root's
+    /// `(workspace_id, digest)` are facts the store holds independently of any Event.
+    EventAbsent,
+    /// **B6/R58.3.** More than one Event claims this classification, and only one may.
+    ///
+    /// `count` is measured, never inferred. The fault NAME stays stable (B6.11); the count travels
+    /// in the operator line.
+    EventDuplicated {
+        count: u64,
+    },
 }
 
 impl fmt::Display for ClassificationStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DigestMismatch => formatter.write_str("digest_mismatch"),
+            Self::EventAbsent => formatter.write_str("event_absent"),
+            Self::EventDuplicated { count } => write!(formatter, "event_duplicated: {count}"),
             Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
             Self::ColumnsDisagree => formatter.write_str("columns_disagree"),
             Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
@@ -1313,6 +1328,12 @@ pub(crate) enum ClassificationStateFault {
         digest: String,
         cause: ClassificationStoreError,
     },
+    /// **B6/R58.3.** One stored Event does not account for a classification. Keyed by the Event's
+    /// own `sequence`, the only identity that exists for an orphan or unreadable Event.
+    Event {
+        sequence: i64,
+        cause: ClassificationEventError,
+    },
 }
 
 impl fmt::Display for ClassificationStateFault {
@@ -1330,6 +1351,10 @@ impl fmt::Display for ClassificationStateFault {
             } => write!(
                 formatter,
                 "classification {digest} in Workspace {workspace_id} does not re-prove: {cause}"
+            ),
+            Self::Event { sequence, cause } => write!(
+                formatter,
+                "Event sequence {sequence} does not account for a classification: {cause}"
             ),
         }
     }
@@ -1352,6 +1377,11 @@ impl fmt::Debug for ClassificationStateFault {
                 .field("digest", digest)
                 .field("cause", cause)
                 .finish(),
+            Self::Event { sequence, cause } => formatter
+                .debug_struct("Event")
+                .field("sequence", sequence)
+                .field("cause", cause)
+                .finish(),
         }
     }
 }
@@ -1363,6 +1393,9 @@ impl std::error::Error for ClassificationStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Row { cause, .. } => Some(cause),
+            // A `Copy` enum with no inner error: everything it holds is already on the line and in
+            // `Debug`, so there is no source to hand on.
+            Self::Event { .. } => None,
         }
     }
 }
@@ -1405,6 +1438,290 @@ pub fn enumerate_classifications(
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// The finite vocabulary of fields an Event may disagree with its classification on (B6.11).
+///
+/// **Twelve, and the three absentees are deliberate.** `DigestAlgorithm` and `DigestCanonicalizer`
+/// are fixed by the verified row and checked as domains *before* comparison, so a disagreement on
+/// them is unreachable. `DigestValue` and the outer Workspace are the ASSOCIATION KEY: changing
+/// either means the Event locates no row, which is `Unaccounted` -- a comparison that cannot occur
+/// must not be promised as a field-level answer.
+///
+/// The declared order is the comparison order, so an Event that differs in several places names the
+/// same field on every run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassificationEventField {
+    OuterOccurredAtMs,
+    PayloadWorkspaceId,
+    ClassificationId,
+    MissionId,
+    ProjectId,
+    Version,
+    Impact,
+    Basis,
+    PolicyRevision,
+    CharterRevision,
+    ClassifiedAtMs,
+    CanonicalBytesBase64,
+}
+
+impl ClassificationEventField {
+    /// Every label, in comparison order. The one list both the walk and its witnesses read.
+    pub const ALL: [Self; 12] = [
+        Self::OuterOccurredAtMs,
+        Self::PayloadWorkspaceId,
+        Self::ClassificationId,
+        Self::MissionId,
+        Self::ProjectId,
+        Self::Version,
+        Self::Impact,
+        Self::Basis,
+        Self::PolicyRevision,
+        Self::CharterRevision,
+        Self::ClassifiedAtMs,
+        Self::CanonicalBytesBase64,
+    ];
+
+    /// A stable lowercase token, in the register of the other fault tokens.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OuterOccurredAtMs => "outer_occurred_at_ms",
+            Self::PayloadWorkspaceId => "payload_workspace_id",
+            Self::ClassificationId => "classification_id",
+            Self::MissionId => "mission_id",
+            Self::ProjectId => "project_id",
+            Self::Version => "version",
+            Self::Impact => "impact",
+            Self::Basis => "basis",
+            Self::PolicyRevision => "policy_revision",
+            Self::CharterRevision => "charter_revision",
+            Self::ClassifiedAtMs => "classified_at_ms",
+            Self::CanonicalBytesBase64 => "canonical_bytes_base64",
+        }
+    }
+}
+
+impl fmt::Display for ClassificationEventField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Why one stored `mission.impact_classified` Event does not account for a classification.
+///
+/// **Event-keyed, not row-keyed.** The carrier is the Event's own stored `sequence`, because an
+/// orphan or unreadable Event has no classification row to borrow a digest from, and taking one out
+/// of the unverified payload would be inventing the key (sol1's residual, B6.11).
+///
+/// `Malformed` carries no sub-label on the wire. Every decode and domain cause is armed
+/// independently in the acceptance table, but they share one caller-visible code rather than each
+/// minting a nested one; what sends an operator to the row is the sequence, which is always named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassificationEventError {
+    /// The row's sequence is outside its domain, or the payload does not strictly decode as a
+    /// classification record, or a decoded value is outside its domain.
+    Malformed,
+    /// It decodes, and names a classification this store does not hold in that Workspace.
+    Unaccounted,
+    /// It decodes and associates, and one compared field differs.
+    Disagrees { field: ClassificationEventField },
+}
+
+impl fmt::Display for ClassificationEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed => formatter.write_str("malformed"),
+            Self::Unaccounted => formatter.write_str("unaccounted"),
+            Self::Disagrees { field } => write!(formatter, "disagrees: {field}"),
+        }
+    }
+}
+
+/// The Event payload, decoded STRICTLY for reconciliation (B6.11: scoped to this owner's decode).
+///
+/// A separate mirror of [`MissionImpactClassifiedPayload`] rather than an attribute on it, because
+/// `deny_unknown_fields` here is a reconciliation rule and not a change to how the rest of the
+/// product reads its own Events. An unrecognised key is an Event this version cannot claim to have
+/// verified, and silently ignoring it is how a forged field becomes invisible.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictClassifiedEvent {
+    workspace_id: String,
+    classification_id: String,
+    mission_id: String,
+    project_id: String,
+    version: u32,
+    impact: String,
+    basis: String,
+    policy_revision: u32,
+    charter_revision: u32,
+    digest: StrictClassifiedDigest,
+    canonical_bytes_base64: String,
+    classified_at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictClassifiedDigest {
+    algorithm: String,
+    canonicalizer: String,
+    value: String,
+}
+
+/// Both directions of the classification owner relation (R58.3, B6).
+///
+/// Direction 1 walks every `mission.impact_classified` Event: it must decode strictly, sit inside
+/// its domains, associate with a classification this store holds, and agree with it on all twelve
+/// comparable fields. Direction 2 walks every classification row -- superseded ones included, since
+/// supersession adds a row rather than retiring one -- and requires exactly one such Event.
+///
+/// Event-side failures are raised before row-side ones. Measured reason: an altered association key
+/// raises both at once, and naming the Event sends an operator to a row that exists while
+/// `EventAbsent` sends them looking for one that does not.
+///
+/// Read-only, inside ADR 0045's deferred `query_only` snapshot.
+fn reconcile_classification_events(
+    connection: &Connection,
+) -> Result<(), ClassificationStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, workspace_id, occurred_at_ms, payload_json FROM events
+              WHERE kind = 'mission.impact_classified' ORDER BY sequence",
+        )
+        .map_err(ClassificationStateFault::Store)?;
+    let events: Vec<(i64, String, i64, String)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(ClassificationStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ClassificationStateFault::Store)?;
+    drop(statement);
+
+    // (workspace, digest) -> how many coherent Events account for it.
+    let mut accounted: BTreeMap<(String, String), u64> = BTreeMap::new();
+
+    for (sequence, outer_workspace, occurred_at_ms, payload_json) in events {
+        let malformed = |cause| ClassificationStateFault::Event { sequence, cause };
+
+        // B6.11: `INTEGER PRIMARY KEY AUTOINCREMENT` does not constrain stored values to positive
+        // integers -- MIN_I64, -1 and 0 all insert and read back -- and the replay pass ahead of
+        // this one reads the column as a bare `i64`. The real signed value stays the diagnostic
+        // key; no cast, no sentinel.
+        if sequence < 1 {
+            return Err(malformed(ClassificationEventError::Malformed));
+        }
+
+        let Ok(workspace_uuid) = Uuid::parse_str(&outer_workspace) else {
+            return Err(malformed(ClassificationEventError::Malformed));
+        };
+        let Ok(event) = serde_json::from_str::<StrictClassifiedEvent>(&payload_json) else {
+            return Err(malformed(ClassificationEventError::Malformed));
+        };
+
+        // Domains BEFORE any comparison, so an out-of-domain value is never coerced into a
+        // comparison that then reports the wrong field.
+        let domains_hold = event.version >= 1
+            && event.policy_revision >= 1
+            && event.charter_revision >= 1
+            && i64::try_from(event.classified_at_ms).is_ok()
+            && event.digest.algorithm == DIGEST_ALGORITHM
+            && event.digest.canonicalizer == CANONICALIZER
+            && event.digest.value.len() == 64
+            && event
+                .digest
+                .value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !domains_hold {
+            return Err(malformed(ClassificationEventError::Malformed));
+        }
+        let Ok(decoded_bytes) = BASE64.decode(event.canonical_bytes_base64.as_bytes()) else {
+            return Err(malformed(ClassificationEventError::Malformed));
+        };
+
+        // Association on the OUTER Workspace and the digest value (B6.11). A change to either means
+        // no row is located, which is `Unaccounted` -- never a promised field comparison.
+        let located =
+            verified_classification_within(connection, workspace_uuid, &event.digest.value)
+                .map_err(|_| ClassificationStateFault::Event {
+                    sequence,
+                    cause: ClassificationEventError::Unaccounted,
+                })?;
+        let Some(row) = located else {
+            return Err(ClassificationStateFault::Event {
+                sequence,
+                cause: ClassificationEventError::Unaccounted,
+            });
+        };
+
+        let payload = row.payload();
+        let disagreement =
+            if occurred_at_ms != i64::try_from(payload.classified_at_ms).unwrap_or(-1) {
+                Some(ClassificationEventField::OuterOccurredAtMs)
+            } else if event.workspace_id != payload.workspace_id.to_string() {
+                Some(ClassificationEventField::PayloadWorkspaceId)
+            } else if event.classification_id != payload.classification_id.to_string() {
+                Some(ClassificationEventField::ClassificationId)
+            } else if event.mission_id != payload.mission_id.to_string() {
+                Some(ClassificationEventField::MissionId)
+            } else if event.project_id != payload.policy.project_id.to_string() {
+                Some(ClassificationEventField::ProjectId)
+            } else if event.version != payload.version {
+                Some(ClassificationEventField::Version)
+            } else if event.impact != payload.impact.as_str() {
+                Some(ClassificationEventField::Impact)
+            } else if event.basis != payload.basis.as_str() {
+                Some(ClassificationEventField::Basis)
+            } else if event.policy_revision != payload.policy.policy_revision {
+                Some(ClassificationEventField::PolicyRevision)
+            } else if event.charter_revision != payload.policy.charter_revision {
+                Some(ClassificationEventField::CharterRevision)
+            } else if event.classified_at_ms != payload.classified_at_ms {
+                Some(ClassificationEventField::ClassifiedAtMs)
+            } else if decoded_bytes != row.canonical_bytes() {
+                Some(ClassificationEventField::CanonicalBytesBase64)
+            } else {
+                None
+            };
+        if let Some(field) = disagreement {
+            return Err(ClassificationStateFault::Event {
+                sequence,
+                cause: ClassificationEventError::Disagrees { field },
+            });
+        }
+
+        *accounted
+            .entry((outer_workspace, event.digest.value))
+            .or_insert(0) += 1;
+    }
+
+    // Direction 2, in the owner's own order.
+    for (workspace_id, digest_value) in
+        enumerate_classifications(connection).map_err(ClassificationStateFault::Store)?
+    {
+        let Ok(parsed) = Uuid::parse_str(&workspace_id) else {
+            // The row loop above has already refused this store; reaching here means the pass order
+            // changed, and guessing a Workspace is exactly what R39.2 forbids.
+            continue;
+        };
+        let count = accounted
+            .get(&(workspace_id, digest_value.clone()))
+            .copied()
+            .unwrap_or(0);
+        let cause = match count {
+            0 => ClassificationStoreError::EventAbsent,
+            1 => continue,
+            count => ClassificationStoreError::EventDuplicated { count },
+        };
+        return Err(ClassificationStateFault::Row {
+            workspace_id: parsed,
+            digest: digest_value,
+            cause,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_classification_state(
@@ -1452,6 +1769,10 @@ pub(crate) fn verify_classification_state(
             }
         }
     }
+    // B6/R58.3: the relation runs AFTER every row above has re-proved itself -- comparing an
+    // Event against a row that has not verified would be comparing two unknowns -- and before
+    // `verify_manifest_state`, which relies on these classifications (ADR 0045 order).
+    reconcile_classification_events(connection)?;
     Ok(())
 }
 
@@ -1515,6 +1836,8 @@ mod display_tests {
     fn expected_name(error: &ClassificationStoreError) -> &'static str {
         match error {
             ClassificationStoreError::DigestMismatch => "digest_mismatch",
+            ClassificationStoreError::EventAbsent => "event_absent",
+            ClassificationStoreError::EventDuplicated { .. } => "event_duplicated",
             ClassificationStoreError::Malformed(_) => "malformed",
             ClassificationStoreError::ColumnsDisagree => "columns_disagree",
             ClassificationStoreError::CitedIdentityMismatch => "cited_identity_mismatch",
@@ -1531,7 +1854,7 @@ mod display_tests {
         }
     }
 
-    /// Every named fault reaches the message -- all ten arms, not the five that had a fixture.
+    /// Every named fault reaches the message -- all twelve arms, not the five that had a fixture.
     ///
     /// Closing the store's text did not close the vocabulary, and this is where that is checked.
     /// Both directions are covered: `expected_name` fails to COMPILE if an arm is added, and the
@@ -1556,12 +1879,19 @@ mod display_tests {
                 fault: PredecessorFault::NotStored,
             },
             ClassificationStoreError::Store("anything at all".to_owned()),
+            // B6/R58.3: the two row-side faults the relation added. `expected_name` grew arms for
+            // them when they landed; this array did not, so the cardinality below went on
+            // asserting ten while the vocabulary was twelve -- a second supposedly exhaustive
+            // table left stale (Sol1's final read at `ae395663`). The count is held here, not
+            // derived from the array's own length.
+            ClassificationStoreError::EventAbsent,
+            ClassificationStoreError::EventDuplicated { count: 2 },
         ];
 
         let names: std::collections::BTreeSet<&str> = every_arm.iter().map(expected_name).collect();
         assert_eq!(
             names.len(),
-            10,
+            12,
             "an arm was added to `ClassificationStoreError` without a fixture here, so this bar \
              would have gone on claiming to cover the whole vocabulary: {names:?}"
         );
@@ -1971,9 +2301,9 @@ mod display_tests {
 
 /// Why a classification did not prove itself WITH its recording Event.
 ///
-/// A distinct type rather than a new arm on [`ClassificationStoreError`]: the existing enum is
-/// matched exhaustively in twenty-six places outside this module, and a new failure mode that only
-/// this reader can raise belongs beside this reader.
+/// This selected-record reader keeps its own `RecordingEventUnaccounted` and `DivergentEvidence`
+/// faults separate from the whole-store startup relation's `EventAbsent` and `EventDuplicated`
+/// arms on [`ClassificationStoreError`]. Neither proof vocabulary substitutes for the other.
 pub(crate) enum ClassificationEventProof {
     Store(ClassificationStoreError),
     /// No `mission.impact_classified` Event in this Workspace names this digest, or more than one
@@ -2009,9 +2339,10 @@ impl ClassificationEventProof {
 /// The verified classification AND the `mission.impact_classified` Event that recorded it.
 ///
 /// `verified_classification_within` proves the bytes, the digest and the projections and returns
-/// without ever asking the ledger about them; even the startup pass calls only that one. For a
-/// packet that calls itself independent owner evidence, a digest is not sufficient provenance
-/// (R68/H1), so this composes the existing reader with its recording Event in the SAME snapshot.
+/// without asking the ledger about them. Startup separately reconciles the whole-store Event
+/// relation after verifying the rows. For a packet that calls itself independent owner evidence,
+/// a digest is not sufficient provenance (R68/H1), so this reader composes the existing row reader
+/// with its recording Event in the SAME snapshot.
 pub(crate) fn verified_classification_with_event_within(
     connection: &Connection,
     workspace_id: Uuid,
