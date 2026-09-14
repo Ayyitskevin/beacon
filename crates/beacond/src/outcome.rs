@@ -65,7 +65,7 @@ pub(crate) const RECEIPT_CHECKSUM_LABEL: &str = "beacon.outcome.receipt-checksum
 /// cannot supply them, and an exceeded bound refuses the whole render.
 pub(crate) const MAX_CITATIONS: u64 = 256;
 const MAX_VERIFIED_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_EMITTED_MARKDOWN_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_EMITTED_MARKDOWN_BYTES: u64 = 1024 * 1024;
 
 const MAX_TEXT_SCALARS: usize = 2_000;
 const MAX_TEXT_BYTES: usize = MAX_TEXT_SCALARS * 4;
