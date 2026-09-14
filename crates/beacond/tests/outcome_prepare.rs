@@ -9602,3 +9602,362 @@ mod candidate_evaluation {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// B12 SCRATCH — the real transport boundary for an exported Outcome.
+// ---------------------------------------------------------------------------------------------
+
+/// A RUNNING server on this fixture's store, plus its client, with RAII stop/join/cleanup.
+///
+/// The first version of this probe bound a listener and never served it, so every request timed
+/// out. A bound listener is not a running server: `serve_until` owns the accept loop
+/// (`local_transport.rs:1156-1175`) and the integration fixture starts it on a thread (`:206`).
+struct B12Wire {
+    client: beacond::LocalSupervisorClient,
+    running: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Result<(), beacond::LocalTransportError>>>,
+    socket: std::path::PathBuf,
+    dir: std::path::PathBuf,
+}
+
+impl B12Wire {
+    fn open(fixture: &Fixture) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("b12-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.join("s.sock");
+        let token = dir.join("t");
+        beacond::initialize_local_auth_token(&token).unwrap();
+        let server = beacond::LocalSupervisorServer::bind(beacond::LocalServerConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: socket.clone(),
+            auth_token_path: token.clone(),
+            lock_path: dir.join("l"),
+            local_model_endpoint: LocalModelEndpoint::ollama_default(),
+        })
+        .unwrap();
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let thread = std::thread::spawn(move || server.serve_until(server_running));
+        let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
+        client
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("B12.WIRE.AUTHENTICATED");
+        Self {
+            client,
+            running,
+            thread: Some(thread),
+            socket,
+            dir,
+        }
+    }
+}
+
+impl Drop for B12Wire {
+    fn drop(&mut self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::Release);
+        // Nudge the accept loop awake so the join is bounded, as the existing fixture does.
+        std::os::unix::net::UnixStream::connect(&self.socket).ok();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The payload's real serialized size, from `serde_json`, not hand arithmetic.
+///
+/// This is the `number[]` the wire actually carries for `ExportedOutcome.bytes`. It is a **lower
+/// bound on the response**: the envelope, the digest, the version fields and the media type are all
+/// additional, and this figure counts none of them.
+fn b12_payload_json_len(bytes: &[u8]) -> usize {
+    serde_json::to_vec(&bytes.to_vec()).unwrap().len()
+}
+
+#[test]
+fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
+    // SMALL CONTROL -----------------------------------------------------------------------
+    let small = admitted_mission("b12-small");
+    small.classify(ImpactLevel::Ordinary);
+    small.complete((small.resident_id, small.configuration_id));
+    let (_c, candidate_digest, evaluation_digest) = small.publishable();
+    small
+        .outcomes
+        .publish(small.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("B12.SMALL.PUBLISHED");
+
+    let direct = small
+        .outcomes
+        .export_markdown(small.mission_id)
+        .expect("B12.SMALL.DIRECT_EXPORT");
+    println!("B12.SMALL.stored_bytes = {}", direct.bytes().len());
+    println!(
+        "B12.SMALL.payload_json_len = {}",
+        b12_payload_json_len(direct.bytes())
+    );
+
+    let wire = B12Wire::open(&small);
+    let read = wire
+        .client
+        .outcome_document(small.mission_id, Some(1))
+        .expect("B12.SMALL.WIRE_OK");
+    assert_eq!(read.bytes(), direct.bytes(), "B12.SMALL.WIRE_MATCHES_OWNER");
+    println!("B12.SMALL.wire = Ok, bytes = {}", read.bytes().len());
+    drop(wire);
+
+    // LARGER, minted through owner commands ------------------------------------------------
+    // 32 unfinished-work items is the completion's own maximum (MAX_NARRATIVE_ITEMS), each summary
+    // inside MAX_SHORT_TEXT_SCALARS. Valid content recorded by the owner, not a synthetic blob.
+    let large = admitted_mission("b12-large");
+    large.classify(ImpactLevel::Ordinary);
+    let unfinished: Vec<NarrativeItem<UnfinishedKind>> = (0..32)
+        .map(|ordinal| NarrativeItem {
+            ordinal,
+            kind: UnfinishedKind::DeferredScope,
+            condition_ordinal: None,
+            summary: format!("Deferred scope item {ordinal}: {}", "x".repeat(460)),
+        })
+        .collect();
+    large.complete_with((large.resident_id, large.configuration_id), unfinished);
+    let (_c2, digest2, evaluation2) = large.publishable();
+    large
+        .outcomes
+        .publish(large.mission_id, &digest2, &evaluation2)
+        .expect("B12.LARGE.PUBLISHED");
+
+    let direct2 = large
+        .outcomes
+        .export_markdown(large.mission_id)
+        .expect("B12.LARGE.DIRECT_EXPORT");
+    let large_payload = b12_payload_json_len(direct2.bytes());
+    println!("B12.LARGE.stored_bytes = {}", direct2.bytes().len());
+    println!("B12.LARGE.payload_json_len = {large_payload}");
+    println!(
+        "B12.LARGE.exceeds_64KiB_payload_alone = {}",
+        large_payload > 64 * 1024
+    );
+
+    // B12 only OBSERVED this; here it is the assertion. The document is minted by real owner
+    // Commands and read through the real server, so nothing about the semantic path is stubbed.
+    let wire2 = B12Wire::open(&large);
+    let read2 = wire2
+        .client
+        .outcome_document(large.mission_id, Some(1))
+        .expect("B16.OUTCOME.LARGE_STORED_BYTES_CROSS: the large export must reach the client");
+    assert_eq!(
+        read2.bytes(),
+        direct2.bytes(),
+        "B16.OUTCOME.LARGE_STORED_BYTES_CROSS"
+    );
+    assert!(
+        large_payload > 64 * 1024,
+        "B16.OUTCOME.LARGE_STORED_BYTES_CROSS: the fixture must exceed the ordinary bound, got {large_payload}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// B16 -- the transport frame itself. These serve CRAFTED responses from a raw listener: they are
+// about the client's response bound, not about the owner, and they say so. No owner path is
+// stubbed anywhere in this file.
+// ---------------------------------------------------------------------------------------------
+
+struct B16Scratch(std::path::PathBuf);
+
+impl Drop for B16Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            if !std::thread::panicking() {
+                panic!("B16.STUB.SCRATCH_REMOVED: {error}");
+            }
+            eprintln!("B16.STUB.SCRATCH_REMOVED during unwind: {error}");
+        }
+    }
+}
+
+/// A raw listener that answers one request with exactly the bytes given, then closes.
+///
+/// Returns the stub's own write result separately, because an intentionally over-limit response
+/// legitimately ends in `BrokenPipe` when the client stops reading -- that is the stub's verdict,
+/// never the client's.
+fn b16_serve_once(
+    response: Vec<u8>,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::thread::JoinHandle<std::io::Result<()>>,
+    B16Scratch,
+) {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("b16-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir(&dir).unwrap();
+    let scratch = B16Scratch(dir.clone());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.join("s.sock");
+    let token = dir.join("t");
+    beacond::initialize_local_auth_token(&token).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        stream.write_all(&response)?;
+        stream.flush()
+    });
+    (socket, token, handle, scratch)
+}
+
+/// The maximum-domain success response, built with real `serde_json` over the DECLARED shape.
+///
+/// It is NOT the crate's own `ResponseEnvelope`, which is private; it replicates the declared
+/// shape field for field (`local_transport.rs:934-940`, `outcome_publication.rs:195-203`) at the
+/// widest each bounded field may be. It is synthetic: these are not owner-minted valid Markdown
+/// bytes, and nothing here claims the owner can produce this exact document.
+fn b16_max_domain_response(body_len: usize) -> Vec<u8> {
+    let document = serde_json::json!({
+        "bytes": vec![255u8; body_len],
+        // The owner's CLOSED domain, as independent literals: `digest_envelope`
+        // (`artifact.rs:250-256`) fixes these and the export copies them unchanged
+        // (`outcome_publication.rs:234-242`). Generic 64-byte token maxima are NOT this domain --
+        // that was the error in this file's first version.
+        "digest": {
+            "algorithm": "sha256",
+            "canonicalizer": "beacon.artifact.v1",
+            "value": "0".repeat(64),
+        },
+        "publicationVersion": u32::MAX,
+        "publicationVersionCount": u32::MAX,
+        "mediaType": "text/markdown; charset=utf-8",
+    });
+    serde_json::to_vec(&serde_json::json!({
+        "protocol": 1,
+        "result": {"kind": "outcome_document", "document": document},
+        "error": serde_json::Value::Null,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
+    // Keep an independent literal for the owner's Markdown bound, so a contract change requires
+    // an explicit update to this witness rather than silently changing both sides.
+    let at_bound = b16_max_domain_response(1_048_576);
+    // Independent literal. B15's derivation is correct: 342 fixed bytes over the owner's closed
+    // value domain. This file's first version used generic token maxima and got 482, which was
+    // wrong about the domain, not about serde.
+    assert_eq!(
+        at_bound.len(),
+        4_194_647,
+        "B16.OUTCOME.MAX_DOMAIN_FITS: closed-domain size"
+    );
+
+    let (socket, token, stub, _scratch) = b16_serve_once(at_bound.clone());
+    let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
+    let read = client.outcome_document(Uuid::new_v4(), Some(1));
+    let stub_write = stub.join().unwrap();
+    assert!(
+        read.is_ok(),
+        "B16.OUTCOME.MAX_DOMAIN_FITS: a maximum-domain response must be readable, got {read:?}"
+    );
+    assert_eq!(
+        read.unwrap().bytes().len(),
+        1_048_576,
+        "B16.OUTCOME.MAX_DOMAIN_FITS: whole body"
+    );
+    println!("B16.MAX_DOMAIN.stub_write = {stub_write:?}");
+
+    // Exercise the client, not just a comparison against the declared constant. JSON permits
+    // trailing whitespace, so this exact +1 response would decode successfully without the bound.
+    let mut over = at_bound;
+    over.push(b' ');
+    assert_eq!(over.len(), 4_194_648, "B16.OUTCOME.OVER_FIXTURE_IS_EXACT");
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&over).is_ok(),
+        "B16.OUTCOME.OVER_FIXTURE_IS_VALID_JSON"
+    );
+    let (socket, token, stub, _over_scratch) = b16_serve_once(over);
+    let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
+    let refused = client.outcome_document(Uuid::new_v4(), Some(1));
+    println!("B16.OVER_LIMIT.stub_write = {:?}", stub.join().unwrap());
+    assert!(
+        matches!(refused, Err(beacond::LocalTransportError::Protocol)),
+        "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED"
+    );
+}
+
+#[test]
+fn b16_an_oversized_ordinary_response_is_still_refused() {
+    // A VALID, otherwise-successful non-Outcome response: a publication list, well over 64 KiB.
+    let publications: Vec<serde_json::Value> = (0..2_000)
+        .map(|_| {
+            serde_json::json!({
+                "publicationId": Uuid::new_v4(),
+                "publicationVersion": 1,
+                "candidateArtifactDigest": "a".repeat(64),
+                "evaluationDigest": "b".repeat(64),
+                "isCurrent": true,
+            })
+        })
+        .collect();
+    let response = serde_json::to_vec(&serde_json::json!({
+        "protocol": 1,
+        "result": {"kind": "mission_publications", "publications": publications},
+        "error": serde_json::Value::Null,
+    }))
+    .unwrap();
+    assert!(
+        response.len() > 64 * 1024,
+        "the fixture must exceed the ordinary bound"
+    );
+
+    let (socket, token, stub, _scratch) = b16_serve_once(response);
+    let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
+    let refused = client.mission_publications(Uuid::new_v4());
+    println!("B16.ORDINARY.stub_write = {:?}", stub.join().unwrap());
+    assert!(
+        matches!(refused, Err(beacond::LocalTransportError::Protocol)),
+        "B16.ORDINARY.RESPONSE_BOUND_UNCHANGED: got {refused:?}"
+    );
+}
+
+#[test]
+fn b16_an_oversized_request_does_not_succeed_through_the_public_client() {
+    // An otherwise-VALID request, well over 64 KiB: a real command with a long but well-formed
+    // residents list. If the request bound were raised, this would decode and be refused by the
+    // starter-organization owner instead -- a different, non-Protocol outcome -- so this bar
+    // cannot pass for an unrelated decode or owner reason.
+    let fixture = admitted_mission("b16-request-bound");
+    let wire = B12Wire::open(&fixture);
+    let residents: Vec<beacond::StarterResidentDraft> = (0..4_000)
+        .map(|index| beacond::StarterResidentDraft {
+            role: beacond::StarterRole::Builder,
+            display_name: Some(format!("Resident {index} {}", "n".repeat(24))),
+        })
+        .collect();
+    let encoded = serde_json::to_vec(&residents).unwrap().len();
+    assert!(
+        encoded > 64 * 1024,
+        "the fixture must exceed the request bound, got {encoded}"
+    );
+
+    // The server refuses at `read_request` and closes, so the client's own write observes
+    // BrokenPipe. That is the request bound refusing -- what this bar asserts is that the request
+    // never reaches the owner. With the bound raised, the same request decodes and comes back as a
+    // starter-organization refusal instead, which is a Remote code and fails this match.
+    let refused = wire.client.accept_starter_organization(1, residents);
+    // NOT a named acceptance of the server's cause: a broad `Io` match would also pass for an
+    // unrelated IO failure, which Astra proved by returning `Io(PermissionDenied)` without sending
+    // a byte. The decisive bar is `b16_the_server_request_bound_refuses_an_oversized_valid_request`
+    // in `local_transport.rs`, which calls the real `read_request`. This one only records that the
+    // public client does not succeed.
+    assert!(
+        refused.is_err(),
+        "B16.REQUEST.CLIENT_DOES_NOT_SUCCEED (weak; see the unit bar): got {refused:?}"
+    );
+}

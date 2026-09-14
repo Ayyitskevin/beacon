@@ -189,8 +189,9 @@ impl PublishedOutcome {
 /// long as nobody changed the renderer. What a reader gets here is what was published and what the
 /// qualifying Evaluation was about.
 ///
-/// `digest` is the CITED candidate digest -- the bytes that were evaluated -- and not the chain
-/// tail; `publication_version_count` rides along for R24.2's reason, because "version 2" alone
+/// `digest` identifies the cited candidate Artifact record, including its metadata and content
+/// digest. It is not a hash of the exported Markdown alone or the publication chain tail.
+/// `publication_version_count` rides along for R24.2's reason, because "version 2" alone
 /// cannot tell a caller whether a version 3 exists.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -212,7 +213,7 @@ impl ExportedOutcome {
         self.bytes
     }
 
-    /// The digest of the bytes above: the candidate the relation cites.
+    /// The cited candidate Artifact's record digest, not a hash of `bytes()` alone.
     pub fn digest(&self) -> &ArtifactDigest {
         &self.digest
     }
