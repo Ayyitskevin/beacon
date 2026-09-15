@@ -10,9 +10,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -9960,4 +9960,1042 @@ fn b16_an_oversized_request_does_not_succeed_through_the_public_client() {
         refused.is_err(),
         "B16.REQUEST.CLIENT_DOES_NOT_SUCCEED (weak; see the unit bar): got {refused:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// B18: a private, disposable Outcome fixture for a later packaged read check (Blue's DP-B17)
+// ---------------------------------------------------------------------------------------------
+//
+// Blue measured the seam this fills. The packaged `LocalCommand` interface has no completion,
+// classification, prepare or publish operation, so a packaged run cannot mint an Outcome for
+// itself to read; the public owner interfaces used throughout this file can. This section hands
+// the result to a later check as three files in a directory the CALLER names.
+//
+// What it establishes, and what it does not. It establishes owner-interface SEEDING and snapshot
+// READBACK: a store minted here reopens through `Supervisor::bootstrap` and the ordinary
+// `OperatorAccountService` / `OutcomeService` and returns the exact retained bytes and the same
+// publication identity. It establishes NOTHING about a packaged Outcome-WRITE Command -- there is
+// none -- nor about the desktop UI, nor about the clipboard. Those stay NOT PROBED.
+
+/// The fixture account's passphrase: this file's existing known phrase, and nothing else.
+///
+/// It is a test constant, not a credential, and it is the reason the minted store is an isolated
+/// throwaway rather than anything resembling a real profile. It is deliberately NOT written to the
+/// manifest: a file that ships next to a store must not also carry the way in.
+const FIXTURE_PASSPHRASE: &str = "a long local passphrase";
+
+/// Two literals the seeded records put in the document, asserted after the mint.
+///
+/// Without them "the fixture minted" and "the fixture minted an empty document" are the same
+/// green: every digest, length and byte comparison downstream agrees with itself just as happily
+/// about zero bytes. These are the assertions that know what the document should SAY. They are the
+/// Mission's own declaration and the completion's own declared condition -- narrative that reaches
+/// the page from the seeded records, not from the renderer's fixed prose, which a document about
+/// no Mission at all would still carry.
+///
+/// Measured, not assumed: the completion's `summary` field is NOT rendered (`render` puts the
+/// declaration, the conditions and the citations on the page, not the summary line), so a literal
+/// taken from `complete_with` would have failed here for the right reason and been fixed the wrong
+/// way. These two are read off the produced document.
+const FIXTURE_MISSION_DECLARATION: &str = "Ship one reviewed Beacon feature.";
+
+const FIXTURE_SNAPSHOT_FILE: &str = "store.sqlite3";
+const FIXTURE_MARKDOWN_FILE: &str = "expected-outcome.md";
+const FIXTURE_MANIFEST_FILE: &str = "fixture.json";
+
+/// Why a mint did not happen. Every arm refuses BEFORE anything is created or written.
+#[derive(Debug, PartialEq, Eq)]
+enum FixtureMintRefusal {
+    /// No output directory was named at all. A mint with nowhere to go must say so: the failure
+    /// this replaces is a run that "passes" having written a fixture nobody can find.
+    Unset,
+    /// The named output does not LAND inside the validated private prefix. Landing, not spelling:
+    /// the parent is resolved with `canonicalize`, so a `..` component and an intermediate
+    /// directory symlink are both refused for going outside, however the caller wrote it.
+    NotPrivate(PathBuf),
+    /// Something is already at the named path -- a directory, a file, or a symlink.
+    Occupied(PathBuf),
+    /// The PREFIX itself is not a task-owned private directory, so nothing minted under it could
+    /// be private either. Astra's B18 review: treating any `TMPDIR` string as private establishes
+    /// no such property.
+    PrefixNotPrivate(PathBuf, PrefixFault),
+}
+
+/// What disqualifies a directory from being the task-owned private prefix.
+///
+/// `/tmp` itself is deliberately its own arm rather than folding into `GroupOrWorldAccessible`:
+/// `/tmp` is `1777` and shared by every process on the machine, and a fixture minted in it is
+/// visible to all of them. It is a different fault from a private directory left too open.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefixFault {
+    NotAbsolute,
+    Missing,
+    NotUnderTmp,
+    IsSharedTmp,
+    NotADirectory,
+    NotOwnedByThisUser { owner: u32, expected: u32 },
+    GroupOrWorldAccessible { mode: u32 },
+}
+
+impl std::fmt::Display for FixtureMintRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => write!(
+                formatter,
+                "B18.FIXTURE.OUTPUT_UNSET: no output directory was named. Set \
+                 BEACON_B18_FIXTURE_DIR to a path that does not exist yet, under {}",
+                std::env::temp_dir().display()
+            ),
+            Self::NotPrivate(path) => write!(
+                formatter,
+                "B18.FIXTURE.OUTPUT_NOT_PRIVATE: {} is not a new path under this process's temp \
+                 directory {}",
+                path.display(),
+                std::env::temp_dir().display()
+            ),
+            Self::Occupied(path) => write!(
+                formatter,
+                "B18.FIXTURE.OUTPUT_OCCUPIED: {} already exists (a directory, a file, or a \
+                 symlink); a mint creates its own directory and never writes into someone else's",
+                path.display()
+            ),
+            Self::PrefixNotPrivate(path, fault) => write!(
+                formatter,
+                "B18.FIXTURE.PREFIX_NOT_PRIVATE: {} is not a task-owned private prefix ({fault:?}). \
+                 Make one first -- `export TMPDIR=\"$(mktemp -d)\"` -- and mint inside it; /tmp \
+                 itself is 1777 and shared with every process on the machine",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// One minted fixture: the three files, and the identity a later check compares against.
+#[derive(Debug)]
+struct MintedOutcomeFixture {
+    directory: PathBuf,
+    snapshot_path: PathBuf,
+    markdown_path: PathBuf,
+    manifest_path: PathBuf,
+    source_head: String,
+    schema_version: i64,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+    publication_version: u32,
+    publication_version_count: u32,
+    candidate_artifact_digest: String,
+    media_type: String,
+    /// The exact retained owner bytes -- the ones the export returned at mint time, held here so
+    /// the readback compares against what was RETAINED and not against a second fresh export.
+    markdown_bytes: Vec<u8>,
+    markdown_sha256: String,
+    snapshot_sha256: String,
+}
+
+/// What reopening a minted snapshot returned.
+#[derive(Debug)]
+struct MintedFixtureReadBack {
+    workspace_id: Uuid,
+    workspace_created: bool,
+    schema_version: i64,
+    publication_versions: Vec<(u32, bool, String)>,
+    exported_bytes: Vec<u8>,
+    exported_digest: String,
+    publication_version: u32,
+    publication_version_count: u32,
+    media_type: String,
+}
+
+fn sha256_hex_of(bytes: &[u8]) -> String {
+    data_encoding::HEXLOWER.encode(&sha2_256(bytes))
+}
+
+/// The commit the fixture was minted from, read from git rather than typed by an operator.
+fn fixture_source_head() -> String {
+    let output = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .expect("B18.FIXTURE.SOURCE_HEAD_UNREADABLE: `git rev-parse HEAD` did not run");
+    assert!(
+        output.status.success(),
+        "B18.FIXTURE.SOURCE_HEAD_UNREADABLE: git rev-parse HEAD exited {:?}",
+        output.status.code()
+    );
+    String::from_utf8(output.stdout)
+        .expect("B18.FIXTURE.SOURCE_HEAD_UNREADABLE: git printed non-UTF-8")
+        .trim()
+        .to_owned()
+}
+
+/// The schema version a store DECLARES, read from the store's own row.
+fn declared_schema_version_of(path: &Path) -> i64 {
+    Connection::open(path)
+        .expect("B18.FIXTURE.SNAPSHOT_OPENS")
+        .query_row(
+            "SELECT version FROM schema_meta WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("B18.FIXTURE.SNAPSHOT_DECLARES_A_SCHEMA_VERSION")
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "B18.FIXTURE.PRIVATE_FILE_CREATED {}: {error}",
+                path.display()
+            )
+        });
+    file.write_all(bytes).unwrap_or_else(|error| {
+        panic!(
+            "B18.FIXTURE.PRIVATE_FILE_WRITTEN {}: {error}",
+            path.display()
+        )
+    });
+}
+
+fn mode_of(path: &Path) -> u32 {
+    fs::metadata(path)
+        .unwrap_or_else(|error| panic!("B18.FIXTURE.STAT {}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+/// Mints one private fixture into a directory that does not exist yet.
+///
+/// The seeding is this file's own public owner recipe, unchanged: `admitted_mission` ->
+/// `classify` -> `complete` -> `publishable` -> `outcomes.publish`. Nothing is planted, no row is
+/// written behind a Command, and the store is a throwaway the helper already deletes on drop --
+/// what survives is the SNAPSHOT.
+fn mint_private_outcome_fixture(
+    output: Option<&Path>,
+) -> Result<MintedOutcomeFixture, FixtureMintRefusal> {
+    mint_private_outcome_fixture_within(&std::env::temp_dir(), output)
+}
+
+/// The effective user this process writes as.
+///
+/// `geteuid` and not `getuid`: what decides whether this process can read the prefix back is the
+/// EFFECTIVE id, and those differ under setuid. The crate already calls libc directly
+/// (`git_object_store.rs:902`), so this follows the tree's own idiom rather than adding a crate.
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, touches no memory, and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The prefix a mint is allowed to write inside, or why this one is not it.
+///
+/// Astra's B18 review is the reason this exists: the first version treated any `TMPDIR` string as
+/// private, which establishes nothing about the directory it names. Location, type, owner and
+/// permissions are each checked against the filesystem, and the returned path is CANONICAL so the
+/// caller compares resolved paths with a resolved prefix rather than two strings.
+fn validated_private_prefix(prefix: &Path) -> Result<PathBuf, PrefixFault> {
+    if !prefix.is_absolute() {
+        return Err(PrefixFault::NotAbsolute);
+    }
+    let resolved = fs::canonicalize(prefix).map_err(|_| PrefixFault::Missing)?;
+    // `/tmp` is canonicalized too: it is a symlink on some systems, and a prefix check that
+    // compares one resolved path against one unresolved one is the bug this fold is fixing.
+    let shared_tmp = fs::canonicalize("/tmp").map_err(|_| PrefixFault::NotUnderTmp)?;
+    if resolved == shared_tmp {
+        return Err(PrefixFault::IsSharedTmp);
+    }
+    if !resolved.starts_with(&shared_tmp) {
+        return Err(PrefixFault::NotUnderTmp);
+    }
+    // `canonicalize` already resolved every link, so this stats the real directory.
+    let metadata = fs::symlink_metadata(&resolved).map_err(|_| PrefixFault::Missing)?;
+    if !metadata.is_dir() {
+        return Err(PrefixFault::NotADirectory);
+    }
+    let expected = effective_uid();
+    if metadata.uid() != expected {
+        return Err(PrefixFault::NotOwnedByThisUser {
+            owner: metadata.uid(),
+            expected,
+        });
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err(PrefixFault::GroupOrWorldAccessible { mode });
+    }
+    Ok(resolved)
+}
+
+/// Mints inside an explicitly named prefix. The parameter is what makes the guard testable: a bar
+/// can hand it a `/tmp`, a `0755` directory or a regular file and read the refusal, without any
+/// test mutating the process environment out from under every other test in the binary.
+fn mint_private_outcome_fixture_within(
+    prefix: &Path,
+    output: Option<&Path>,
+) -> Result<MintedOutcomeFixture, FixtureMintRefusal> {
+    let output = output.ok_or(FixtureMintRefusal::Unset)?;
+    let prefix = validated_private_prefix(prefix)
+        .map_err(|fault| FixtureMintRefusal::PrefixNotPrivate(prefix.to_path_buf(), fault))?;
+
+    // Where the output LANDS, not how it is spelled. `starts_with` on the given path is lexical:
+    // `<prefix>/../elsewhere/mint` passes it, and so does `<prefix>/link/mint` where `link` points
+    // out of the prefix -- Astra's two probes. Resolving the PARENT with `canonicalize` collapses
+    // every `..` and follows every intermediate symlink, so both land outside and are refused.
+    // The parent must already exist: a mint creates one directory, never a chain of them.
+    if !output.is_absolute() || output.file_name().is_none() {
+        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
+    }
+    let parent = output
+        .parent()
+        .ok_or_else(|| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    let resolved_parent = fs::canonicalize(parent)
+        .map_err(|_| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    if !resolved_parent.starts_with(&prefix) {
+        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
+    }
+    // `symlink_metadata`, not `exists`: a symlink is something that is already there, and a
+    // DANGLING one is exactly what `exists()` reports as absent. Refusing on the link itself is
+    // what stops a mint from following someone else's pointer into a directory it did not create.
+    if fs::symlink_metadata(output).is_ok() {
+        return Err(FixtureMintRefusal::Occupied(output.to_path_buf()));
+    }
+
+    // `0700` AT CREATION. `create_dir` then `set_permissions` leaves the directory readable for
+    // however long the second call takes, under whatever umask the caller happens to have.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(output)
+        .unwrap_or_else(|error| panic!("B18.FIXTURE.DIRECTORY_CREATED: {error}"));
+
+    // The public owner recipe, exactly as every other test in this file runs it.
+    let fixture = admitted_mission("b18-private-fixture");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("B18.FIXTURE.PUBLISH_SUCCEEDS");
+    let exported = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("B18.FIXTURE.EXPORT_SUCCEEDS");
+
+    // A consistent snapshot through SQLite's own facility. Copying the main database file alone
+    // would be a torn read of a WAL store: committed frames that have not been checkpointed live
+    // in `-wal`, so the file by itself can be missing the publication that was just written.
+    // `VACUUM INTO` reads one consistent view and writes a single self-contained file, and it
+    // refuses if the destination already exists.
+    let snapshot_path = output.join(FIXTURE_SNAPSHOT_FILE);
+    Connection::open(&fixture.store.path)
+        .expect("B18.FIXTURE.LIVE_STORE_OPENS")
+        .execute(
+            "VACUUM INTO ?1",
+            params![
+                snapshot_path
+                    .to_str()
+                    .expect("B18.FIXTURE.SNAPSHOT_PATH_IS_UTF8")
+            ],
+        )
+        .expect("B18.FIXTURE.VACUUM_INTO_SUCCEEDS");
+    fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+        .expect("B18.FIXTURE.SNAPSHOT_IS_0600");
+
+    let markdown_path = output.join(FIXTURE_MARKDOWN_FILE);
+    write_private_file(&markdown_path, exported.bytes());
+
+    let markdown_sha256 = sha256_hex_of(exported.bytes());
+    let snapshot_bytes = fs::read(&snapshot_path).expect("B18.FIXTURE.SNAPSHOT_READS");
+    let snapshot_sha256 = sha256_hex_of(&snapshot_bytes);
+    let schema_version = declared_schema_version_of(&snapshot_path);
+    let source_head = fixture_source_head();
+
+    // Identity and digests only. No passphrase, no recovery key, no auth token: the manifest is
+    // the thing a later check reads, and a fixture manifest that carries the way in is a
+    // credential file with a different name.
+    let manifest_path = output.join(FIXTURE_MANIFEST_FILE);
+    let manifest = serde_json::json!({
+        "fixture": "beacon.b18.outcome-fixture.v1",
+        "source_head": source_head,
+        "schema_version": schema_version,
+        "workspace_id": fixture.workspace_id.to_string(),
+        "mission_id": fixture.mission_id.to_string(),
+        "publication_version": exported.publication_version(),
+        "publication_version_count": exported.publication_version_count(),
+        "candidate_artifact_digest": exported.digest().value.clone(),
+        "media_type": exported.media_type(),
+        "markdown_file": FIXTURE_MARKDOWN_FILE,
+        "markdown_bytes": exported.bytes().len(),
+        "markdown_sha256": markdown_sha256,
+        "snapshot_file": FIXTURE_SNAPSHOT_FILE,
+        "snapshot_bytes": snapshot_bytes.len(),
+        // The digest of the snapshot AS MINTED. Opening a store writes to it, so a consumer
+        // verifies this before its first open, not after.
+        "snapshot_sha256": snapshot_sha256,
+    });
+    write_private_file(
+        &manifest_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).expect("B18.FIXTURE.MANIFEST_SERIALIZES")
+        )
+        .as_bytes(),
+    );
+
+    Ok(MintedOutcomeFixture {
+        directory: output.to_path_buf(),
+        snapshot_path,
+        markdown_path,
+        manifest_path,
+        source_head,
+        schema_version,
+        workspace_id: fixture.workspace_id,
+        mission_id: fixture.mission_id,
+        publication_version: exported.publication_version(),
+        publication_version_count: exported.publication_version_count(),
+        candidate_artifact_digest: exported.digest().value.clone(),
+        media_type: exported.media_type().to_owned(),
+        markdown_bytes: exported.bytes().to_vec(),
+        markdown_sha256,
+        snapshot_sha256,
+    })
+}
+
+/// Reopens a byte-identical COPY of the minted snapshot through the ordinary owner services.
+///
+/// A copy, and not the artifact itself, because opening writes: `Supervisor::bootstrap` runs
+/// reconciliation inside a transaction and the account service leaves `-wal`/`-shm` beside the
+/// store. The recorded `snapshot_sha256` is what a later consumer checks BEFORE its first open, so
+/// this proof must not be the thing that invalidates it -- and the caller asserts afterwards that
+/// the artifact is still exactly the bytes its manifest names.
+fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadBack {
+    let snapshot_bytes = fs::read(&minted.snapshot_path).expect("B18.READBACK.SNAPSHOT_READS");
+    assert_eq!(
+        sha256_hex_of(&snapshot_bytes),
+        minted.snapshot_sha256,
+        "B18.READBACK.SNAPSHOT_IS_THE_MINTED_BYTES"
+    );
+    // Opening can leave WAL siblings; keep the copy in a private directory whose guard also
+    // removes them if startup, authentication, or any later assertion unwinds.
+    let opened_prefix = PrivatePrefix::new("readback");
+    let opened = opened_prefix.path.join("store.sqlite3");
+    // Write exactly the bytes just verified, in a new 0600 file under the 0700 directory.
+    write_private_file(&opened, &snapshot_bytes);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: opened.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("B18.READBACK.STARTUP_SUCCEEDS");
+
+    let accounts = Arc::new(
+        OperatorAccountService::open(&opened).expect("B18.READBACK.ACCOUNT_SERVICE_OPENS"),
+    );
+    assert_eq!(
+        accounts
+            .authenticate_password(
+                SecretString::new(FIXTURE_PASSPHRASE.to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("B18.READBACK.STORE_UNLOCKS")
+            .phase,
+        OperatorSessionPhase::Unlocked
+    );
+
+    let outcomes = OutcomeService::new(accounts, report.workspace.id);
+    let history = outcomes
+        .publication_history(minted.mission_id)
+        .expect("B18.READBACK.PUBLICATION_HISTORY_READS");
+    let exported = outcomes
+        .export_markdown_version(minted.mission_id, minted.publication_version)
+        .expect("B18.READBACK.VERSION_EXPORTS");
+
+    MintedFixtureReadBack {
+        workspace_id: report.workspace.id,
+        workspace_created: report.workspace.created,
+        schema_version: declared_schema_version_of(&opened),
+        publication_versions: history
+            .iter()
+            .map(|row| {
+                (
+                    row.publication_version,
+                    row.is_current,
+                    row.candidate_artifact_digest.clone(),
+                )
+            })
+            .collect(),
+        exported_bytes: exported.bytes().to_vec(),
+        exported_digest: exported.digest().value.clone(),
+        publication_version: exported.publication_version(),
+        publication_version_count: exported.publication_version_count(),
+        media_type: exported.media_type().to_owned(),
+    }
+}
+
+/// A task-owned private prefix the bar creates for itself: `0700` at creation, under the temp
+/// directory, removed when the test ends.
+///
+/// The bars mint inside one of these rather than inside `TMPDIR` directly, so they hold whatever
+/// `TMPDIR` happens to be -- including a bare `/tmp`, which the guard now refuses as a prefix. A
+/// test whose result depends on how the operator exported one variable is measuring the operator.
+struct PrivatePrefix {
+    path: PathBuf,
+}
+
+impl PrivatePrefix {
+    fn new(label: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("b18-prefix-{label}-{}", Uuid::new_v4().simple()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("B18.PREFIX.CREATED");
+        Self { path }
+    }
+}
+
+impl Drop for PrivatePrefix {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A path that does not exist yet, removed when the test ends.
+struct PrivateOutput {
+    path: PathBuf,
+}
+
+impl PrivateOutput {
+    fn under(prefix: &PrivatePrefix, label: &str) -> Self {
+        Self {
+            path: prefix
+                .path
+                .join(format!("b18-{label}-{}", Uuid::new_v4().simple())),
+        }
+    }
+}
+
+impl Drop for PrivateOutput {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Bar 1: the public owner interfaces really seed a published Outcome, and the mint writes exactly
+/// three private files describing it.
+#[test]
+fn a_minted_outcome_fixture_seeds_one_published_outcome_into_three_private_files() {
+    let prefix = PrivatePrefix::new("seed");
+    let output = PrivateOutput::under(&prefix, "seed");
+    let minted = mint_private_outcome_fixture_within(&prefix.path, Some(&output.path))
+        .expect("B18.MINT.SUCCEEDS");
+
+    assert_eq!(
+        mode_of(&minted.directory),
+        0o700,
+        "B18.MINT.DIRECTORY_IS_0700"
+    );
+    assert_eq!(
+        mode_of(&minted.snapshot_path),
+        0o600,
+        "B18.MINT.SNAPSHOT_IS_0600"
+    );
+    assert_eq!(
+        mode_of(&minted.markdown_path),
+        0o600,
+        "B18.MINT.MARKDOWN_IS_0600"
+    );
+    assert_eq!(
+        mode_of(&minted.manifest_path),
+        0o600,
+        "B18.MINT.MANIFEST_IS_0600"
+    );
+    let mut written: Vec<String> = fs::read_dir(&minted.directory)
+        .expect("B18.MINT.DIRECTORY_LISTS")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    assert_eq!(
+        written,
+        vec![
+            FIXTURE_MARKDOWN_FILE.to_owned(),
+            FIXTURE_MANIFEST_FILE.to_owned(),
+            FIXTURE_SNAPSHOT_FILE.to_owned(),
+        ],
+        "B18.MINT.WRITES_EXACTLY_THREE_FILES"
+    );
+
+    // The document says something. Without this, an empty document passes every digest, length and
+    // byte comparison in this section by agreeing with itself.
+    let document =
+        String::from_utf8(minted.markdown_bytes.clone()).expect("B18.MINT.MARKDOWN_IS_UTF8");
+    assert!(
+        document.contains(FIXTURE_MISSION_DECLARATION),
+        "B18.MINT.DOCUMENT_CARRIES_THE_SEEDED_MISSION_DECLARATION: {document}"
+    );
+    assert!(
+        document.contains(CONDITION_TEXT),
+        "B18.MINT.DOCUMENT_CARRIES_THE_SEEDED_CONDITION: {document}"
+    );
+    assert!(
+        minted.markdown_bytes.len() < 64 * 1024,
+        "B18.MINT.DOCUMENT_FITS_THE_WIRE_BOUND: {} bytes",
+        minted.markdown_bytes.len()
+    );
+    assert_eq!(minted.media_type, "text/markdown; charset=utf-8");
+    assert_eq!(minted.publication_version, 1);
+    assert_eq!(minted.publication_version_count, 1);
+
+    // The retained file is the retained bytes, and the recorded digests cover them.
+    assert_eq!(
+        fs::read(&minted.markdown_path).expect("B18.MINT.MARKDOWN_READS"),
+        minted.markdown_bytes,
+        "B18.MINT.MARKDOWN_FILE_IS_THE_EXPORTED_BYTES"
+    );
+    assert_eq!(
+        sha256_hex_of(&minted.markdown_bytes),
+        minted.markdown_sha256
+    );
+    assert_eq!(
+        sha256_hex_of(&fs::read(&minted.snapshot_path).expect("B18.MINT.SNAPSHOT_READS")),
+        minted.snapshot_sha256
+    );
+
+    // The manifest describes that fixture and carries no way into it.
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&minted.manifest_path).expect("B18.MINT.MANIFEST_READS"))
+            .expect("B18.MINT.MANIFEST_IS_JSON");
+    assert_eq!(
+        manifest["source_head"], minted.source_head,
+        "B18.MINT.MANIFEST_RECORDS_THE_SOURCE_HEAD"
+    );
+    assert_eq!(
+        manifest["schema_version"], minted.schema_version,
+        "B18.MINT.MANIFEST_RECORDS_THE_SCHEMA_VERSION"
+    );
+    assert_eq!(
+        manifest["mission_id"],
+        minted.mission_id.to_string(),
+        "B18.MINT.MANIFEST_RECORDS_THE_MISSION"
+    );
+    assert_eq!(
+        manifest["workspace_id"],
+        minted.workspace_id.to_string(),
+        "B18.MINT.MANIFEST_RECORDS_THE_WORKSPACE"
+    );
+    assert_eq!(
+        manifest["publication_version"], 1,
+        "B18.MINT.MANIFEST_RECORDS_THE_VERSION"
+    );
+    assert_eq!(
+        manifest["candidate_artifact_digest"], minted.candidate_artifact_digest,
+        "B18.MINT.MANIFEST_RECORDS_THE_CANDIDATE_DIGEST"
+    );
+    assert_eq!(
+        manifest["snapshot_sha256"], minted.snapshot_sha256,
+        "B18.MINT.MANIFEST_RECORDS_THE_SNAPSHOT_DIGEST"
+    );
+    assert_eq!(
+        manifest["markdown_sha256"], minted.markdown_sha256,
+        "B18.MINT.MANIFEST_RECORDS_THE_MARKDOWN_DIGEST"
+    );
+    let manifest_text = fs::read_to_string(&minted.manifest_path).unwrap();
+    assert!(
+        !manifest_text.contains(FIXTURE_PASSPHRASE),
+        "B18.MINT.MANIFEST_CARRIES_NO_PASSPHRASE"
+    );
+}
+
+/// Bar 2: the snapshot reopens through the normal owner and returns the exact retained bytes and
+/// the same publication -- and the artifact survives being read.
+#[test]
+fn the_minted_snapshot_reopens_through_the_normal_owner_with_the_exact_bytes_and_publication() {
+    let prefix = PrivatePrefix::new("readback");
+    let output = PrivateOutput::under(&prefix, "readback");
+    let minted = mint_private_outcome_fixture_within(&prefix.path, Some(&output.path))
+        .expect("B18.MINT.SUCCEEDS");
+    let read_back = read_back_minted_fixture(&minted);
+
+    // Startup opened the SEEDED Workspace, and did not create a new one -- the difference between
+    // reading the fixture and quietly bootstrapping an empty store beside it.
+    assert!(
+        !read_back.workspace_created,
+        "B18.READBACK.WORKSPACE_WAS_NOT_CREATED_FRESH"
+    );
+    assert_eq!(
+        read_back.workspace_id, minted.workspace_id,
+        "B18.READBACK.SAME_WORKSPACE"
+    );
+    assert_eq!(
+        read_back.schema_version, minted.schema_version,
+        "B18.READBACK.SAME_SCHEMA_VERSION"
+    );
+
+    assert_eq!(
+        read_back.publication_versions,
+        vec![(
+            minted.publication_version,
+            true,
+            minted.candidate_artifact_digest.clone()
+        )],
+        "B18.READBACK.SAME_PUBLICATION"
+    );
+    assert_eq!(
+        read_back.exported_bytes, minted.markdown_bytes,
+        "B18.READBACK.EXACT_RETAINED_BYTES"
+    );
+    assert_eq!(
+        read_back.exported_digest, minted.candidate_artifact_digest,
+        "B18.READBACK.SAME_CANDIDATE_DIGEST"
+    );
+    assert_eq!(
+        (
+            read_back.publication_version,
+            read_back.publication_version_count
+        ),
+        (minted.publication_version, minted.publication_version_count),
+        "B18.READBACK.SAME_VERSION_OF_SAME_COUNT"
+    );
+    assert_eq!(read_back.media_type, minted.media_type);
+    let document =
+        String::from_utf8(read_back.exported_bytes.clone()).expect("B18.READBACK.MARKDOWN_IS_UTF8");
+    assert!(
+        document.contains(FIXTURE_MISSION_DECLARATION) && document.contains(CONDITION_TEXT),
+        "B18.READBACK.DOCUMENT_CARRIES_THE_SEEDED_NARRATIVE"
+    );
+
+    // And the artifact a later check will verify is still the bytes its manifest names.
+    assert_eq!(
+        sha256_hex_of(&fs::read(&minted.snapshot_path).expect("B18.READBACK.SNAPSHOT_STILL_READS")),
+        minted.snapshot_sha256,
+        "B18.READBACK.MINTED_SNAPSHOT_SURVIVES_ITS_OWN_PROOF"
+    );
+}
+
+/// Bar 3: an occupied path, a symlink and a path outside the private prefix are all refused, and
+/// the sentinel that was already there is byte-identical afterwards.
+#[test]
+fn a_mint_refuses_an_occupied_path_a_symlink_or_a_public_prefix_without_touching_anything() {
+    const SENTINEL: &[u8] = b"B18 sentinel: these bytes were here first.\n";
+
+    // (a) A directory that already exists, holding a file.
+    let prefix = PrivatePrefix::new("refuse");
+    let occupied = PrivateOutput::under(&prefix, "occupied");
+    fs::create_dir(&occupied.path).unwrap();
+    let sentinel_file = occupied.path.join("sentinel.txt");
+    fs::write(&sentinel_file, SENTINEL).unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&occupied.path))
+            .expect_err("an occupied path minted"),
+        FixtureMintRefusal::Occupied(occupied.path.clone())
+    );
+    assert_eq!(
+        fs::read(&sentinel_file).unwrap(),
+        SENTINEL,
+        "B18.REFUSE.SENTINEL_IS_BYTE_IDENTICAL"
+    );
+    assert_eq!(
+        fs::read_dir(&occupied.path).unwrap().count(),
+        1,
+        "B18.REFUSE.NOTHING_WAS_WRITTEN_BESIDE_THE_SENTINEL"
+    );
+
+    // (b) A symlink pointing at that same directory. `exists()` follows the link and would have
+    // called this "a directory that is there"; a DANGLING link it would have called absent. Both
+    // are things that are already at the path, and both are refused as such.
+    let link = PrivateOutput::under(&prefix, "symlink");
+    std::os::unix::fs::symlink(&occupied.path, &link.path).unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&link.path))
+            .expect_err("a symlink minted"),
+        FixtureMintRefusal::Occupied(link.path.clone())
+    );
+    assert_eq!(
+        fs::read(&sentinel_file).unwrap(),
+        SENTINEL,
+        "B18.REFUSE.SYMLINK_TARGET_IS_BYTE_IDENTICAL"
+    );
+    assert!(
+        fs::symlink_metadata(&link.path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "B18.REFUSE.SYMLINK_WAS_NOT_REPLACED"
+    );
+
+    // (c) A dangling symlink: absent to `exists()`, present to the refusal.
+    let dangling = PrivateOutput::under(&prefix, "dangling");
+    std::os::unix::fs::symlink(prefix.path.join("b18-no-such-target"), &dangling.path).unwrap();
+    assert!(
+        !dangling.path.exists(),
+        "the dangling link must look absent"
+    );
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&dangling.path))
+            .expect_err("a dangling symlink minted"),
+        FixtureMintRefusal::Occupied(dangling.path.clone())
+    );
+
+    // (d) Outside the private prefix entirely -- refused for THAT reason, not for existing.
+    let public = PathBuf::from("/etc/beacon-b18-never-written");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&public))
+            .expect_err("a public path minted"),
+        FixtureMintRefusal::NotPrivate(public.clone())
+    );
+    assert!(!public.exists(), "B18.REFUSE.PUBLIC_PATH_WAS_NOT_CREATED");
+    let relative = PathBuf::from("b18-relative");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&relative))
+            .expect_err("a relative path minted"),
+        FixtureMintRefusal::NotPrivate(relative.clone())
+    );
+    assert!(
+        !relative.exists(),
+        "B18.REFUSE.RELATIVE_PATH_WAS_NOT_CREATED"
+    );
+
+    // (e) The private prefix ITSELF is not a mint target: a fixture directory is one this mint
+    // created, never the parent everything else under it is already using.
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&prefix.path))
+            .expect_err("the prefix itself minted"),
+        FixtureMintRefusal::NotPrivate(prefix.path.clone())
+    );
+
+    // (f) Astra's two escapes, at the parameterized boundary as well as the environment one: a
+    // `..` component and an intermediate directory symlink both LAND outside the prefix, however
+    // they are spelled. The peer they escape to is created by this bar and holds a sentinel.
+    let peer = PrivatePrefix::new("peer");
+    let peer_sentinel = peer.path.join("sentinel.txt");
+    fs::write(&peer_sentinel, SENTINEL).unwrap();
+    let traversal = prefix
+        .path
+        .join("..")
+        .join(peer.path.file_name().unwrap())
+        .join("mint");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&traversal))
+            .expect_err("a `..` traversal minted"),
+        FixtureMintRefusal::NotPrivate(traversal.clone())
+    );
+    let alias = prefix.path.join("alias");
+    std::os::unix::fs::symlink(&peer.path, &alias).unwrap();
+    let through_link = alias.join("mint");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&through_link))
+            .expect_err("a parent symlink minted"),
+        FixtureMintRefusal::NotPrivate(through_link)
+    );
+    assert!(
+        !peer.path.join("mint").exists(),
+        "B18.REFUSE.NOTHING_WAS_WRITTEN_OUTSIDE_THE_PREFIX"
+    );
+    assert_eq!(
+        fs::read(&peer_sentinel).unwrap(),
+        SENTINEL,
+        "B18.REFUSE.PEER_SENTINEL_IS_BYTE_IDENTICAL"
+    );
+}
+
+/// Bar 5: a prefix that is not task-owned and private is refused, so nothing minted under it can
+/// claim to be private either.
+///
+/// Parameterized rather than environment-driven on purpose: `std::env::set_var` is unsafe and
+/// process-global, and a test that flips `TMPDIR` under a binary running its cases in parallel
+/// changes the answer for every other test in it.
+#[test]
+fn a_mint_refuses_a_prefix_that_is_not_task_owned_and_private() {
+    let prefix = PrivatePrefix::new("badprefix");
+    let output = PrivateOutput::under(&prefix, "unused");
+
+    // `/tmp` itself: it exists, it is a directory, and this process may write in it -- and it is
+    // `1777`, shared with every process on the machine. A different fault from "left too open".
+    let shared = PathBuf::from("/tmp");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&shared, Some(&shared.join("b18-never")))
+            .expect_err("the shared /tmp minted"),
+        FixtureMintRefusal::PrefixNotPrivate(shared, PrefixFault::IsSharedTmp)
+    );
+
+    // Ours, under /tmp, a directory -- and group- and world-readable.
+    let open = prefix.path.join("open-prefix");
+    fs::DirBuilder::new().mode(0o755).create(&open).unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&open, Some(&open.join("mint")))
+            .expect_err("a 0755 prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(
+            open.clone(),
+            PrefixFault::GroupOrWorldAccessible { mode: 0o755 }
+        )
+    );
+
+    // A regular file, a path that is not there at all, one outside /tmp, and a relative one.
+    let file = prefix.path.join("not-a-directory");
+    fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&file, Some(&file.join("mint")))
+            .expect_err("a file prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(file, PrefixFault::NotADirectory)
+    );
+    let missing = prefix.path.join("no-such-prefix");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&missing, Some(&missing.join("mint")))
+            .expect_err("a missing prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(missing, PrefixFault::Missing)
+    );
+    let outside = PathBuf::from("/etc");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&outside, Some(&outside.join("b18-never")))
+            .expect_err("a prefix outside /tmp minted"),
+        FixtureMintRefusal::PrefixNotPrivate(outside, PrefixFault::NotUnderTmp)
+    );
+    let relative = PathBuf::from("b18-relative-prefix");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&relative, Some(&output.path))
+            .expect_err("a relative prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(relative, PrefixFault::NotAbsolute)
+    );
+
+    // The prefix is checked BEFORE the output, so a bad prefix is never rescued by a good output
+    // and nothing was created anywhere.
+    assert!(!output.path.exists(), "B18.PREFIX.NOTHING_WAS_CREATED");
+    assert!(!PathBuf::from("/tmp/b18-never").exists());
+    assert!(!PathBuf::from("/etc/b18-never").exists());
+}
+
+/// Bar 4: no output named at all refuses BY NAME, rather than passing having written nowhere.
+#[test]
+fn a_mint_with_no_output_named_refuses_by_name() {
+    let refusal = mint_private_outcome_fixture(None).expect_err("a mint with no output succeeded");
+    assert_eq!(refusal, FixtureMintRefusal::Unset);
+    assert!(
+        refusal.to_string().starts_with("B18.FIXTURE.OUTPUT_UNSET:"),
+        "the refusal does not name itself: {refusal}"
+    );
+    assert!(
+        refusal.to_string().contains("BEACON_B18_FIXTURE_DIR"),
+        "the refusal does not say how to name an output: {refusal}"
+    );
+}
+
+/// Mints the private fixture into a directory you name. Not part of the suite: it writes files
+/// outside the repository and is run deliberately, for one packaged read check, then deleted.
+///
+/// **Two steps, and the first one is not optional.** The prefix this mints inside is
+/// `std::env::temp_dir()`, and a bare `/tmp` is refused: `/tmp` is `1777` and shared with every
+/// process on the machine, so a fixture in it is not private in any sense the name claims. Make a
+/// task-owned one first.
+///
+///     export TMPDIR="$(mktemp -d)"    # 0700, yours, under /tmp -- the prefix the guard requires
+///     BEACON_B18_FIXTURE_DIR="$(mktemp -u "$TMPDIR/beacon-b18-XXXXXX")" \
+///         cargo test -p beacond --test outcome_prepare -- --ignored --exact \
+///         mint_private_outcome_fixture_into_the_named_directory --nocapture
+///
+/// `mktemp -d` creates the prefix; `mktemp -u` names the output WITHOUT creating it, which is what
+/// the mint requires -- an output that already exists is refused rather than written into. The two
+/// ways this run fails rather than passing quietly: `BEACON_B18_FIXTURE_DIR` unset gives
+/// `B18.FIXTURE.OUTPUT_UNSET`, and a `TMPDIR` that is not a task-owned private directory gives
+/// `B18.FIXTURE.PREFIX_NOT_PRIVATE` with the specific fault.
+///
+/// **What the recorded `source_head` proves.** It is `git rev-parse HEAD` in the tree the test was
+/// compiled from, so it names the commit whose generator produced these bytes -- provided the tree
+/// was CLEAN when it ran. It is not a build fingerprint: it cannot tell a reader whether the
+/// working tree had uncommitted edits, and a fixture minted before its own generator was committed
+/// records the earlier commit and is a development sample, not provenance for a packaged check.
+/// Mint the retained sample from a clean tree, after the commit, and check
+/// `git status --porcelain` is empty when you do.
+///
+/// The fixture is private and disposable: three files under your own temp prefix, `0700`/`0600`,
+/// none of them committed. Delete the directory when the check that used it is done.
+#[test]
+#[ignore = "mints a private fixture into a directory you name; run deliberately, never as part of the suite"]
+fn mint_private_outcome_fixture_into_the_named_directory() {
+    let named = std::env::var_os("BEACON_B18_FIXTURE_DIR").map(PathBuf::from);
+    let minted = mint_private_outcome_fixture(named.as_deref())
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+
+    // A fixture nobody proved is worse than none: the mint verifies its own artifact before it
+    // tells anyone the path.
+    let read_back = read_back_minted_fixture(&minted);
+    assert_eq!(read_back.exported_bytes, minted.markdown_bytes);
+    assert_eq!(read_back.workspace_id, minted.workspace_id);
+    assert!(!read_back.workspace_created);
+
+    println!("B18 fixture minted at {}", minted.directory.display());
+    println!("  source head        {}", minted.source_head);
+    println!("  schema version     {}", minted.schema_version);
+    println!("  mission            {}", minted.mission_id);
+    println!(
+        "  publication        version {} of {}",
+        minted.publication_version, minted.publication_version_count
+    );
+    println!("  snapshot           {}", minted.snapshot_path.display());
+    println!("  snapshot sha256    {}", minted.snapshot_sha256);
+    println!("  expected markdown  {}", minted.markdown_path.display());
+    println!("  markdown sha256    {}", minted.markdown_sha256);
+    println!("  manifest           {}", minted.manifest_path.display());
+}
+
+#[test]
+fn astra_b18_parent_traversal_cannot_escape_the_private_prefix() {
+    // Own both peers: a bare /tmp must not make this probe try creating a directory under /.
+    // Pass the private prefix explicitly instead of changing the process-wide environment.
+    let inside = PrivatePrefix::new("astra-inside");
+    let prefix = &inside.path;
+    let outside = PrivatePrefix::new("astra-outside");
+    let sentinel = outside.path.join("sentinel");
+    fs::write(&sentinel, b"retained sibling").unwrap();
+    let output = prefix
+        .join("..")
+        .join(outside.path.file_name().unwrap())
+        .join("mint");
+    let result = mint_private_outcome_fixture_within(prefix, Some(&output));
+    let created = outside.path.join("mint").exists();
+    assert_eq!(
+        fs::read(&sentinel).unwrap(),
+        b"retained sibling",
+        "B18.OUTPUT.EXISTING_SIBLING_UNCHANGED"
+    );
+    assert_eq!(
+        result.err(),
+        Some(FixtureMintRefusal::NotPrivate(output)),
+        "B18.OUTPUT.NO_PARENT_ESCAPE"
+    );
+    assert!(!created, "B18.OUTPUT.NO_OUTSIDE_WRITES");
+}
+
+#[test]
+fn astra_b18_parent_symlink_cannot_escape_the_private_prefix() {
+    // Own both peers: a bare /tmp must not make this probe try creating a directory under /.
+    // Pass the private prefix explicitly instead of changing the process-wide environment.
+    let inside = PrivatePrefix::new("astra-inside");
+    let prefix = &inside.path;
+    let outside = PrivatePrefix::new("astra-outside");
+    let links = PrivateOutput {
+        path: prefix.join("parent-link"),
+    };
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&links.path)
+        .unwrap();
+    std::os::unix::fs::symlink(&outside.path, links.path.join("alias")).unwrap();
+    let sentinel = outside.path.join("sentinel");
+    fs::write(&sentinel, b"retained sibling").unwrap();
+    let output = links.path.join("alias").join("mint");
+    let result = mint_private_outcome_fixture_within(prefix, Some(&output));
+    let created = outside.path.join("mint").exists();
+    assert_eq!(
+        fs::read(&sentinel).unwrap(),
+        b"retained sibling",
+        "B18.OUTPUT.EXISTING_SIBLING_UNCHANGED"
+    );
+    assert_eq!(
+        result.err(),
+        Some(FixtureMintRefusal::NotPrivate(output)),
+        "B18.OUTPUT.NO_PARENT_SYMLINK_ESCAPE"
+    );
+    assert!(!created, "B18.OUTPUT.NO_OUTSIDE_WRITES");
 }
