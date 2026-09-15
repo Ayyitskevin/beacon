@@ -23,3 +23,5 @@ node_modules/
 
 # Session scratch: gate logs and probes, never source.
 /scratchpad/
+.env
+.env.local
