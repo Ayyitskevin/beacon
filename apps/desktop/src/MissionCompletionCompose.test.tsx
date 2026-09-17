@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -62,6 +62,13 @@ async function choose(user: ReturnType<typeof userEvent.setup>, label: string, o
   await user.click(await screen.findByRole("option", { name: option }));
 }
 
+/** Enter complete digest values through the UI without simulating 64 independent keystrokes.
+ *  This journey checks exact submitted values; the input and preview handlers remain real. */
+async function pasteDigest(user: ReturnType<typeof userEvent.setup>, label: string, digest: string) {
+  await user.click(screen.getByLabelText(label));
+  await user.paste(digest);
+}
+
 /** Fills every required control. Optional evidence is added by the caller. */
 async function fillMinimum(user: ReturnType<typeof userEvent.setup>) {
   await choose(user, "Accountable Resident", RESIDENT);
@@ -110,19 +117,19 @@ it("sends every citation kind and both narrative lists exactly as entered", asyn
 
   await user.click(screen.getByRole("button", { name: "Add support to condition 1" }));
   await choose(user, "Reference kind 1.1", "Artifact");
-  await user.type(screen.getByLabelText("Record digest 1.1"), A);
+  await pasteDigest(user, "Record digest 1.1", A);
   await user.click(screen.getByRole("button", { name: "Add support to condition 1" }));
   await choose(user, "Reference kind 1.2", "Receipt");
   await user.type(screen.getByLabelText("Run id 1.2"), RUN);
   await user.type(screen.getByLabelText("Receipt version 1.2"), "2");
-  await user.type(screen.getByLabelText("Receipt bytes digest 1.2"), B);
+  await pasteDigest(user, "Receipt bytes digest 1.2", B);
   await user.click(screen.getByRole("button", { name: "Add support to condition 2" }));
   await choose(user, "Reference kind 2.1", "Evaluation");
-  await user.type(screen.getByLabelText("Record digest 2.1"), C);
+  await pasteDigest(user, "Record digest 2.1", C);
   await user.click(screen.getByRole("button", { name: "Add support to condition 2" }));
   await choose(user, "Reference kind 2.2", "Ruling");
-  await user.type(screen.getByLabelText("Record digest 2.2"), D);
-  await user.type(screen.getByLabelText("Delivered Artifact digests"), A);
+  await pasteDigest(user, "Record digest 2.2", D);
+  await pasteDigest(user, "Delivered Artifact digests", A);
   await user.click(screen.getByRole("button", { name: "Add unfinished work item" }));
   await choose(user, "Unfinished work kind 1", "Known defect");
   // The Operator types the condition NUMBER shown on screen; the owner stores the ordinal below it.
@@ -967,16 +974,18 @@ const CALLER_LINES: readonly (readonly [string, string])[] = [
   ["mission_completion_unavailable", "The Mission completion could not be verified."],
 ];
 
-it("gives every completion code its exact fixed line, through the real projection", async () => {
-  for (const [code, line] of CALLER_LINES) {
+// Each code drives a complete form. Keep each journey inside its own test lifetime: a single
+// nine-form loop can time out while its remaining user events continue into the following test.
+it.each(CALLER_LINES)(
+  "gives every completion code its exact fixed line, through the real projection: %s",
+  async (code, line) => {
     await previewRefusedBy(code);
     // The ALERT's whole text, not a substring match: a line that merely contains the sentence is a
     // different line, and `findByText` would fail before the assertion name could be printed.
     const alert = await screen.findByRole("alert");
     expect(alert.textContent, `C4.COPY.EXACT_LINE: ${code}`).toBe(line);
-    cleanup();
-  }
-});
+  },
+);
 
 it("no longer answers the retired completion_unavailable proposal with completion copy", async () => {
   await previewRefusedBy("completion_unavailable");
