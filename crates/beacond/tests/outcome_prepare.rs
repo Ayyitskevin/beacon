@@ -9978,16 +9978,16 @@ fn b16_an_oversized_request_does_not_succeed_through_the_public_client() {
 // B18: a private, disposable Outcome fixture for a later packaged read check (Blue's DP-B17)
 // ---------------------------------------------------------------------------------------------
 //
-// Blue measured the seam this fills. The packaged `LocalCommand` interface has no completion,
-// classification, prepare or publish operation, so a packaged run cannot mint an Outcome for
-// itself to read; the public owner interfaces used throughout this file can. This section hands
-// the result to a later check as three files in a directory the CALLER names.
+// The `LocalCommand` interface exposes completion, classification and candidate preparation,
+// but no Outcome publication operation. This fixture seeds a published Outcome through the
+// public owner interfaces used throughout this file, then hands the result to a later check as
+// three files in a directory the CALLER names.
 //
 // What it establishes, and what it does not. It establishes owner-interface SEEDING and snapshot
 // READBACK: a store minted here reopens through `Supervisor::bootstrap` and the ordinary
 // `OperatorAccountService` / `OutcomeService` and returns the exact retained bytes and the same
-// publication identity. It establishes NOTHING about a packaged Outcome-WRITE Command -- there is
-// none -- nor about the desktop UI, nor about the clipboard. Those stay NOT PROBED.
+// publication identity. It does not exercise the packaged completion/classification/prepare path,
+// prove a packaged publication path, or exercise the desktop UI or clipboard. Those stay NOT PROBED.
 
 /// The fixture account's passphrase: this file's existing known phrase, and nothing else.
 ///
