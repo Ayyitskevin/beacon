@@ -33,7 +33,6 @@ use crate::outcome::{
 use crate::outcome_collector::{
     CollectedCondition, CollectedDigest, CollectedNarrative, CollectedSources, CollectedSupport,
 };
-use crate::spend::CANONICALIZER as SPEND_CANONICALIZER;
 
 const DIGEST_ALGORITHM: &str = "sha256";
 /// The completion citation's schema version. `MissionCompletionV1` carries no version field; its
@@ -410,14 +409,15 @@ fn spend_state(
             });
         }
     }
-    let (Some(spend_id), Some(version), Some(digest_value), Some((from, to))) = (
+    let (Some(spend_id), Some(version), Some(era), Some(digest_value), Some((from, to))) = (
         spend.spend_id,
         spend.version,
+        spend.era,
         &spend.digest_value,
         spend.coverage,
     ) else {
         return Err(AssemblyRefusal::SpendInconsistent {
-            detail: "measured, but without identity, digest or coverage",
+            detail: "measured, but without identity, era, digest or coverage",
         });
     };
     let amount = match &spend.amount {
@@ -439,7 +439,7 @@ fn spend_state(
         schema_version: version,
         digest: SourceDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: SPEND_CANONICALIZER.to_owned(),
+            canonicalizer: era.canonicalizer().to_owned(),
             value: digest_value.clone(),
         },
         amount_minor: amount.amount_minor,
@@ -753,6 +753,7 @@ mod tests {
                 digest_value: None,
                 spend_id: None,
                 version: None,
+                era: None,
                 measurement: "not_measured".to_owned(),
                 coverage: None,
                 amount: OutcomeState::NotEvaluated("no ledger was read.".to_owned()),
@@ -1032,6 +1033,7 @@ mod tests {
             digest_value: Some(hex("66")),
             spend_id: Some(Uuid::from_u128(0x66)),
             version: Some(1),
+            era: Some(crate::spend::SpendEra::V2),
             measurement: "partially_measured".to_owned(),
             coverage: Some((1, 30)),
             amount: OutcomeState::Verified(SpendAmount {

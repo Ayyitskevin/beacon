@@ -46,7 +46,7 @@ use crate::outcome::{
     SourceKind,
 };
 use crate::proposal::sha256;
-use crate::spend::{MeasuredSpend, SpendMeasurement};
+use crate::spend::{MeasuredSpend, SpendEra, SpendMeasurement};
 
 /// Why a collection did not happen.
 ///
@@ -580,6 +580,9 @@ pub struct CollectedSpend {
     pub digest_value: Option<String>,
     pub spend_id: Option<Uuid>,
     pub version: Option<u32>,
+    /// The verified record's grammar era, not its record version or the current writer's era.
+    /// `None` only when the completion cites no spend record.
+    pub era: Option<SpendEra>,
     /// The record's own word for its measurement, or `not_measured` when the completion recorded no
     /// spend record at all. Never synthesised, never a synonym.
     pub measurement: String,
@@ -1061,6 +1064,7 @@ impl<'a> Collector<'a> {
                     digest_value: None,
                     spend_id: None,
                     version: None,
+                    era: None,
                     measurement: "not_measured".to_owned(),
                     coverage: None,
                     amount: OutcomeState::NotEvaluated(reason.clone()),
@@ -1235,6 +1239,7 @@ impl<'a> Collector<'a> {
             digest_value: Some(digest_value),
             spend_id: Some(spend_id),
             version: Some(spend_version),
+            era: Some(payload.era),
             measurement: if short_of_boundary {
                 crate::spend::PARTIALLY_MEASURED.to_owned()
             } else {

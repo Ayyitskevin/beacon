@@ -6699,6 +6699,311 @@ fn c11d_short_spend_window_is_partial_in_document() {
     );
 }
 
+// Spend B: owner-retained grammar identity must survive public candidate preparation.
+fn spend_b_completed_mission(label: &str, era: SpendEra) -> (Fixture, beacond::MeasuredSpend) {
+    use beacond::{
+        MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendOrigin,
+        SpendSupersedes, SpendTotals,
+    };
+    let mut f = admitted_mission(label);
+    f.mission_id = sol1_admit_other_mission(&f, "B6 | export control");
+    f.classify(ImpactLevel::High);
+    let spend = MeasuredSpendV1 {
+        era,
+        workspace_id: f.workspace_id,
+        mission_id: f.mission_id,
+        spend_id: Uuid::new_v4(),
+        // Deliberately unrelated to the grammar era; version-derived labels must fail.
+        version: 7,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: f.latest_event_seq(),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed(
+                    "recorded before spend carried dimensions",
+                ),
+                unit: "USD".to_owned(),
+                amount_minor: 1234,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    let recorded = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
+        .record(
+            &spend
+                .canonical_bytes()
+                .expect("SPEND_B.OWNER_CANONICAL_BYTES"),
+        )
+        .expect("SPEND_B.OWNER_RECORD_AND_VERIFIED_READ");
+    let completion = c11d_completion(
+        &f,
+        SpendReference::Recorded {
+            spend_id: recorded.payload().spend_id,
+            spend_version: recorded.payload().version,
+            spend_sha256: digest_bytes(&recorded.digest().value),
+        },
+        vec![],
+    );
+    record_completion(&mut f.store.connect(), &completion).expect("SPEND_B.COMPLETION_RECORDS");
+    (f, recorded)
+}
+
+#[test]
+fn spend_b_public_prepare_preserves_retained_v1_era_at_record_version_seven() {
+    let (f, recorded) = spend_b_completed_mission("spend-b-v1", SpendEra::V1);
+    let wire = B12Wire::open(&f);
+    let candidate = wire
+        .client
+        .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include)
+        .expect("SPEND_B.PUBLIC_PREPARE");
+    let manifest = f
+        .outcomes
+        .manifest(&candidate.manifest_digest.value)
+        .expect("SPEND_B.MANIFEST_OWNER_READ");
+    let spend = manifest
+        .manifest()
+        .spend_ref
+        .verified()
+        .expect("SPEND_B.VERIFIED_SPEND");
+    assert_eq!(spend.schema_version, 7, "SPEND_B.RECORD_VERSION_NOT_ERA");
+    assert_eq!(
+        spend.digest.value,
+        recorded.digest().value,
+        "SPEND_B.DIGEST_IDENTITY"
+    );
+    assert_eq!(
+        spend.digest.canonicalizer, "beacon.spend.v1",
+        "SPEND_B.V1_LITERAL_ERA"
+    );
+    let document = wire
+        .client
+        .read_outcome_candidate_document(&candidate.manifest_digest.value)
+        .expect("SPEND_B.PUBLIC_CANDIDATE_READ");
+    let bytes = BASE64
+        .decode(document.candidate_content_base64.as_bytes())
+        .unwrap();
+    let markdown = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        markdown.contains("beacon.spend.v1"),
+        "SPEND_B.DOCUMENT_V1_LITERAL_ERA"
+    );
+    assert!(
+        markdown.contains(&recorded.digest().value),
+        "SPEND_B.DOCUMENT_DIGEST_IDENTITY"
+    );
+}
+
+#[test]
+fn spend_b_public_prepare_preserves_retained_v2_era_at_record_version_seven() {
+    let (f, recorded) = spend_b_completed_mission("spend-b-v2", SpendEra::V2);
+    let wire = B12Wire::open(&f);
+    let candidate = wire
+        .client
+        .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include)
+        .expect("SPEND_B.PUBLIC_PREPARE");
+    let manifest = f
+        .outcomes
+        .manifest(&candidate.manifest_digest.value)
+        .expect("SPEND_B.MANIFEST_OWNER_READ");
+    let spend = manifest
+        .manifest()
+        .spend_ref
+        .verified()
+        .expect("SPEND_B.VERIFIED_SPEND");
+    assert_eq!(spend.schema_version, 7, "SPEND_B.RECORD_VERSION_NOT_ERA");
+    assert_eq!(
+        spend.digest.value,
+        recorded.digest().value,
+        "SPEND_B.DIGEST_IDENTITY"
+    );
+    assert_eq!(
+        spend.digest.canonicalizer, "beacon.spend.v2",
+        "SPEND_B.V2_LITERAL_ERA"
+    );
+    let document = wire
+        .client
+        .read_outcome_candidate_document(&candidate.manifest_digest.value)
+        .expect("SPEND_B.PUBLIC_CANDIDATE_READ");
+    let bytes = BASE64
+        .decode(document.candidate_content_base64.as_bytes())
+        .unwrap();
+    let markdown = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        markdown.contains("beacon.spend.v2"),
+        "SPEND_B.DOCUMENT_V2_LITERAL_ERA"
+    );
+    assert!(
+        markdown.contains(&recorded.digest().value),
+        "SPEND_B.DOCUMENT_DIGEST_IDENTITY"
+    );
+}
+
+#[test]
+fn spend_b_public_prepare_refuses_corrupt_owner_bytes() {
+    let (f, recorded) = spend_b_completed_mission("spend-b-corrupt-owner", SpendEra::V1);
+    let wire = B12Wire::open(&f);
+    wire.client
+        .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include)
+        .expect("SPEND_B.OWNER_ADVERSE_POSITIVE_CONTROL");
+    // Test-only corruption after startup: the live prepare read must engage the owner.
+    with_trigger_down(
+        &f.store,
+        "measured_spend_no_update",
+        "measured_spend",
+        "Measured spend records are immutable",
+        |connection| {
+            assert_eq!(connection.execute(
+                "UPDATE measured_spend SET canonical_bytes = zeroblob(16) WHERE digest_value = ?1",
+                params![recorded.digest().value],
+            ).unwrap(), 1, "SPEND_B.OWNER_CORRUPTION_ENGAGED");
+        },
+    );
+    let refusal = f
+        .outcomes
+        .prepare_for_mission(f.mission_id, AppendixRequest::Include)
+        .expect_err("SPEND_B.OWNER_MUST_REFUSE_CORRUPT_BYTES");
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::Collector(beacond::CollectorRefusal::Unverified { kind: "spend", .. })
+        ),
+        "SPEND_B.OWNER_REFUSAL_KIND: {refusal:?}"
+    );
+    assert!(
+        matches!(
+            wire.client
+                .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomePreparationUnavailable,
+                ..
+            })
+        ),
+        "SPEND_B.PUBLIC_OWNER_REFUSAL"
+    );
+}
+
+#[test]
+fn spend_b_public_prepare_refuses_event_without_the_owner_bytes() {
+    let (f, recorded) = spend_b_completed_mission("spend-b-event-bytes", SpendEra::V1);
+    let wire = B12Wire::open(&f);
+    wire.client
+        .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include)
+        .expect("SPEND_B.EVENT_ADVERSE_POSITIVE_CONTROL");
+    assert_eq!(f.store.connect().execute(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.canonical_bytes_base64', 'AA==')
+         WHERE workspace_id = ?1 AND kind = 'spend.measured'
+           AND json_extract(payload_json, '$.digest.value') = ?2",
+        params![f.workspace_id.to_string(), recorded.digest().value],
+    ).unwrap(), 1, "SPEND_B.EVENT_CORRUPTION_ENGAGED");
+    let refusal = f
+        .outcomes
+        .prepare_for_mission(f.mission_id, AppendixRequest::Include)
+        .expect_err("SPEND_B.EVENT_MUST_CARRY_OWNER_BYTES");
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::Collector(beacond::CollectorRefusal::Unpositioned {
+                kind: "spend",
+                ..
+            })
+        ),
+        "SPEND_B.EVENT_REFUSAL_KIND: {refusal:?}"
+    );
+    assert!(
+        matches!(
+            wire.client
+                .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomePreparationUnavailable,
+                ..
+            })
+        ),
+        "SPEND_B.PUBLIC_EVENT_REFUSAL"
+    );
+}
+
+#[test]
+fn spend_b_publication_retains_exact_bytes_after_reopen() {
+    let (f, _) = spend_b_completed_mission("spend-b-reopen", SpendEra::V1);
+    let wire = B12Wire::open(&f);
+    let prepared = wire
+        .client
+        .prepare_outcome_candidate(f.mission_id, beacond::AppendixRequestDto::Include)
+        .expect("SPEND_B.RETENTION_PUBLIC_PREPARE");
+    let candidate = f
+        .outcomes
+        .candidate(&prepared.manifest_digest.value)
+        .unwrap();
+    let evaluation = f.evaluate(&candidate.digest().value, Verdict::Meets);
+    let publication = f
+        .outcomes
+        .publish(f.mission_id, candidate.digest(), evaluation.digest())
+        .expect("SPEND_B.RETENTION_PUBLICATION");
+    let manifest_before = publication.manifest().canonical_bytes().to_vec();
+    let candidate_before = publication.candidate().payload().canonical_bytes().unwrap();
+    let markdown_before = publication.candidate().content().to_vec();
+    assert!(
+        std::str::from_utf8(&markdown_before)
+            .unwrap()
+            .contains("B6 \\| export control"),
+        "B6.EXPORT.BASELINE_ESCAPED_TITLE"
+    );
+    drop(wire);
+    f.restart();
+    let accounts = Arc::new(OperatorAccountService::open(&f.store.path).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let reopened = OutcomeService::new(accounts, f.workspace_id);
+    let retained = reopened
+        .get_version(f.mission_id, 1)
+        .expect("SPEND_B.REOPEN_OWNER_READ");
+    assert_eq!(
+        retained.manifest().canonical_bytes(),
+        manifest_before,
+        "SPEND_B.RETAINED_MANIFEST_BYTES"
+    );
+    assert_eq!(
+        retained.candidate().payload().canonical_bytes().unwrap(),
+        candidate_before,
+        "SPEND_B.RETAINED_ARTIFACT_RECORD_BYTES"
+    );
+    assert_eq!(retained.publication_id(), publication.publication_id());
+    assert_eq!(retained.mission_id(), publication.mission_id());
+    assert_eq!(
+        retained.publication_version(),
+        publication.publication_version()
+    );
+    assert_eq!(
+        retained.cited_candidate_artifact_digest(),
+        publication.cited_candidate_artifact_digest()
+    );
+    assert_eq!(
+        retained.cited_evaluation_digest(),
+        publication.cited_evaluation_digest()
+    );
+    assert_eq!(
+        reopened.export_markdown(f.mission_id).unwrap().bytes(),
+        markdown_before,
+        "B6.EXPORT.RETAINED_CANDIDATE_BYTES_EXACT"
+    );
+    assert_eq!(
+        reopened
+            .export_markdown_version(f.mission_id, 1)
+            .unwrap()
+            .bytes(),
+        markdown_before,
+        "SPEND_B.VERSIONED_EXPORT_RETAINED_BYTES"
+    );
+}
+
 /// R34's positive control: `Measured` on the real path -- measure AFTER the last Run, then complete.
 ///
 /// The gap then holds only the spend's own `spend.measured` Event and the completion's, and neither
