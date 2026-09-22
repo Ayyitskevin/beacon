@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::check_preflight::{PreflightOutcome, decode_preflight_receipt};
 use crate::declared_checks::{ExecutionSummary, decode_execution_receipt_projection};
+use crate::dispatch::{RecentDispatchState, verify_recent_dispatch};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 
 /// The largest Run window one reading may walk. A request above it is clamped
@@ -82,10 +83,10 @@ pub struct RecentReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecentReceiptPage {
-    /// Receipts of every kind, newest first by `(started_at_ms, run id)`.
+    /// Visible preflight/check Receipts, newest first by `(started_at_ms, run id)`.
     pub receipts: Vec<RecentReceipt>,
-    /// Runs INSIDE THIS WINDOW still holding a live lease. A Run count, not a
-    /// Receipt count.
+    /// Runs INSIDE THIS WINDOW recorded as open, not observed process liveness
+    /// or a clock-reclassified lease verdict. A Run count, not a Receipt count.
     pub runs_in_flight_in_window: u32,
     /// Runs INSIDE THIS WINDOW whose lease expired without a Receipt.
     ///
@@ -95,6 +96,9 @@ pub struct RecentReceiptPage {
     /// them; reading this one would give a bounded subset an exhaustive
     /// meaning it does not have.
     pub runs_unconfirmed_in_window: u32,
+    /// Terminal dispatch records INSIDE THIS WINDOW whose owner proof passed,
+    /// excluded from the visible Receipts. Coherence, never a success claim.
+    pub runs_verified_excluded_in_window: u32,
     /// How many Runs the daemon walked, after clamping.
     pub run_window_applied: u32,
     /// Whether older RUNS exist beyond the window. It does not claim another
@@ -165,7 +169,10 @@ impl RecentReceiptService {
     pub fn recent(&self, requested_window: u32) -> Result<RecentReceiptPage, RecentReceiptError> {
         let run_window_applied = requested_window.clamp(1, MAX_RECENT_RUN_WINDOW);
         self.accounts.with_authenticated_store(|connection, _now| {
-            read_recent(connection, self.workspace_id, run_window_applied)
+            let transaction = connection.transaction()?;
+            let page = read_recent(&transaction, self.workspace_id, run_window_applied)?;
+            transaction.commit()?;
+            Ok(page)
         })
     }
 }
@@ -205,6 +212,7 @@ fn read_recent(
     let mut receipts = Vec::new();
     let mut runs_in_flight_in_window = 0u32;
     let mut runs_unconfirmed_in_window = 0u32;
+    let mut runs_verified_excluded_in_window = 0u32;
     let mut stepped = 0usize;
     let mut more_runs_exist = false;
     for stored in rows.take(probe as usize) {
@@ -214,10 +222,11 @@ fn read_recent(
             more_runs_exist = true;
             break;
         }
-        match stored?.classify(workspace_id)? {
+        match stored?.classify(connection, workspace_id)? {
             Classified::Receipt(receipt) => receipts.push(*receipt),
             Classified::InFlight => runs_in_flight_in_window += 1,
             Classified::Unconfirmed => runs_unconfirmed_in_window += 1,
+            Classified::VerifiedExcluded => runs_verified_excluded_in_window += 1,
         }
     }
 
@@ -225,6 +234,7 @@ fn read_recent(
         receipts,
         runs_in_flight_in_window,
         runs_unconfirmed_in_window,
+        runs_verified_excluded_in_window,
         run_window_applied,
         more_runs_exist,
     })
@@ -261,6 +271,7 @@ enum Classified {
     Receipt(Box<RecentReceipt>),
     InFlight,
     Unconfirmed,
+    VerifiedExcluded,
 }
 
 impl StoredRun {
@@ -270,14 +281,30 @@ impl StoredRun {
     /// 0031 makes the state pairing part of the Receipt contract, not startup
     /// trivia. `runs.state` is deliberately not on the wire, so the adapter
     /// cannot check it -- which is why it is checked here, where the field is.
-    fn classify(self, workspace_id: Uuid) -> Result<Classified, RecentReceiptError> {
+    fn classify(
+        self,
+        connection: &Connection,
+        workspace_id: Uuid,
+    ) -> Result<Classified, RecentReceiptError> {
+        if self.kind == "proposal_dispatch" {
+            return match verify_recent_dispatch(connection, workspace_id, parse_uuid(&self.run_id)?)
+                .map_err(|_| RecentReceiptError::InvalidStore)?
+            {
+                RecentDispatchState::VerifiedTerminal => Ok(Classified::VerifiedExcluded),
+                RecentDispatchState::RecordedOpen => Ok(Classified::InFlight),
+                RecentDispatchState::Unconfirmed => Ok(Classified::Unconfirmed),
+            };
+        }
+        if !matches!(self.kind.as_str(), "check_preflight" | "declared_checks") {
+            return Err(RecentReceiptError::InvalidStore);
+        }
         let Some(outcome) = self.outcome.as_deref() else {
             // No Receipt. Both writers insert the Run's terminal state and its
             // Receipt in one transaction, and only lease reconciliation sets
             // `unconfirmed`, so any other state here is an inconsistent store.
             //
             // The END TIME is part of that tuple, not decoration. A
-            // `preflighting` Run is holding its lease and has not finished; one
+            // `preflighting` Run is recorded as open; one
             // carrying an end time says both, and the table's CHECK only
             // requires `ended >= started`, so the store admits it. Lease
             // reconciliation sets `unconfirmed` and `ended_at_ms` in one

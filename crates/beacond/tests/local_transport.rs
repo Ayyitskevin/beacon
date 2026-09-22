@@ -4251,6 +4251,7 @@ fn recent_receipts_are_workspace_scoped_bounded_and_authenticated_over_the_local
     assert!(page.receipts.is_empty());
     assert_eq!(page.runs_in_flight_in_window, 0);
     assert_eq!(page.runs_unconfirmed_in_window, 0);
+    assert_eq!(page.runs_verified_excluded_in_window, 0);
     assert_eq!(page.run_window_applied, 50);
     assert!(!page.more_runs_exist);
 
@@ -4261,6 +4262,25 @@ fn recent_receipts_are_workspace_scoped_bounded_and_authenticated_over_the_local
     // No payload body crosses the wire, whatever the reading found.
     let rendered = serde_json::to_string(&page).unwrap();
     assert!(!rendered.contains("receiptJson"));
+    let wire = serde_json::to_value(&page).unwrap();
+    assert_eq!(wire["runsVerifiedExcludedInWindow"], 0);
+    let mut absent = wire.clone();
+    absent
+        .as_object_mut()
+        .unwrap()
+        .remove("runsVerifiedExcludedInWindow");
+    assert!(serde_json::from_value::<beacond::RecentReceiptPage>(absent).is_err());
+    for malformed in [
+        json!(-1),
+        json!(1.5),
+        json!(4_294_967_296_u64),
+        json!("0"),
+        json!(null),
+    ] {
+        let mut altered = wire.clone();
+        altered["runsVerifiedExcludedInWindow"] = malformed;
+        assert!(serde_json::from_value::<beacond::RecentReceiptPage>(altered).is_err());
+    }
 
     client.lock().unwrap();
     assert!(matches!(

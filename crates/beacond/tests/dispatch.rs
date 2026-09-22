@@ -6369,6 +6369,354 @@ fn b7_control_an_unlocked_session_completes_the_dispatch() {
     );
 }
 
+/// Selected Recent A: a real completed dispatch must not poison its bounded reading.
+#[test]
+fn recent_a_an_ordinary_dispatch_is_verified_but_not_projected() {
+    let fixture = admitted_mission("recent-a-applied");
+    let (_repository, ruling_digest) = fixture.approved("recent-a-applied");
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "RECENT_A.REAL_APPLIED"
+    );
+    let recent =
+        beacond::RecentReceiptService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let page = recent.recent(50).expect("RECENT_A.VALID_DISPATCH_STORE");
+    assert!(page.receipts.is_empty());
+    let wire = serde_json::to_value(&page).unwrap();
+    assert_eq!(
+        wire["runsVerifiedExcludedInWindow"], 1,
+        "RECENT_A.EXACT_EXCLUSION_COUNT"
+    );
+    assert_eq!(page.runs_in_flight_in_window, 0);
+    assert_eq!(page.runs_unconfirmed_in_window, 0);
+    assert!(!page.more_runs_exist);
+    let encoded = serde_json::to_string(&page).unwrap();
+    for absent in [
+        "proposal_dispatch",
+        "applied",
+        "preparedCommit",
+        "receiptJson",
+        "payloadJson",
+    ] {
+        assert!(
+            !encoded.contains(absent),
+            "RECENT_A.NO_DISCLOSURE: {absent}"
+        );
+    }
+}
+
+fn recent_a_query(
+    fixture: &Fixture,
+) -> Result<beacond::RecentReceiptPage, beacond::RecentReceiptError> {
+    beacond::RecentReceiptService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .recent(50)
+}
+
+/// Each negative owns a real Applied control and proves the public query accepts
+/// that store BEFORE the single named corruption. No startup refusal masks it.
+fn recent_a_refuses_corruption(label: &str, sql: &str) {
+    let fixture = admitted_mission(label);
+    let (_repository, ruling) = fixture.approved(label);
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "{label}: positive dispatch"
+    );
+    assert_eq!(
+        recent_a_query(&fixture)
+            .unwrap()
+            .runs_verified_excluded_in_window,
+        1,
+        "{label}: positive Recent"
+    );
+    fixture.without_run_triggers(sql);
+    assert!(
+        matches!(
+            recent_a_query(&fixture),
+            Err(beacond::RecentReceiptError::InvalidStore)
+        ),
+        "{label}: the corrupted sibling must be InvalidStore"
+    );
+}
+
+macro_rules! recent_a_corruption {
+    ($name:ident, $sql:expr) => {
+        #[test]
+        fn $name() {
+            recent_a_refuses_corruption(stringify!($name), $sql);
+        }
+    };
+}
+
+recent_a_corruption!(
+    recent_a_missing_event_is_invalid,
+    "DELETE FROM events WHERE kind='proposal.dispatched'"
+);
+recent_a_corruption!(recent_a_duplicate_event_is_invalid,
+    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest)
+     SELECT workspace_id, kind, payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest FROM events WHERE kind='proposal.dispatched'");
+recent_a_corruption!(recent_a_wrong_kind_terminal_sibling_is_invalid,
+    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest)
+     SELECT workspace_id, 'run.executed', payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest FROM events WHERE kind='proposal.dispatched'");
+recent_a_corruption!(
+    recent_a_actual_event_bytes_are_required,
+    "UPDATE events SET payload_json=payload_json || ' ' WHERE kind='proposal.dispatched'"
+);
+recent_a_corruption!(
+    recent_a_receipt_bytes_must_equal_the_event,
+    "UPDATE receipts SET receipt_json=receipt_json || ' '"
+);
+recent_a_corruption!(
+    recent_a_actual_event_time_is_required,
+    "UPDATE events SET occurred_at_ms=occurred_at_ms+1 WHERE kind='proposal.dispatched'"
+);
+recent_a_corruption!(
+    recent_a_wrong_run_event_is_invalid,
+    "UPDATE events SET payload_json=json_set(payload_json, '$.runId', '00000000-0000-4000-8000-000000000001') WHERE kind='proposal.dispatched'"
+);
+recent_a_corruption!(
+    recent_a_true_applied_receipt_with_only_sql_state_changed_is_invalid,
+    "UPDATE runs SET state='refused' WHERE kind='proposal_dispatch'"
+);
+recent_a_corruption!(
+    recent_a_sql_start_must_equal_verified_receipt,
+    "UPDATE runs SET started_at_ms=started_at_ms-1 WHERE kind='proposal_dispatch'"
+);
+recent_a_corruption!(
+    recent_a_sql_end_must_equal_verified_receipt,
+    "UPDATE runs SET ended_at_ms=ended_at_ms+1 WHERE kind='proposal_dispatch'"
+);
+recent_a_corruption!(
+    recent_a_sql_recorded_time_must_equal_verified_receipt,
+    "UPDATE receipts SET recorded_at_ms=recorded_at_ms+1"
+);
+recent_a_corruption!(recent_a_unknown_outcome_is_invalid,
+    "UPDATE receipts SET outcome='future_outcome', receipt_json=json_set(receipt_json, '$.outcome', 'future_outcome');
+     UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+recent_a_corruption!(recent_a_unknown_actor_is_invalid,
+    "UPDATE receipts SET receipt_json=json_set(receipt_json, '$.actor', 'resident');
+     UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+recent_a_corruption!(recent_a_unknown_field_is_invalid,
+    "UPDATE receipts SET receipt_json=json_set(receipt_json, '$.futureField', 1);
+     UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+recent_a_corruption!(
+    recent_a_malformed_receipt_is_invalid,
+    "PRAGMA ignore_check_constraints=ON; UPDATE receipts SET receipt_json='{'; PRAGMA ignore_check_constraints=OFF;"
+);
+recent_a_corruption!(recent_a_unsupported_version_is_invalid,
+    "UPDATE receipts SET version=2, receipt_json=json_set(receipt_json, '$.version', 2);
+     UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+recent_a_corruption!(
+    recent_a_sql_version_must_equal_verified_receipt,
+    "UPDATE receipts SET version=3"
+);
+recent_a_corruption!(
+    recent_a_sql_outcome_must_equal_verified_receipt,
+    "UPDATE receipts SET outcome='landing_refused'"
+);
+recent_a_corruption!(
+    recent_a_missing_preparation_is_invalid,
+    "DELETE FROM dispatch_preparations"
+);
+recent_a_corruption!(
+    recent_a_different_preparation_is_invalid,
+    "UPDATE dispatch_preparations SET prepared_commit='1111111111111111111111111111111111111111'"
+);
+recent_a_corruption!(recent_a_applied_without_landing_facts_is_invalid,
+    "UPDATE receipts SET receipt_json=json_set(receipt_json, '$.preparedCommit', NULL);
+     UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+recent_a_corruption!(
+    recent_a_terminal_without_receipt_is_invalid,
+    "DELETE FROM receipts"
+);
+recent_a_corruption!(
+    recent_a_receipt_on_open_run_is_invalid,
+    "UPDATE runs SET state='dispatching', ended_at_ms=NULL WHERE kind='proposal_dispatch'"
+);
+recent_a_corruption!(
+    recent_a_invalid_run_identity_is_invalid,
+    "PRAGMA foreign_keys=OFF; UPDATE runs SET id='not-a-uuid' WHERE kind='proposal_dispatch'; PRAGMA foreign_keys=ON;"
+);
+
+#[test]
+fn recent_a_sql_project_must_equal_verified_receipt() {
+    let fixture = admitted_mission("recent-a-project");
+    let (_repository, ruling) = fixture.approved("recent-a-project");
+    fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        recent_a_query(&fixture)
+            .unwrap()
+            .runs_verified_excluded_in_window,
+        1
+    );
+    let other = ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .create(ProjectDraft {
+            name: "Another project".to_owned(),
+            charter: charter_draft("Different project"),
+        })
+        .unwrap();
+    fixture.without_run_triggers(&format!(
+        "PRAGMA foreign_keys=OFF; UPDATE runs SET project_id='{}' WHERE kind='proposal_dispatch'; PRAGMA foreign_keys=ON;",
+        other.id));
+    assert!(matches!(
+        recent_a_query(&fixture),
+        Err(beacond::RecentReceiptError::InvalidStore)
+    ));
+}
+
+#[test]
+fn recent_a_legacy_v3_and_terminal_refusals_are_excluded_without_disclosure() {
+    let fixture = admitted_mission("recent-a-legacy");
+    let (_repository, ruling) = fixture.approved("recent-a-legacy");
+    fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        recent_a_query(&fixture)
+            .unwrap()
+            .runs_verified_excluded_in_window,
+        1
+    );
+    fixture.without_run_triggers(
+        "UPDATE receipts SET version=3, receipt_json=json_remove(json_set(receipt_json, '$.version', 3),
+          '$.perMutation[0].observedPreImage', '$.perMutation[1].observedPreImage', '$.perMutation[2].observedPreImage');
+         UPDATE events SET payload_json=(SELECT receipt_json FROM receipts) WHERE kind='proposal.dispatched'");
+    assert_eq!(
+        recent_a_query(&fixture)
+            .unwrap()
+            .runs_verified_excluded_in_window,
+        1,
+        "legacy era is preserved"
+    );
+    let refusal = fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_ne!(refusal.outcome, DispatchOutcome::Applied);
+    let page = recent_a_query(&fixture).unwrap();
+    assert_eq!(page.runs_verified_excluded_in_window, 2);
+    assert!(page.receipts.is_empty());
+}
+
+#[test]
+fn recent_a_reconstructed_terminal_records_are_not_receiptless_unconfirmed() {
+    for boundary in ["before_reserve", "before_landing", "after_swap"] {
+        let fixture = admitted_mission(boundary);
+        let (_repository, ruling) = fixture.approved(boundary);
+        fixture.dispatch_until_death(&ruling, boundary);
+        fixture.restart().unwrap();
+        let page = recent_a_query(&fixture).unwrap();
+        assert_eq!(page.runs_verified_excluded_in_window, 1, "{boundary}");
+        assert_eq!(page.runs_unconfirmed_in_window, 0, "{boundary}");
+        assert_eq!(page.runs_in_flight_in_window, 0, "{boundary}");
+        assert!(page.receipts.is_empty(), "{boundary}");
+    }
+}
+
+#[test]
+fn recent_a_mixed_window_does_not_count_lookahead_or_validate_older_corruption() {
+    let fixture = admitted_mission("recent-a-window");
+    let (_repository, ruling) = fixture.approved("recent-a-window");
+    let preflight =
+        beacond::CheckPreflightService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .preflight(fixture.project_id)
+            .unwrap();
+    let first = fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(first.outcome, DispatchOutcome::Applied);
+    let recent =
+        beacond::RecentReceiptService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let mixed = recent.recent(50).unwrap();
+    assert_eq!(mixed.receipts.len(), 1);
+    assert_eq!(mixed.receipts[0].run_id, preflight.run_id);
+    assert_eq!(mixed.runs_verified_excluded_in_window, 1);
+    assert!(!mixed.more_runs_exist);
+    for window in [0, 1] {
+        let page = recent.recent(window).unwrap();
+        assert_eq!(page.run_window_applied, 1);
+        assert_eq!(page.runs_verified_excluded_in_window, 1);
+        assert!(page.receipts.is_empty());
+        assert!(page.more_runs_exist);
+    }
+    // A second terminal dispatch means the first is now the lookahead row.
+    let second = fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    assert!(
+        second.started_at_ms > first.started_at_ms,
+        "the fixture must have distinct window keys"
+    );
+    let page = recent.recent(1).unwrap();
+    assert_eq!(
+        page.runs_verified_excluded_in_window, 1,
+        "lookahead is not counted"
+    );
+    fixture.without_run_triggers(&format!(
+        "DELETE FROM events WHERE kind='proposal.dispatched' AND json_extract(payload_json, '$.runId')='{}'",
+        first.run_id));
+    assert_eq!(
+        recent.recent(1).unwrap().runs_verified_excluded_in_window,
+        1,
+        "corrupt lookahead is not verified"
+    );
+    assert!(
+        matches!(
+            recent.recent(2),
+            Err(beacond::RecentReceiptError::InvalidStore)
+        ),
+        "selected corrupt sibling refuses"
+    );
+}
+
+#[test]
+fn recent_a_event_lookup_is_workspace_opaque_even_for_the_same_run_id() {
+    let fixture = admitted_mission("recent-a-opacity");
+    let (_repository, ruling) = fixture.approved("recent-a-opacity");
+    fixture
+        .dispatches
+        .dispatch(&ruling, &content_for(NEW_BYTES))
+        .unwrap();
+    let other = Uuid::new_v4();
+    fixture.without_run_triggers(&format!(
+        "INSERT INTO workspaces (id, name, created_at_ms) VALUES ('{other}', 'Other', 0);
+         INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest)
+         SELECT '{other}', kind, payload_json, occurred_at_ms, predecessor_kind, predecessor_digest, link_digest FROM events WHERE kind='proposal.dispatched';"));
+    assert_eq!(
+        recent_a_query(&fixture)
+            .unwrap()
+            .runs_verified_excluded_in_window,
+        1,
+        "another Workspace's same Run id is not a duplicate"
+    );
+    fixture.without_run_triggers(&format!(
+        "DELETE FROM events WHERE kind='proposal.dispatched' AND workspace_id='{}'",
+        fixture.workspace_id
+    ));
+    assert!(
+        matches!(
+            recent_a_query(&fixture),
+            Err(beacond::RecentReceiptError::InvalidStore)
+        ),
+        "another Workspace's Event cannot replace the missing local Event"
+    );
+}
+
 /// Three cells on the locked path, sharing one expensive fixture rather than duplicating it:
 ///
 /// * **B7.PHASE.LOCK_COMPLETED_THEN_REFUSED** — a lock that COMPLETES at `before_landing` is

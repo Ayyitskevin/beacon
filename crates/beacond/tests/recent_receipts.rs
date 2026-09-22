@@ -494,6 +494,135 @@ fn a_window_larger_than_the_maximum_is_clamped_and_says_so() {
 }
 
 #[test]
+fn recent_a_receiptless_dispatches_remain_recorded_open_or_unconfirmed() {
+    let fixture = enrolled("recent-a-recorded-states");
+    let project = fixture.project("Recorded dispatches");
+    let reference_time = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    // Before/equal/after this fixed observation instant. The query deliberately
+    // does not compare its own clock with the lease or reconcile stored state.
+    for lease in [reference_time - 1, reference_time, reference_time + 60_000] {
+        fixture
+            .store
+            .connection()
+            .execute(
+                "INSERT INTO runs (workspace_id, id, project_id, kind, repository_revision,
+             charter_revision, state, lease_expires_at_ms, started_at_ms, ended_at_ms)
+             VALUES (?1, ?2, ?3, 'proposal_dispatch', 1, 1, 'dispatching', ?4, ?5, NULL)",
+                params![
+                    fixture.workspace_id.to_string(),
+                    Uuid::new_v4().to_string(),
+                    project.to_string(),
+                    lease,
+                    reference_time - 1_000
+                ],
+            )
+            .unwrap();
+    }
+    fixture.run(project, "proposal_dispatch", "unconfirmed", 10, None);
+    let page = fixture.recent.recent(50).unwrap();
+    assert_eq!(page.runs_in_flight_in_window, 3);
+    assert_eq!(page.runs_unconfirmed_in_window, 1);
+    assert_eq!(page.runs_verified_excluded_in_window, 0);
+    assert!(page.receipts.is_empty());
+    assert_eq!(
+        fixture.recent.recent(50).unwrap(),
+        page,
+        "a reading must not reconcile state"
+    );
+}
+
+fn recent_a_bad_receiptless_tuple(
+    kind: &str,
+    state: &str,
+    started: i64,
+    ended: Option<i64>,
+    lease: i64,
+) {
+    let fixture = enrolled("recent-a-bad-tuple");
+    let project = fixture.project("Bad tuple");
+    let connection = fixture.store.connection();
+    connection
+        .pragma_update(None, "ignore_check_constraints", "ON")
+        .unwrap();
+    connection.execute(
+        "INSERT INTO runs (workspace_id, id, project_id, kind, repository_revision, charter_revision,
+          state, lease_expires_at_ms, started_at_ms, ended_at_ms) VALUES (?1, ?2, ?3, ?4, 1, 1, ?5, ?6, ?7, ?8)",
+        params![fixture.workspace_id.to_string(), Uuid::new_v4().to_string(), project.to_string(), kind, state, lease, started, ended],
+    ).unwrap();
+    assert!(
+        matches!(
+            fixture.recent.recent(50),
+            Err(RecentReceiptError::InvalidStore)
+        ),
+        "{kind}/{state}/{started}/{ended:?}/{lease}: malformed tuple must not count"
+    );
+}
+
+#[test]
+fn recent_a_open_dispatch_with_end_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "dispatching", 10, Some(11), 100);
+}
+#[test]
+fn recent_a_unconfirmed_dispatch_without_end_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "unconfirmed", 10, None, 0);
+}
+#[test]
+fn recent_a_unconfirmed_dispatch_without_expired_lease_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "unconfirmed", 10, Some(20), 20);
+}
+#[test]
+fn recent_a_dispatch_in_another_kinds_open_state_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "preflighting", 10, None, 100);
+}
+#[test]
+fn recent_a_unknown_receiptless_kind_is_invalid() {
+    recent_a_bad_receiptless_tuple("future_kind", "preflighting", 10, None, 100);
+}
+#[test]
+fn recent_a_negative_dispatch_start_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "dispatching", -1, None, 100);
+}
+#[test]
+fn recent_a_negative_dispatch_lease_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "dispatching", 10, None, -1);
+}
+#[test]
+fn recent_a_unconfirmed_dispatch_ending_before_start_is_invalid() {
+    recent_a_bad_receiptless_tuple("proposal_dispatch", "unconfirmed", 10, Some(9), 0);
+}
+
+#[test]
+fn recent_a_open_dispatch_with_terminal_event_is_invalid() {
+    let fixture = enrolled("recent-a-open-event");
+    let project = fixture.project("Open with terminal event");
+    let run = Uuid::new_v4();
+    fixture.store.connection().execute(
+        "INSERT INTO runs (workspace_id, id, project_id, kind, repository_revision, charter_revision,
+          state, lease_expires_at_ms, started_at_ms, ended_at_ms) VALUES (?1, ?2, ?3, 'proposal_dispatch', 1, 1, 'dispatching', 100, 10, NULL)",
+        params![fixture.workspace_id.to_string(), run.to_string(), project.to_string()],
+    ).unwrap();
+    assert_eq!(
+        fixture.recent.recent(50).unwrap().runs_in_flight_in_window,
+        1
+    );
+    fixture.store.connection().execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms, predecessor_kind)
+         VALUES (?1, 'proposal.dispatched', ?2, 11, 'unchained')",
+        params![fixture.workspace_id.to_string(), serde_json::json!({"runId": run}).to_string()],
+    ).unwrap();
+    assert!(matches!(
+        fixture.recent.recent(50),
+        Err(RecentReceiptError::InvalidStore)
+    ));
+}
+
+#[test]
 fn a_run_without_a_receipt_is_counted_never_rendered_as_one() {
     // The wrong answer: a row with a null outcome. A Receipt is an account of a
     // Run; an unconfirmed Run recorded none, so a row claiming to be its

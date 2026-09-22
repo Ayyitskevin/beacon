@@ -2929,6 +2929,128 @@ pub(crate) fn verify_dispatch_event(
     verify_against_preparation(connection, workspace_id, &receipt)
 }
 
+pub(crate) enum RecentDispatchState {
+    VerifiedTerminal,
+    RecordedOpen,
+    Unconfirmed,
+}
+
+/// Prove one selected dispatch before Recent classifies it. This is a
+/// record-coherence answer, never an outcome projection or a live Git observation.
+/// The caller holds the same read snapshot as its bounded Run window.
+pub(crate) fn verify_recent_dispatch(
+    connection: &Connection,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> Result<RecentDispatchState, DispatchError> {
+    struct Metadata {
+        project_id: String,
+        started_at_ms: i64,
+        ended_at_ms: Option<i64>,
+        recorded_at_ms: Option<i64>,
+        receipt_run_id: Option<String>,
+        state: String,
+        lease_expires_at_ms: i64,
+    }
+    let metadata = connection.query_row(
+        "SELECT runs.project_id, runs.started_at_ms, runs.ended_at_ms, receipts.recorded_at_ms,
+                receipts.run_id, runs.state, runs.lease_expires_at_ms
+         FROM runs LEFT JOIN receipts
+           ON receipts.workspace_id = runs.workspace_id AND receipts.run_id = runs.id
+         WHERE runs.workspace_id = ?1 AND runs.id = ?2 AND runs.kind = 'proposal_dispatch'",
+        params![workspace_id.to_string(), run_id.to_string()],
+        |row| {
+            Ok(Metadata {
+                project_id: row.get(0)?,
+                started_at_ms: row.get(1)?,
+                ended_at_ms: row.get(2)?,
+                recorded_at_ms: row.get(3)?,
+                receipt_run_id: row.get(4)?,
+                state: row.get(5)?,
+                lease_expires_at_ms: row.get(6)?,
+            })
+        },
+    )?;
+    let project_id =
+        Uuid::parse_str(&metadata.project_id).map_err(|_| DispatchError::InvalidStore)?;
+    let started_at_ms =
+        u64::try_from(metadata.started_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+    let lease_expires_at_ms =
+        u64::try_from(metadata.lease_expires_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+    let ended_at_ms = metadata
+        .ended_at_ms
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| DispatchError::InvalidStore)?;
+    if ended_at_ms.is_some_and(|end| end < started_at_ms) {
+        return Err(DispatchError::InvalidStore);
+    }
+    // Include the other terminal kinds: a correct dispatch Event beside a
+    // relabelled terminal Event is not an exactly-one owner record. LIMIT bounds
+    // matched rows, not scan cost: there is no Workspace/kind/Run Event index.
+    let mut statement = connection.prepare(
+        "SELECT kind, occurred_at_ms, payload_json FROM events
+         WHERE workspace_id = ?1
+           AND kind IN ('proposal.dispatched', 'run.preflighted', 'run.executed')
+           AND json_extract(payload_json, '$.runId') = ?2
+         ORDER BY sequence LIMIT 2",
+    )?;
+    let events = statement
+        .query_map(
+            params![workspace_id.to_string(), run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .take(2)
+        .collect::<Result<Vec<_>, _>>()?;
+    if metadata.receipt_run_id.is_none() {
+        if !events.is_empty() || metadata.recorded_at_ms.is_some() {
+            return Err(DispatchError::InvalidStore);
+        }
+        // Recorded state, not observed liveness: do not compare a lease with
+        // today's clock or run reconciliation from this read. The unconfirmed
+        // end/lease relation is the existing expiry writer's historical fact.
+        return match (metadata.state.as_str(), ended_at_ms) {
+            ("dispatching", None) => Ok(RecentDispatchState::RecordedOpen),
+            ("unconfirmed", Some(end)) if lease_expires_at_ms < end => {
+                Ok(RecentDispatchState::Unconfirmed)
+            }
+            _ => Err(DispatchError::InvalidStore),
+        };
+    }
+    let [(kind, occurred_at_ms, payload)] = events.as_slice() else {
+        return Err(DispatchError::InvalidStore);
+    };
+    if kind != "proposal.dispatched" {
+        return Err(DispatchError::InvalidStore);
+    }
+    let occurred_at_ms = u64::try_from(*occurred_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+    // Actual Event bytes/time, never the Receipt substituted as its own witness.
+    verify_dispatch_event(connection, workspace_id, occurred_at_ms, payload)?;
+    // Decode only inside the owner, AFTER its full replay; never export a raw
+    // decoder or let Recent reimplement the version/outcome/preparation policy.
+    let receipt = decode_dispatch_receipt(payload)?;
+    if receipt.run_id != run_id
+        || receipt.project_id != project_id
+        || receipt.started_at_ms != started_at_ms
+        || Some(receipt.ended_at_ms) != ended_at_ms
+        || Some(receipt.ended_at_ms)
+            != metadata
+                .recorded_at_ms
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DispatchError::InvalidStore)?
+    {
+        return Err(DispatchError::InvalidStore);
+    }
+    Ok(RecentDispatchState::VerifiedTerminal)
+}
+
 /// The invariants one outcome arm owes its own record.
 ///
 /// Byte equality between a Receipt and its Event proves the two copies agree; it does not prove
