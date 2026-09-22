@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -453,7 +453,9 @@ it("ignores a read that settles after the operator selected another version", as
   render(<MissionOutcomes missionId={missionId} />);
   // Version 2 is genuinely in flight before anything replaces it.
   expect(await screen.findByText(/loading version 2/i)).toBeInTheDocument();
-  expect(documentCalls, "B14.DEFERRED.FIRST_READ_PENDING").toBe(1);
+  await waitFor(() =>
+    expect(documentCalls, "B14.DEFERRED.FIRST_READ_PENDING").toBe(1),
+  );
 
   await user.click(screen.getByRole("button", { name: "Show version 1" }));
   expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent(
