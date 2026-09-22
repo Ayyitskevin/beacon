@@ -29,6 +29,7 @@ function page(overrides: Partial<RecentReceiptPage> = {}): RecentReceiptPage {
     receipts: [],
     runsInFlightInWindow: 0,
     runsUnconfirmedInWindow: 0,
+    runsVerifiedExcludedInWindow: 0,
     runWindowApplied: 50,
     moreRunsExist: false,
     ...overrides,
@@ -96,8 +97,8 @@ it("never says a Declared Check passed", async () => {
 
 it("states every count the reading carries, not a bare 'and more'", async () => {
   // The page knows how many Runs it walked, how many recorded no Receipt, how
-  // many are still running, and whether older Runs exist. A bool where the page
-  // has a count throws away what the daemon measured.
+  // many are recorded as open, and whether older Runs exist. A bool where the
+  // page has a count throws away what the daemon measured.
   render(
     <BriefingReceipts
       page={page({
@@ -119,7 +120,7 @@ it("states every count the reading carries, not a bare 'and more'", async () => 
   expect(reading).toBeVisible();
   expect(reading.textContent).toMatch(/found 1 Receipt/);
   expect(reading.textContent).toMatch(/3 ended without one/);
-  expect(reading.textContent).toMatch(/2 are still running/);
+  expect(reading.textContent).toMatch(/2 recorded as open/);
   // Runs, not Receipts: whether another RECEIPT exists is not something this
   // reading established, and an older receiptless Run sets the same flag.
   expect(reading.textContent).toMatch(/older Runs exist/);
@@ -141,8 +142,41 @@ it("omits the counts it does not have rather than printing zeros", async () => {
   const reading = screen.getByText(/this reading covered the 50 most recent Runs/);
   expect(reading.textContent).toMatch(/found 1 Receipt\./);
   expect(reading.textContent).not.toMatch(/ended without one/);
-  expect(reading.textContent).not.toMatch(/still running/);
+  expect(reading.textContent).not.toMatch(/recorded as open/);
+  expect(reading.textContent).not.toMatch(/verified but not shown/);
   expect(reading.textContent).not.toMatch(/older Runs exist/);
+});
+
+it("discloses verified exclusions without turning an exclusion-only window into an empty Workspace", async () => {
+  const { rerender } = render(
+    <BriefingReceipts
+      page={page({ receipts: [], runsVerifiedExcludedInWindow: 1 })}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByText("No Receipts among the Runs in this reading.")).toBeVisible();
+  expect(screen.queryByText("No Receipts yet.")).toBeNull();
+  let reading = screen.getByText(/this reading covered the 50 most recent Runs/);
+  expect(reading.textContent).toContain("1 recent Run is verified but not shown in this view.");
+  expect(reading.textContent).not.toMatch(/dispatch|success|succeeded/i);
+
+  rerender(
+    <BriefingReceipts
+      page={page({ receipts: [], runsVerifiedExcludedInWindow: 2 })}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
+    />,
+  );
+  reading = screen.getByText(/this reading covered the 50 most recent Runs/);
+  expect(reading.textContent).toContain("2 recent Runs are verified but not shown in this view.");
 });
 
 it("does not call an empty window an empty Workspace", async () => {
@@ -189,7 +223,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   const onRefresh = vi.fn();
   const { container, rerender } = render(
     <BriefingReceipts
-      page={null}
+      page={page({ runsVerifiedExcludedInWindow: 1 })}
       loading
       failure=""
       disabled={false}
@@ -199,10 +233,11 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   );
   expect(screen.getByText("Loading Receipts")).toBeVisible();
   expect(screen.queryByText("No Receipts yet.")).toBeNull();
+  expect(screen.queryByText(/verified but not shown/)).toBeNull();
 
   rerender(
     <BriefingReceipts
-      page={null}
+      page={page({ runsVerifiedExcludedInWindow: 1 })}
       loading={false}
       failure="Beacon could not read recent Run and Receipt state."
       disabled={false}
@@ -213,6 +248,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   // A read that failed is not a Workspace with no Receipts.
   expect(screen.getByText(/could not be read/)).toBeVisible();
   expect(screen.queryByText("No Receipts yet.")).toBeNull();
+  expect(screen.queryByText(/verified but not shown/)).toBeNull();
 
   rerender(
     <BriefingReceipts
@@ -228,6 +264,50 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   expect(onRefresh).toHaveBeenCalledTimes(1);
 
   await expectNoWcagViolations(container);
+});
+
+it("keeps Refresh disabled while busy or loading and keyboard-operable otherwise", async () => {
+  const user = userEvent.setup();
+  const onRefresh = vi.fn();
+  const { rerender } = render(
+    <BriefingReceipts
+      page={page()}
+      loading={false}
+      failure=""
+      disabled
+      onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Refresh Receipts" })).toBeDisabled();
+
+  rerender(
+    <BriefingReceipts
+      page={page()}
+      loading
+      failure=""
+      disabled={false}
+      onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Refreshing…" })).toBeDisabled();
+
+  rerender(
+    <BriefingReceipts
+      page={page()}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
+    />,
+  );
+  const ready = screen.getByRole("button", { name: "Refresh Receipts" });
+  ready.focus();
+  expect(ready).toHaveFocus();
+  await user.keyboard("{Enter}");
+  expect(onRefresh).toHaveBeenCalledTimes(1);
 });
 
 it("does not take the panel down on an instant it cannot render", async () => {

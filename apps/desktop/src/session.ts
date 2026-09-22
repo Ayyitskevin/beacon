@@ -353,6 +353,7 @@ export type RecentReceiptPage = {
   receipts: RecentReceipt[];
   runsInFlightInWindow: number;
   runsUnconfirmedInWindow: number;
+  runsVerifiedExcludedInWindow: number;
   runWindowApplied: number;
   moreRunsExist: boolean;
 };
@@ -2732,6 +2733,7 @@ function isRecentReceiptPage(value: unknown): value is RecentReceiptPage {
       "runWindowApplied",
       "runsInFlightInWindow",
       "runsUnconfirmedInWindow",
+      "runsVerifiedExcludedInWindow",
     ])
   ) {
     return false;
@@ -2742,9 +2744,14 @@ function isRecentReceiptPage(value: unknown): value is RecentReceiptPage {
     !isBoundedCount(value.runWindowApplied) ||
     !isBoundedCount(value.runsInFlightInWindow) ||
     !isBoundedCount(value.runsUnconfirmedInWindow) ||
+    !isBoundedCount(value.runsVerifiedExcludedInWindow) ||
     !Array.isArray(receipts) ||
-    receipts.length > value.runWindowApplied ||
-    !receipts.every(isRecentReceipt)
+    !receipts.every(isRecentReceipt) ||
+    receipts.length +
+      value.runsInFlightInWindow +
+      value.runsUnconfirmedInWindow +
+      value.runsVerifiedExcludedInWindow >
+      value.runWindowApplied
   ) {
     return false;
   }

@@ -82,9 +82,13 @@ function renderInstant(value: number): string {
     : "time not renderable";
 }
 
-/** Runs in the window that recorded no Receipt. */
+/** Runs in the window that do not produce a visible Receipt row. */
 function windowRuns(page: RecentReceiptPage): number {
-  return page.runsInFlightInWindow + page.runsUnconfirmedInWindow;
+  return (
+    page.runsInFlightInWindow +
+    page.runsUnconfirmedInWindow +
+    page.runsVerifiedExcludedInWindow
+  );
 }
 
 /** What the reading covered, in the daemon's own terms.
@@ -92,7 +96,7 @@ function windowRuns(page: RecentReceiptPage): number {
  *  Every number here is a number the page carries. The window is over RUNS, so
  *  "more" is about Runs and never claims another Receipt exists -- an older Run
  *  that recorded none sets the same flag. The two receiptless counts are stated
- *  separately because a live lease and an expired one are two conditions, and
+ *  separately because recorded-open and unconfirmed are two conditions, and
  *  because a bool where the page has a count throws away what it knows. */
 function describeReading(page: RecentReceiptPage): string {
   const receipts = `${page.receipts.length} ${page.receipts.length === 1 ? "Receipt" : "Receipts"}`;
@@ -105,7 +109,14 @@ function describeReading(page: RecentReceiptPage): string {
     );
   }
   if (page.runsInFlightInWindow > 0) {
-    clauses.push(`${page.runsInFlightInWindow} ${page.runsInFlightInWindow === 1 ? "is" : "are"} still running`);
+    clauses.push(`${page.runsInFlightInWindow} recorded as open`);
+  }
+  if (page.runsVerifiedExcludedInWindow > 0) {
+    clauses.push(
+      page.runsVerifiedExcludedInWindow === 1
+        ? "1 recent Run is verified but not shown in this view"
+        : `${page.runsVerifiedExcludedInWindow} recent Runs are verified but not shown in this view`,
+    );
   }
   // Runs, not Receipts. Whether an older Receipt exists is not something this
   // reading established.

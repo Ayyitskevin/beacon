@@ -1126,6 +1126,7 @@ describe("desktop session transport", () => {
       receipts: [newest, oldest],
       runsInFlightInWindow: 0,
       runsUnconfirmedInWindow: 0,
+      runsVerifiedExcludedInWindow: 0,
       runWindowApplied: 50,
       moreRunsExist: false,
       ...overrides,
@@ -1136,10 +1137,16 @@ describe("desktop session transport", () => {
     };
 
     it("accepts the exact page the daemon produces", async () => {
-      const exact = page();
+      const exact = page({ runsVerifiedExcludedInWindow: 2 });
       invokeMock.mockResolvedValue(exact);
       await expect(recentReceipts(50)).resolves.toEqual(exact);
       expect(invokeMock).toHaveBeenCalledWith("recent_receipts", { window: 50 });
+    });
+
+    it("requires the verified-exclusion count instead of defaulting absence to zero", async () => {
+      const { runsVerifiedExcludedInWindow: _omitted, ...missing } = page();
+      invokeMock.mockResolvedValue(missing);
+      await expect(recentReceipts(50)).rejects.toThrow("invalid recent Receipt page");
     });
 
     it("refuses a page the daemon did not order", async () => {
@@ -1225,7 +1232,19 @@ describe("desktop session transport", () => {
     it("refuses counts outside the u32 the daemon counts in", async () => {
       await refused({ runsUnconfirmedInWindow: 4_294_967_296 });
       await refused({ runWindowApplied: 4_294_967_296 });
+      for (const value of [null, "1", true, -1, 0.5, 4_294_967_296]) {
+        await refused({ runsVerifiedExcludedInWindow: value });
+      }
       await refused({ moreRunsExist: "yes" });
+    });
+
+    it("refuses selected-window counts whose aggregate exceeds the applied window", async () => {
+      await refused({
+        runWindowApplied: 4,
+        runsInFlightInWindow: 1,
+        runsUnconfirmedInWindow: 1,
+        runsVerifiedExcludedInWindow: 1,
+      });
     });
 
     it("refuses a page with a key the daemon does not send", async () => {

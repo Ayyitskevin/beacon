@@ -194,6 +194,7 @@ function recentPage(overrides: Record<string, unknown> = {}) {
     ],
     runsInFlightInWindow: 0,
     runsUnconfirmedInWindow: 0,
+    runsVerifiedExcludedInWindow: 0,
     runWindowApplied: 50,
     moreRunsExist: false,
     ...overrides,
@@ -854,6 +855,7 @@ describe("Beacon desktop shell", () => {
             runWindowApplied: 50,
             runsUnconfirmedInWindow: 3,
             runsInFlightInWindow: 1,
+            runsVerifiedExcludedInWindow: 2,
             moreRunsExist: true,
           }),
         );
@@ -867,7 +869,8 @@ describe("Beacon desktop shell", () => {
     const reading = await screen.findByText(/this reading covered the 50 most recent Runs/);
     expect(reading.textContent).toMatch(/found 3 Receipts/);
     expect(reading.textContent).toMatch(/3 ended without one/);
-    expect(reading.textContent).toMatch(/1 is still running/);
+    expect(reading.textContent).toMatch(/1 recorded as open/);
+    expect(reading.textContent).toMatch(/2 recent Runs are verified but not shown in this view/);
     expect(reading.textContent).toMatch(/older Runs exist/);
     // Runs, not Receipts: an older Run that recorded none sets the same flag.
     expect(reading.textContent).not.toMatch(/more Receipts/);
@@ -979,6 +982,76 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByText("No Receipts yet.")).toBeVisible();
     expect(screen.queryByText(/could not be read/)).toBeNull();
     await expectNoWcagViolations(document.body);
+  });
+
+  it("replaces verified exclusions on refresh and clears them when refresh fails", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    let attempts = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "recent_receipts") {
+        attempts += 1;
+        if (attempts === 1) {
+          return Promise.resolve(recentPage({ receipts: [], runsVerifiedExcludedInWindow: 2 }));
+        }
+        if (attempts === 2) {
+          return Promise.resolve(recentPage({ receipts: [], runsVerifiedExcludedInWindow: 0 }));
+        }
+        return Promise.reject({ code: "preflight_unavailable", message: "unused" });
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    expect(
+      await screen.findByText(/2 recent Runs are verified but not shown in this view/),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+    await vi.waitFor(() =>
+      expect(screen.queryByText(/verified but not shown in this view/)).toBeNull(),
+    );
+    expect(screen.getByText("No Receipts yet.")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+    expect(
+      await screen.findByText(/Beacon could not read recent Run and Receipt state\./),
+    ).toBeVisible();
+    expect(screen.queryByText(/verified but not shown in this view/)).toBeNull();
+    expect(screen.queryByText("No Receipts yet.")).toBeNull();
+    await expectNoWcagViolations(container);
+  });
+
+  it("ignores a verified-exclusion reply that resolves after the session locks", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    let resolveRecent!: (page: ReturnType<typeof recentPage>) => void;
+    const pendingRecent = new Promise<ReturnType<typeof recentPage>>((resolve) => {
+      resolveRecent = resolve;
+    });
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "recent_receipts") return pendingRecent;
+      if (command === "lock_session") return Promise.resolve(status("locked"));
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    expect(await screen.findByRole("button", { name: "Refreshing…" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Lock Beacon" }));
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
+
+    await act(async () => {
+      resolveRecent(recentPage({ receipts: [], runsVerifiedExcludedInWindow: 2 }));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/verified but not shown in this view/)).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Briefing" })).toBeNull();
+    await expectNoWcagViolations(container);
   });
 
   it("keeps an initial live-data diagnostic failure visible and retryable", async () => {
@@ -2757,6 +2830,7 @@ describe("Beacon desktop shell", () => {
       ],
       runsInFlightInWindow: 0,
       runsUnconfirmedInWindow: 0,
+      runsVerifiedExcludedInWindow: 0,
       runWindowApplied: 50,
       moreRunsExist: false,
     };
