@@ -1,0 +1,26 @@
+{
+  "base": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4",
+  "purpose": "Privacy-edited public copies; original SHA-256 values below describe retained pre-rewrite evidence, not the edited sources. Example origins are inert, not current filesystem pointers. Historical review grants and holds are unchanged; no authority transfers.",
+  "sources": [
+    {
+      "original": "./private-evidence/beacon-weekend-v2-20260919/contract-proposals/03-DELIVERY-EVIDENCE.md",
+      "destination": "03-DELIVERY-EVIDENCE.md",
+      "sha256": "9a282ff22e4f1c42f44db1c8c2d9c305ff4de581f7749d1f4fbd6946677763e2"
+    },
+    {
+      "original": "./private-evidence/node-a-beacon-queue-resume-20260920/03-DELIVERY-OWNER-PACKET.md",
+      "destination": "03-DELIVERY-OWNER-PACKET.md",
+      "sha256": "cbb3c84ccd05c522802d46a66aef8d9c9b4579495a09cf026b264936ece75ff8"
+    },
+    {
+      "original": "./private-evidence/beacon-delivery-q06-20260925/DELIVERY03-Q06-PROPOSAL.md",
+      "destination": "DELIVERY03-Q06-PROPOSAL.md",
+      "sha256": "3d5a631bfb0f36eb37ef7de32c62223f127d579df2c718d3707e8daad3e31316"
+    },
+    {
+      "original": "./private-evidence/beacon-contract-continuation-20260923/DELIVERY03-MUSE-OPTION-A.md",
+      "destination": "DELIVERY03-MUSE-OPTION-A.md",
+      "sha256": "50e39d03b983787029f5157233808e220f41a0d4ffbe39d27b039cf24b940423"
+    }
+  ]
+}
