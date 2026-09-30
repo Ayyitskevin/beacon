@@ -1,0 +1,31 @@
+{
+  "base": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4",
+  "purpose": "Privacy-edited public copies; original SHA-256 values below describe retained pre-rewrite evidence, not the edited sources. Example origins are inert, not current filesystem pointers. Historical review grants and holds are unchanged; no authority transfers.",
+  "sources": [
+    {
+      "original": "./private-evidence/beacon-weekend-v2-20260919/contract-proposals/01-EVIDENCE-SIDECAR.md",
+      "destination": "01-EVIDENCE-SIDECAR.md",
+      "sha256": "3d308f93327572f9b4f2da98abd6cc6a95afbbc5331acecff34db546470f4735"
+    },
+    {
+      "original": "./private-evidence/node-a-beacon-queue-resume-20260920/01-SIDECAR-OWNER-PACKET.md",
+      "destination": "01-SIDECAR-OWNER-PACKET.md",
+      "sha256": "7a408bf824d559c79f4fd6d5c1a0f05a72512e42a914a856c8bef779d8321644"
+    },
+    {
+      "original": "./private-evidence/beacon-resumption-20260925/R09-CONDITIONAL-PROPOSAL.md",
+      "destination": "R09-CONDITIONAL-PROPOSAL.md",
+      "sha256": "4bf43210550ef2f0849bc66c941d7c125fa9642c091bb2e8c721215685cd535b"
+    },
+    {
+      "original": "./private-evidence/beacon-resumption-20260925/R09-CONDITIONAL-PROPOSAL-R2.md",
+      "destination": "R09-CONDITIONAL-PROPOSAL-R2.md",
+      "sha256": "b3667465e810104ca0849181d7ab3015a1ffe8d0e8db34b49a613e6373ea643e"
+    },
+    {
+      "original": "./private-evidence/beacon-resumption-20260925/R09-MUSE-DISPOSITION.md",
+      "destination": "R09-MUSE-DISPOSITION.md",
+      "sha256": "45c35ec6c30bc4e70278798156d613f05fe71ef385974111524aac058e148d20"
+    }
+  ]
+}
