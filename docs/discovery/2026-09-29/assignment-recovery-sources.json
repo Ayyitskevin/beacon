@@ -1,0 +1,282 @@
+[
+  {
+    "root": "repo",
+    "path": "AGENTS.md",
+    "sha256": "a000b786cabdd2488c145aa971667c290d74ec0d0551f3cf3a20dc37766864b8"
+  },
+  {
+    "root": "repo",
+    "path": "CONTEXT.md",
+    "sha256": "698b9099c8c9d42614279da48059932d3000aa76be29af4ff77096c56dae58b2"
+  },
+  {
+    "root": "repo",
+    "path": "docs/BLUEPRINT.md",
+    "sha256": "c851dc0d9b2fb16d97ccb14af75d18c418009af1e1e88bd340fabdb77e25ba4e"
+  },
+  {
+    "root": "repo",
+    "path": "docs/adr/0010-one-recovery-then-handoff.md",
+    "sha256": "c8214d8492e70fe20de1f496326ff4c77f24a0aede13ea4e38ffc95513551a47"
+  },
+  {
+    "root": "repo",
+    "path": "docs/adr/0031-execution-receipt-v2.md",
+    "sha256": "8670f6afeb411cde26315f611e2c9e2f67ea05788903ee96db819395e77c6a8b"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/lib.rs",
+    "sha256": "4b498da2c299727c414ee918d923ebf328a74d7821dd5b62f4e4756e80cc9097"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/check_preflight.rs",
+    "sha256": "a904cbc8c69bbae2e47c6aa24e43e4058d9381fc9b2f9f95966d959e721924b9"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/declared_checks.rs",
+    "sha256": "2e816a79c34135c477396c285bd66b80bec851936e0bd877e0ffbc6f8bb5cafa"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/dispatch.rs",
+    "sha256": "c09d2a2844771db02b1090e75fca4bbda8e55493d65b1f8f0f9b28607a45edc0"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/recent_receipts.rs",
+    "sha256": "e5e355bc9864b48a235e5fc102b1482be5f2718df9fa8b260a333fbad3be091e"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/local_transport.rs",
+    "sha256": "c69734aa2a303d85c9e0395e494b27f8fe3b562e1d606b24df56fe53cfdb023b"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/check_preflight.rs",
+    "sha256": "abce6fa1eefd6fa978d5076d6948568060ae45f3dd3de10ec412ff4e4af23ce7"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/declared_checks.rs",
+    "sha256": "5c970f204a54572f0db290185cb85d871d453f129b676529db818a3c23110dc4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/dispatch.rs",
+    "sha256": "5bf01d19fee4f994e7549968c8aa6bc92fcf1f03e2813e2d024987f696115782"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/recent_receipts.rs",
+    "sha256": "1f6d116db860a88cc14650de119b7fbdf5ba0386a8882c127af449bad73d4c24"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/bounded_execution.rs",
+    "sha256": "59c37f5ddcd4a1691de7f7efc521fc2228c3e8885bf4809323f13ca86b862b63"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0001_initial.sql",
+    "sha256": "fc30b28e53784fac0d7b214b313134d5a4aa7ffd33817aea166c7820c1d714d5"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0002_operator_account.sql",
+    "sha256": "11de827a095aecb763f83f73cd67239f8880f4621657fcdd495f6898e357cd3b"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0003_session_policy.sql",
+    "sha256": "4eae8decb5bc982351298be987d6272ad32911d079b3e5be85aa37ef84e92152"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0004_starter_organization.sql",
+    "sha256": "d2e16f97fb1e7bf5f65788cdf26c17ed90361d0b47b8f800a6b67765d526182c"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0005_projects.sql",
+    "sha256": "07b54482b7ecbab742c56e114a101fbefad7a0050daaa9b977693d888ae206a9"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0006_project_charter_revisions.sql",
+    "sha256": "a7c98f59e8a6b49e3bb1cb873778cc78365a8ad9d6344122b2c2a2ff45d08d7a"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0007_local_model_activations.sql",
+    "sha256": "aceeedddc5f2081700bc0f2d4a439da7bde7c85f005ecdea50d0a0f8f17ace07"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0008_resident_lifecycle.sql",
+    "sha256": "5c1316977c789da59ad7d0d50fc35f4e6aa9745c146988d5ce7986200b0090df"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0009_resident_configurations.sql",
+    "sha256": "dd53ffc6b2d23f7566c24a32c48fac8cb6bb664a40ad164848133f38204ce325"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0010_teams.sql",
+    "sha256": "42ef381121028ecef917262cebb3106f9e41578b7a2ea5a7906f8ff56e93154b"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0011_missions.sql",
+    "sha256": "0ba2b400b44898140a0595601141f4baa649c924ccadabdcfa8918b29d9aa231"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0012_project_policy.sql",
+    "sha256": "80b1721ce11f1c4c0681f002118d6afb3df8a29d3338aca0dcde32a98ac32960"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0013_project_repository.sql",
+    "sha256": "36919461416fbef9cd26c4ab6c36937feb05add67a8046d8b956a3bf3ba6806f"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0014_run_receipt.sql",
+    "sha256": "e56214226c86cd6ddb3333957365455b86429a6ccb16fe0251421540440c98bc"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0015_declared_check_runs.sql",
+    "sha256": "861a8eccc9045269d0b1214ce7114c61cfe140fef013a268f82e686b2e5c62f9"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0016_execution_receipt_v2.sql",
+    "sha256": "870d615e7f659ded3c665e52fccc75c7e21335f5bf6f03017d59ac848f8c8e91"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0017_sample_project.sql",
+    "sha256": "b5bbc3c1d7ec3a01f5f8fee66e8ab67a8e13f82bc022a0dab9f2d2b1a76efc79"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0018_proposals.sql",
+    "sha256": "7bdb87196544ff4817978e3be735d00269264cf5d3052d3e240c2ad50eaeffe4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0019_rulings.sql",
+    "sha256": "f3ef2388ea781b371139c538d38a057893937954492363301f51fbe99e545e38"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0020_recent_receipts_index.sql",
+    "sha256": "1a72e45ebd0d0a134bb1e49cfc66a7a8238db5492a1caaa2a20d528b791d28e9"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0022_candidates.sql",
+    "sha256": "eebf1da4ffc1622c1ad4a4f1c00e89807d19059e738735a424c6355ed555c865"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0023_evaluations.sql",
+    "sha256": "63660b0bb09294f6d7fecea78c672478d70ac5edf76cd445d22fd3beb835c9f1"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0024_mission_success_conditions.sql",
+    "sha256": "ba0b41ef61016a639c21484ba91a623d0932ab34a0203b6ab5adbe93ecf24ed1"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0025_spend_and_impact.sql",
+    "sha256": "6f896c06ba8bc76562dae16939265e7cc325ed35ec7cab08bdff900df2ef6edc"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0026_mission_completions.sql",
+    "sha256": "a1ed00490e7027cef83c0dff2074993b499fc1698f180f2838a4ff4470f70b07"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0027_artifacts.sql",
+    "sha256": "372ece0ee3cc6c74ec4620a1816ee7548ad1cd60eeffe9b38c519918e3429fd0"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0028_evaluation_subjects.sql",
+    "sha256": "b4bd03b914985ca0e36edcd81afa1e4c18ebe51ac2522a9b354f1639a734dbe4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0029_outcome_manifests.sql",
+    "sha256": "3866c7ea0d5c3a7e99031f23cfce74afda85225ae418aad8140de0e59935b8e4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0030_outcome_manifest_canonicalizer_v2.sql",
+    "sha256": "a6f80770224250f8b7cd3c01a107977b17e0369a14e2a58ee4982dfccf42ad29"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0031_outcome_publications.sql",
+    "sha256": "e82b1f2d9214ce5e40c3eb9e95c73ef7044acb48339759be0d13a4635cb4de73"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0032_classification_mission_project_key.sql",
+    "sha256": "87d074ad6e65c3cab3039ac773aea52f809ac8bfc55a99a544838512810ed6a6"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0033_receipt_pre_image_unreadable.sql",
+    "sha256": "927c64bb6b555071ee6cb3f9cccb57aec641cb548be5a39a3b552f72fa864390"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0034_receipt_outcome_typed_owner.sql",
+    "sha256": "95a64e81c37dcbc611e9a2b7e74ac23b4545e49541da9a4e094880246f59d868"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0035_spend_attribution_dimensions.sql",
+    "sha256": "71407830b11658c5bb1dacb5f418a0b5829e6c4471cfea9a9a7628de9761a76a"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0036_event_chain.sql",
+    "sha256": "a79f203066cb81bcba10c941f3c639e6b390c7556a299a76b1b902ca01a3e225"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/migrations/0037_model_invocations.sql",
+    "sha256": "7e1646b61f0bd73fb47b5d9373b5e9eb47d0009770d2c431a54f14739ef3487f"
+  },
+  {
+    "root": "workspace",
+    "path": "skills/pstack-wayfinder/SKILL.md",
+    "sha256": "092938eaf87c385d8b3d8e27e64a5e073ec53cbee36a873f14e73042ffcb17d7"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-m0-inventory-20260912/INVENTORY.md",
+    "sha256": "c3d93870d52c633013654a4d9632e59d2f85da091395507fcc95c57ac6d3bdf9"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-path-to-complete-20260912/ROADMAP.md",
+    "sha256": "f528b9e3c50e7181f7e8d216bdf1afa0d9b7b1584a42988733eb7befd27857e2"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-goal-prompt-20260929/ASSIGNMENT-BOUNDARY.md",
+    "sha256": "ea8c7ff470d5f72d14910d89162e1fe82c58aedbd35b1a308d41dcbecdea5b7b"
+  }
+]
