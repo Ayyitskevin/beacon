@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -229,7 +232,8 @@ def test_secrets_in_a_persisted_driver_log_refuse_export(tmp_path: Path) -> None
 def test_ci_upload_requires_the_export_clearance_marker() -> None:
     workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
 
-    assert "hashFiles('target/clean-host-first-run/.export-safe') != ''" in workflow
+    clearance = "hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != ''"
+    assert workflow.count(clearance) == 2
 
 
 def test_an_absent_appimage_is_not_reported_as_a_broken_host(tmp_path: Path) -> None:
@@ -336,3 +340,63 @@ sleep 1
         "status": "not_evaluated",
         "artifacts": [],
     }
+
+
+@pytest.mark.parametrize("job", ["package", "package-self-hosted"])
+def test_workflow_first_run_does_not_reuse_cached_evidence(tmp_path: Path, job: str) -> None:
+    """Execute the workflow's shell, with the real harness and fixture Docker.
+
+    Old target evidence and its export marker must neither block this attempt
+    nor become this attempt's upload. Even identical run/attempt retries must
+    allocate their own evidence; a fresh broken run must still fail.
+    """
+    workflow = (REPO / ".github/workflows/ci.yml").read_text()
+    job_body = workflow.split(f"  {job}:\n", 1)[1]
+    job_body = re.split(r"^  [a-z][a-z-]*:\n", job_body, maxsplit=1, flags=re.M)[0]
+    step = job_body.split("      - name: Drive first-run setup on clean hosts\n", 1)[1]
+    # Stop at the next YAML step: its nested values are not shell commands.
+    script = step.split("        run: |\n", 1)[1].split("      # Source:", 1)[0]
+    script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
+    root, environment = _isolated_harness(tmp_path)
+    bundle = root / "target/release/bundle/appimage"
+    bundle.mkdir(parents=True)
+    shutil.copy2(tmp_path / "Beacon.AppImage", bundle / "Beacon.AppImage")
+    stale = root / "target/clean-host-first-run"
+    stale.mkdir(parents=True)
+    (stale / ".export-safe").write_text("prior run marker\n")
+    environment.update(GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+    outputs = []
+    for attempt in range(3):
+        output_file = tmp_path / f"output-{attempt}"
+        environment["GITHUB_OUTPUT"] = str(output_file)
+        if attempt == 2:
+            environment["DEBIAN_EXIT"] = "42"
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if attempt < 2:
+            assert result.returncode == 0, result.stdout + result.stderr
+        else:
+            assert result.returncode != 0
+        entries = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+        evidence = root / entries["path"]
+        assert not evidence.is_relative_to(root / "target")
+        assert evidence not in outputs
+        outputs.append(evidence)
+        matrix = json.loads((evidence / "matrix.json").read_text())
+        assert matrix["environments"]["debian-12"]["status"] == (
+            "broken" if attempt == 2 else "observed"
+        )
+        assert (evidence / ".export-safe").is_file()
+    assert (stale / ".export-safe").read_text() == "prior run marker\n"
+    assert list(stale.iterdir()) == [stale / ".export-safe"]
+    # The upload must resolve only this step's path, including its export scan.
+    upload = job_body.split("      - name: Upload clean-host first-run evidence\n", 1)[1]
+    assert "steps.first_run.outputs.path != ''" in upload
+    assert "hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != ''" in upload
+    assert "path: ${{ steps.first_run.outputs.path }}" in upload
