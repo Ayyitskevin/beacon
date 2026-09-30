@@ -1,0 +1,96 @@
+[
+  {
+    "id": "P01",
+    "root": "repo",
+    "path": "AGENTS.md",
+    "git_ref": "d52816c92734a603c9b42ea49349a5b2467958e4",
+    "sha256": "a000b786cabdd2488c145aa971667c290d74ec0d0551f3cf3a20dc37766864b8"
+  },
+  {
+    "id": "P02",
+    "root": "repo",
+    "path": "crates/beacond/tests/outcome_pdf.rs",
+    "git_ref": "d52816c92734a603c9b42ea49349a5b2467958e4",
+    "sha256": "00bac42e6f14a639c2591bb4a4310091bfabc0f0739ad3eafb55012014b70567"
+  },
+  {
+    "id": "P03",
+    "root": "repo",
+    "path": "crates/beacond/src/outcome_pdf.rs",
+    "git_ref": "d52816c92734a603c9b42ea49349a5b2467958e4",
+    "sha256": "734938c49d53118887ee96fde13b0d2a933dc6219a3e2865d680d7dce5452a2b"
+  },
+  {
+    "id": "P04",
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/clock-fixture-audit.md",
+    "git_ref": "d52816c92734a603c9b42ea49349a5b2467958e4",
+    "sha256": "b8ff17ff4fe5a36558786c88f854b359bd4919b04cd8006384162d8e8beb6f06"
+  },
+  {
+    "id": "W01",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/PLAN-AGREED.md",
+    "sha256": "d784dcdada366ce4efb960e4debe6246e3450b1099179f4b4ddffa97ce45b4e8"
+  },
+  {
+    "id": "W02",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/PRE-FLIGHT.md",
+    "sha256": "0ba26df851e40aa402ac89798f76e0f5e37753c1f1313518be08be4b3bf20e80"
+  },
+  {
+    "id": "W03",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/INSTRUMENTATION.diff",
+    "sha256": "2d13b740eefd6a81b83160ec4bd95d494300fc800227e07cf6a5c875edf15010"
+  },
+  {
+    "id": "W04",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/SUPERVISE.py",
+    "sha256": "4f91a0fa020da42654d226bddae83b3be1f7a566d23202df230d4b24c7e8328f"
+  },
+  {
+    "id": "W05",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/build-attempt-1/COMMAND.json",
+    "sha256": "49ab0c96b34515867098ded4d8052d26c3723736d742f1654a80792a8baf7fde"
+  },
+  {
+    "id": "W06",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/build-attempt-1/RESULT.json",
+    "sha256": "ef9df1025d1fb241ab4bf401f988e81454be608977675605113adc4d1c35bf35"
+  },
+  {
+    "id": "W07",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/normal-control-1/RESULT.json",
+    "sha256": "f1225750a768700ebc73d11b371a97daf701143d72c73a9dc5a3bfb0bc03a6ff"
+  },
+  {
+    "id": "W08",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/normal-control-1/FULL.log",
+    "sha256": "4216eee8a29efba00fe0b6515c81eb01c1f3742e97a73a8d9527dcbe297c5cad"
+  },
+  {
+    "id": "W09",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/stalled-observation-1/RESULT.json",
+    "sha256": "74f22f3fa992b9df7c86de80b2e622b5904a5e413a9d5ce57bcdfbafe77205b2"
+  },
+  {
+    "id": "W10",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/stalled-observation-1/FULL.log",
+    "sha256": "e65ceca9da673d68be740f693b067599766bee565a3df75d00b3e64a176c0ece"
+  },
+  {
+    "id": "W11",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/WITNESS-ARTIFACT.json",
+    "sha256": "cb56bdcd40c688510bc70361eadb877aa982becee81c4e9fcb402614dc80f898"
+  }
+]
