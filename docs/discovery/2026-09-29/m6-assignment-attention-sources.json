@@ -1,0 +1,83 @@
+[
+  {
+    "root": "workspace",
+    "path": "skills/pstack-wayfinder/SKILL.md",
+    "sha256": "092938eaf87c385d8b3d8e27e64a5e073ec53cbee36a873f14e73042ffcb17d7"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-m6-provisional-20260929/DISPOSITION-MEMO.md",
+    "sha256": "d19439a972ffb05a6f07538e6c7e060bd68ebfa25e8dc4c9387dd9ead14b55b4"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-discovery-evening-20260929/astra/RETURN.md",
+    "sha256": "9fababc07437c9e0efa6499a3abb9313c7596791128f9bb2ec63927704fd355c"
+  },
+  {
+    "root": "repo",
+    "path": "AGENTS.md",
+    "sha256": "a000b786cabdd2488c145aa971667c290d74ec0d0551f3cf3a20dc37766864b8",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "CONTEXT.md",
+    "sha256": "698b9099c8c9d42614279da48059932d3000aa76be29af4ff77096c56dae58b2",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "docs/BLUEPRINT.md",
+    "sha256": "c851dc0d9b2fb16d97ccb14af75d18c418009af1e1e88bd340fabdb77e25ba4e",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "docs/adr/0010-one-recovery-then-handoff.md",
+    "sha256": "c8214d8492e70fe20de1f496326ff4c77f24a0aede13ea4e38ffc95513551a47",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/assignment-recovery-boundary.md",
+    "sha256": "4b2d8c0d26c9902b2fc2b3aa976b7a349502a5af86a833b7f16bfa4109415424",
+    "git_ref": "e992e8ee9c2fb56e19a683164f46930064038d46"
+  },
+  {
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/attention-notification-boundary.md",
+    "sha256": "3b48df65bce531d7f526bf16772309f72c2948213a27cdfa04d21988a978e1e8",
+    "git_ref": "e992e8ee9c2fb56e19a683164f46930064038d46"
+  },
+  {
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/attention-history-boundary.md",
+    "sha256": "e09e05558ea5f02445c3d3e02e50a2eb48759c63163342a39398510d98141fd1",
+    "git_ref": "e992e8ee9c2fb56e19a683164f46930064038d46"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/team.rs",
+    "sha256": "34b058b78c352fa6e450ebee9382451ec96eccefda03959387f9f769c699424b",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/model_invocation.rs",
+    "sha256": "b180e5c12c2fdcb50595cc92bd35befc81e1c8524fa6a415bc46832c1115269a",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/model_invocation_store.rs",
+    "sha256": "1ecfe1e6cace0fe427fea7d87a0565ce16b6c4180af0920f3d9b79f281dd1b5d",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/spend.rs",
+    "sha256": "354deb4e45dcea19616786ac6cb4ab09ead521ec508bd23ccbb10df2604cff8d",
+    "git_ref": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"
+  }
+]

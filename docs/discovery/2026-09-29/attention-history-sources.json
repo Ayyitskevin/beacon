@@ -1,0 +1,79 @@
+[
+  {
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/assignment-recovery-boundary.md",
+    "sha256": "4b2d8c0d26c9902b2fc2b3aa976b7a349502a5af86a833b7f16bfa4109415424",
+    "git_ref": "75969d8613eb377a2b9a9499dffee75a9dd54fdc"
+  },
+  {
+    "root": "repo",
+    "path": "docs/discovery/2026-09-29/attention-notification-boundary.md",
+    "sha256": "3b48df65bce531d7f526bf16772309f72c2948213a27cdfa04d21988a978e1e8",
+    "git_ref": "75969d8613eb377a2b9a9499dffee75a9dd54fdc"
+  },
+  {
+    "root": "repo",
+    "path": "docs/BLUEPRINT.md",
+    "sha256": "c851dc0d9b2fb16d97ccb14af75d18c418009af1e1e88bd340fabdb77e25ba4e"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/App.tsx",
+    "sha256": "169154c5a488021e46808a2c7f07ef6f376762ccd910ced809245a1a9bc21577"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/BriefingReceipts.tsx",
+    "sha256": "6cf03b3caf1ab3ab3a3cf28034d46e799514cde2fcc29f6095019e03da98b6ab"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/session.ts",
+    "sha256": "f3907e38e69df275dc5e0fc10808087d949e0eac4469888739cfc00ca4d26a2d"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/local_transport.rs",
+    "sha256": "c69734aa2a303d85c9e0395e494b27f8fe3b562e1d606b24df56fe53cfdb023b"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/src/recent_receipts.rs",
+    "sha256": "e5e355bc9864b48a235e5fc102b1482be5f2718df9fa8b260a333fbad3be091e"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/App.test.tsx",
+    "sha256": "5fb6765a852f05e9197bfe075a6643e4d5f5ad1e6e9d8568d74ff26eebcea5e5"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/BriefingReceipts.test.tsx",
+    "sha256": "62da8698d76d8bbe698cb9337d25118d876355930db8cd989f93a3dd3412bfd5"
+  },
+  {
+    "root": "repo",
+    "path": "apps/desktop/src/session.test.ts",
+    "sha256": "07cc25da3ac9c95e78aa2e8d1a1c9f4f9a053ad44915a948478c465207fff152"
+  },
+  {
+    "root": "repo",
+    "path": "crates/beacond/tests/recent_receipts.rs",
+    "sha256": "1f6d116db860a88cc14650de119b7fbdf5ba0386a8882c127af449bad73d4c24"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-discovery-afternoon-20260929/FREEZE.json",
+    "sha256": "cf1bcea368ccd1b96b4538430b02d3ff2bc32e23642d290c993d431b85d594bd"
+  },
+  {
+    "root": "workspace",
+    "path": "reports/beacon-m0-inventory-20260912/INVENTORY.md",
+    "sha256": "c3d93870d52c633013654a4d9632e59d2f85da091395507fcc95c57ac6d3bdf9"
+  },
+  {
+    "root": "workspace",
+    "path": "skills/pstack-wayfinder/SKILL.md",
+    "sha256": "092938eaf87c385d8b3d8e27e64a5e073ec53cbee36a873f14e73042ffcb17d7"
+  }
+]

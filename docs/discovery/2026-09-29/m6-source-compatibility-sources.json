@@ -1,0 +1,14 @@
+[
+  {"root":"workspace","path":"reports/beacon-m6-provisional-20260929/DISPOSITION-MEMO.md","sha256":"d19439a972ffb05a6f07538e6c7e060bd68ebfa25e8dc4c9387dd9ead14b55b4"},
+  {"root":"repo","path":"crates/beacond/src/team.rs","sha256":"34b058b78c352fa6e450ebee9382451ec96eccefda03959387f9f769c699424b","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/mission.rs","sha256":"916c51c9124caa226e3dfdbbc558c34b11dbe807cddc0492f68862c56243442f","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/migrations/0010_teams.sql","sha256":"42ef381121028ecef917262cebb3106f9e41578b7a2ea5a7906f8ff56e93154b","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/migrations/0011_missions.sql","sha256":"0ba2b400b44898140a0595601141f4baa649c924ccadabdcfa8918b29d9aa231","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/tests/team.rs","sha256":"0ce0deea800212d469f027b3259aa1f3a2fd0d677736b8453aca0881d12cb022","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/model_invocation.rs","sha256":"b180e5c12c2fdcb50595cc92bd35befc81e1c8524fa6a415bc46832c1115269a","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/model_invocation_store.rs","sha256":"1ecfe1e6cace0fe427fea7d87a0565ce16b6c4180af0920f3d9b79f281dd1b5d","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/resident_configuration.rs","sha256":"ab94e42c4b57f01b7893975b0599c5daace459df5ee553e35084c2b37c011969","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/project.rs","sha256":"5e3d0c893f2c843af298c3abc611b5e5e4c055dda24097cca26a60a0cabc4958","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/proposal.rs","sha256":"4c598e0b3eb3f9f31ca8202a607080ae7fccbb5e5eb583857e1ac7adfa5f5289","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"},
+  {"root":"repo","path":"crates/beacond/src/spend.rs","sha256":"354deb4e45dcea19616786ac6cb4ab09ead521ec508bd23ccbb10df2604cff8d","git_ref":"84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4"}
+]
