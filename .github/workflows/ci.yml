@@ -186,6 +186,7 @@ jobs:
         working-directory: target/release/bundle/appimage
         run: sha256sum ./*.AppImage > Beacon.AppImage.sha256
       - name: Drive first-run setup on clean hosts
+        id: first_run
         run: |
           set -eu
           set -- target/release/bundle/appimage/*.AppImage
@@ -193,7 +194,14 @@ jobs:
             echo "expected exactly one AppImage, found $#" >&2
             exit 1
           fi
-          scripts/clean-host-first-run "$1" target/clean-host-first-run
+          # target/ is restored from Cargo cache and may contain old evidence.
+          # Keep this attempt outside that cache, under the shared checkout path
+          # required by the nested Docker harness. The leaf must not exist yet.
+          mkdir -p scratchpad
+          evidence_parent=$(mktemp -d "scratchpad/ci-first-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")
+          evidence_dir="$evidence_parent/evidence"
+          printf 'path=%s\n' "$evidence_dir" >> "$GITHUB_OUTPUT"
+          scripts/clean-host-first-run "$1" "$evidence_dir"
       # Source: https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#usage
       - name: Upload AppImage
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -207,11 +215,13 @@ jobs:
       - name: Upload clean-host first-run evidence
         # The harness writes this marker only after scanning every persisted
         # byte. A red secret scan must not become an always()-upload.
-        if: ${{ always() && hashFiles('target/clean-host-first-run/.export-safe') != '' }}
+        if: >-
+          ${{ always() && steps.first_run.outputs.path != '' &&
+              hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: beacon-linux-appimage-first-run-evidence
-          path: target/clean-host-first-run
+          path: ${{ steps.first_run.outputs.path }}
           # A build failure can precede the harness. A harness failure still
           # uploads its partial matrix without replacing the job's red result.
           if-no-files-found: warn
@@ -315,6 +325,7 @@ jobs:
         working-directory: target/release/bundle/appimage
         run: sha256sum ./*.AppImage > Beacon.AppImage.sha256
       - name: Drive first-run setup on clean hosts
+        id: first_run
         run: |
           set -eu
           set -- target/release/bundle/appimage/*.AppImage
@@ -322,7 +333,14 @@ jobs:
             echo "expected exactly one AppImage, found $#" >&2
             exit 1
           fi
-          scripts/clean-host-first-run "$1" target/clean-host-first-run
+          # target/ is restored from Cargo cache and may contain old evidence.
+          # Keep this attempt outside that cache, under the shared checkout path
+          # required by the nested Docker harness. The leaf must not exist yet.
+          mkdir -p scratchpad
+          evidence_parent=$(mktemp -d "scratchpad/ci-first-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")
+          evidence_dir="$evidence_parent/evidence"
+          printf 'path=%s\n' "$evidence_dir" >> "$GITHUB_OUTPUT"
+          scripts/clean-host-first-run "$1" "$evidence_dir"
       # Source: https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#usage
       - name: Upload AppImage
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -336,11 +354,13 @@ jobs:
       - name: Upload clean-host first-run evidence
         # The harness writes this marker only after scanning every persisted
         # byte. A red secret scan must not become an always()-upload.
-        if: ${{ always() && hashFiles('target/clean-host-first-run/.export-safe') != '' }}
+        if: >-
+          ${{ always() && steps.first_run.outputs.path != '' &&
+              hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: beacon-linux-appimage-first-run-evidence
-          path: target/clean-host-first-run
+          path: ${{ steps.first_run.outputs.path }}
           # A build failure can precede the harness. A harness failure still
           # uploads its partial matrix without replacing the job's red result.
           if-no-files-found: warn
