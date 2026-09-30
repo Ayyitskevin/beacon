@@ -1,0 +1,287 @@
+[
+  {
+    "id": "P01",
+    "root": "repo",
+    "path": "AGENTS.md",
+    "sha256": "a000b786cabdd2488c145aa971667c290d74ec0d0551f3cf3a20dc37766864b8",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P02",
+    "root": "repo",
+    "path": ".github/workflows/ci.yml",
+    "sha256": "e80c3d883336f99adc568be39f75aae54de7385468d32674d9054dcdcef98c1a",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P03",
+    "root": "repo",
+    "path": "tests/harness/test_clean_host_first_run.py",
+    "sha256": "2eccbcbca5f85df6c31f444483a912eca94933561298e6288b945575c7cb5ee7",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P04",
+    "root": "repo",
+    "path": "scripts/clean-host-first-run",
+    "sha256": "0ba0bd6c5c4c60d7814fe7bbdcbaf1d8e41df1965d861f02860ee02d4adf4289",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P05",
+    "root": "repo",
+    "path": "scripts/gate",
+    "sha256": "06a62145775baf28260c7f5d4ec6b5c7ea641dfb37a9cc4cdda54693076e3661",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P06",
+    "root": "repo",
+    "path": "tests/harness/test_gate_no_venv.py",
+    "sha256": "7be12c00f709aaae216a394a64729e9341a26eaef1803edb9f56ece1318ab53e",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P07",
+    "root": "repo",
+    "path": "src/beacon_legacy/compose.py",
+    "sha256": "6748ee47f7fde951187c0e2c9388a7649088dc33b14399d630cf5ac0d1eef641",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P08",
+    "root": "repo",
+    "path": "tests/contracts/test_compose.py",
+    "sha256": "6093a063a980484601704cc13530bece06e4a36f3b2195afb8da8b937b354e75",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P09",
+    "root": "repo",
+    "path": "tests/store/test_readers.py",
+    "sha256": "d6ee0d21174983b8cba7eaf9a2fd763cd7d22fcfcc2ca85377db3b2ac9aad8e5",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P10",
+    "root": "repo",
+    "path": "crates/beacond/tests/outcome_pdf.rs",
+    "sha256": "00bac42e6f14a639c2591bb4a4310091bfabc0f0739ad3eafb55012014b70567",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P11",
+    "root": "repo",
+    "path": "crates/beacond/src/outcome_pdf.rs",
+    "sha256": "734938c49d53118887ee96fde13b0d2a933dc6219a3e2865d680d7dce5452a2b",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P12",
+    "root": "repo",
+    "path": "crates/beacond/tests/outcome.rs",
+    "sha256": "75c8b0616b98f4921c903765b6861d026668409a8c650b83e22aab1c9cf52636",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P13",
+    "root": "repo",
+    "path": "crates/beacond/src/outcome.rs",
+    "sha256": "0897b53318c4e17e4622e40c1b2dcd3932d9aeda78220df1de126360f3e1814c",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P14",
+    "root": "repo",
+    "path": "crates/beacond/tests/mission_impact_command.rs",
+    "sha256": "969572284d14ca920b7e4e27941f574bfc03df4732dd9c6fb10699bfa26b14fb",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P15",
+    "root": "repo",
+    "path": "crates/beacond/src/mission_impact_command.rs",
+    "sha256": "afabdf7598ee69934ff91740b141fc8c535d75c48727caf8842adc3f1a51daac",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P16",
+    "root": "repo",
+    "path": "crates/beacond/src/lib.rs",
+    "sha256": "4b498da2c299727c414ee918d923ebf328a74d7821dd5b62f4e4756e80cc9097",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P17",
+    "root": "repo",
+    "path": "crates/beacond/tests/bounded_execution.rs",
+    "sha256": "59c37f5ddcd4a1691de7f7efc521fc2228c3e8885bf4809323f13ca86b862b63",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P18",
+    "root": "repo",
+    "path": "crates/beacond/src/sandbox/bounded.rs",
+    "sha256": "9da116dc5e963271caceeca6b0f28cb94aec7b7169fa3145345338ebadaa7302",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P19",
+    "root": "repo",
+    "path": "crates/beacond/src/worktree.rs",
+    "sha256": "8f3e068a98f1d429926efd585a46dc37bfe3e061d4542256b850bd8434a5d777",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P20",
+    "root": "repo",
+    "path": "crates/beacond/src/git_object_store.rs",
+    "sha256": "e7fd27fc644c6dd50176d035a94dcc125ee958de7b851b84770e379fa4a7f052",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P21",
+    "root": "repo",
+    "path": "crates/beacond/src/event_chain.rs",
+    "sha256": "44c7d9b7cc7d4ec5eddfd479c9a9b706cd79776371d542c1383a6e961ff8e04a",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P22",
+    "root": "repo",
+    "path": "crates/beacond/tests/ruling.rs",
+    "sha256": "5ae69cdbedee267119e776b6eb27eef172bc2ca60e319bad73b0a276b6b13a28",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P23",
+    "root": "repo",
+    "path": "crates/beacond/tests/resource_discovery.rs",
+    "sha256": "213cfd58e3dcfb3813e8484346d4c5f9c20fc32e022508a315252c1d17f19aa1",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P24",
+    "root": "repo",
+    "path": "crates/beacond/tests/check_preflight.rs",
+    "sha256": "abce6fa1eefd6fa978d5076d6948568060ae45f3dd3de10ec412ff4e4af23ce7",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P25",
+    "root": "repo",
+    "path": "crates/beacond/src/check_preflight.rs",
+    "sha256": "a904cbc8c69bbae2e47c6aa24e43e4058d9381fc9b2f9f95966d959e721924b9",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P26",
+    "root": "repo",
+    "path": "crates/beacond/tests/dispatch.rs",
+    "sha256": "5bf01d19fee4f994e7549968c8aa6bc92fcf1f03e2813e2d024987f696115782",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P27",
+    "root": "repo",
+    "path": "crates/beacond/tests/team.rs",
+    "sha256": "0ce0deea800212d469f027b3259aa1f3a2fd0d677736b8453aca0881d12cb022",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P28",
+    "root": "repo",
+    "path": "crates/beacond/src/outcome_store.rs",
+    "sha256": "ff6148bb2bad2bcf6b4962909e1449da1febafbfa5581a59787bca0f7571050e",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P29",
+    "root": "repo",
+    "path": "crates/beacond/src/local_transport.rs",
+    "sha256": "c69734aa2a303d85c9e0395e494b27f8fe3b562e1d606b24df56fe53cfdb023b",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P30",
+    "root": "repo",
+    "path": "apps/desktop/src/App.test.tsx",
+    "sha256": "5fb6765a852f05e9197bfe075a6643e4d5f5ad1e6e9d8568d74ff26eebcea5e5",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P31",
+    "root": "repo",
+    "path": "apps/desktop/src/App.tsx",
+    "sha256": "169154c5a488021e46808a2c7f07ef6f376762ccd910ced809245a1a9bc21577",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P32",
+    "root": "repo",
+    "path": "apps/desktop/src/test/axe.test.tsx",
+    "sha256": "d7ebd2ea78b841f4e32d3238654035f1dab537dd2801c1ae5144e33bce4613bb",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P33",
+    "root": "repo",
+    "path": "apps/desktop/src/BriefingReceipts.test.tsx",
+    "sha256": "62da8698d76d8bbe698cb9337d25118d876355930db8cd989f93a3dd3412bfd5",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P34",
+    "root": "repo",
+    "path": "apps/desktop/src/BriefingReceipts.tsx",
+    "sha256": "6cf03b3caf1ab3ab3a3cf28034d46e799514cde2fcc29f6095019e03da98b6ab",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P35",
+    "root": "repo",
+    "path": "apps/desktop/src/session.test.ts",
+    "sha256": "07cc25da3ac9c95e78aa2e8d1a1c9f4f9a053ad44915a948478c465207fff152",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P36",
+    "root": "repo",
+    "path": "apps/desktop/src/Projects.tsx",
+    "sha256": "f118ffcb03cd9cc7d697508c44dadb3bcf13384c9329646ca17637a5331aa817",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P37",
+    "root": "repo",
+    "path": "scripts/packaged_outcome_journey.py",
+    "sha256": "6ce1d80d6fa95db7aea5de8146ac08d8263f25603702cd857590737139843228",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P38",
+    "root": "repo",
+    "path": "crates/beacond/src/operator_account.rs",
+    "sha256": "ba4095bde45988b75edac210fad64a43179c3f0ac891857c3787e2f4cacba7eb",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "P39",
+    "root": "repo",
+    "path": "crates/beacond/tests/recent_receipts.rs",
+    "sha256": "1f6d116db860a88cc14650de119b7fbdf5ba0386a8882c127af449bad73d4c24",
+    "git_ref": "a48bae4cda2502c07a17ab747aa7e429b3ec5843"
+  },
+  {
+    "id": "W01",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-20260929/chronos-fix28.diff",
+    "sha256": "b5fedd582595f874c71edc56237a890dc9278ec8335241627a926faa9ffa2f53"
+  },
+  {
+    "id": "W02",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-20260929/PLAN-AGREED.md",
+    "sha256": "80abf4800442f2fad4a9348f7022cf89d5c5df577f4848765b98b5e4b30bf919"
+  }
+]
