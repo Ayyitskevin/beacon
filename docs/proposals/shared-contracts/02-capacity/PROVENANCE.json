@@ -1,0 +1,36 @@
+{
+  "base": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4",
+  "purpose": "Privacy-edited public copies; original SHA-256 values below describe retained pre-rewrite evidence, not the edited sources. Example origins are inert, not current filesystem pointers. Historical review grants and holds are unchanged; no authority transfers.",
+  "sources": [
+    {
+      "original": "./private-evidence/beacon-weekend-v2-20260919/contract-proposals/02-HISTORICAL-CAPACITY.md",
+      "destination": "02-HISTORICAL-CAPACITY.md",
+      "sha256": "638edbbda3ef9d0822a06eb7e701fc98ac487b86e8ccf5c4a1872769e486aefb"
+    },
+    {
+      "original": "./private-evidence/node-a-beacon-queue-resume-20260920/02-CAPACITY-OWNER-PACKET.md",
+      "destination": "02-CAPACITY-OWNER-PACKET.md",
+      "sha256": "58cecd8e7093048e56af530cf359dddb8dbbfec2b91ad8222f5c0855b23a0411"
+    },
+    {
+      "original": "./private-evidence/beacon-contract-continuation-20260923/capacity-l-author/LEGACY-INPUT-RETURN.md",
+      "destination": "LEGACY-INPUT-RETURN.md",
+      "sha256": "70ce10fd5b668503b10a251768049cf94a3bf8152f22d672e8b1f7b756cff444"
+    },
+    {
+      "original": "./private-evidence/beacon-contract-continuation-20260923/OPTION-A-AND-CAPACITY-L-DISPOSITION.md",
+      "destination": "OPTION-A-AND-CAPACITY-L-DISPOSITION.md",
+      "sha256": "4e4378df04adee90659b5b209dd5ae01d2b7e54f7c44c7d4506e5a2efe197659"
+    },
+    {
+      "original": "./private-evidence/beacon-live-skills-20260926/MUSE-DISPOSITION.md",
+      "destination": "MUSE-DISPOSITION.md",
+      "sha256": "9f9d455b103aa3374f8ef6eb0f2d484b3fa3bc7b1b104ada039eb591eada0d99"
+    },
+    {
+      "original": "./private-evidence/beacon-live-skills-20260926/CAPACITY02-S-CONDITIONAL-PROPOSAL.md",
+      "destination": "CAPACITY02-S-CONDITIONAL-PROPOSAL.md",
+      "sha256": "57a178ee7348f98ab0f843bef42d9c31f13d3483196d3c1d552e2d93d0bf0ff8"
+    }
+  ]
+}
