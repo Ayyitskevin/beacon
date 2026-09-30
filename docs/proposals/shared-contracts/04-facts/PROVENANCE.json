@@ -1,0 +1,21 @@
+{
+  "base": "84fc76a662c57ccad9aa06c8b59bbdf8b41e1ec4",
+  "purpose": "Review packaging only; sources unchanged. Original links and commands are inert historical references, may point outside this repository, and were not replayed. Hashes bind bytes, not custody or authority.",
+  "sources": [
+    {
+      "original": "/home/kevin-lee/ai-workspace/codex/reports/beacon-weekend-v2-20260919/contract-proposals/04-LOCAL-FACTS.md",
+      "destination": "04-LOCAL-FACTS.md",
+      "sha256": "682130c9993bb8aa1bf5aec07faabbaadd345cd69de539753fdf2dee2a8553fe"
+    },
+    {
+      "original": "/home/kevin-lee/ai-workspace/codex/reports/mickey-beacon-queue-resume-20260920/04-FACTS-OWNER-PACKET.md",
+      "destination": "04-FACTS-OWNER-PACKET.md",
+      "sha256": "f7d3937378d0e574faaad11bcd068e80e2273c0e447161a551057b223b00b5a6"
+    },
+    {
+      "original": "/home/kevin-lee/ai-workspace/codex/reports/beacon-evening-resume-20260925/FACTS04-R09-PROPOSAL.md",
+      "destination": "FACTS04-R09-PROPOSAL.md",
+      "sha256": "9ada0f1759c8d7632e485d0f6f13781daf0a90e654213c5eb74e807f715485d0"
+    }
+  ]
+}
