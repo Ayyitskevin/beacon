@@ -92,5 +92,17 @@
     "root": "workspace",
     "path": "reports/beacon-joint-overnight-r2-20260930/WITNESS-ARTIFACT.json",
     "sha256": "cb56bdcd40c688510bc70361eadb877aa982becee81c4e9fcb402614dc80f898"
+  },
+  {
+    "id": "W12",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/METADATA-CAVEAT.log",
+    "sha256": "8d316933dea035dbd686e4cfa4dd99bb1b13e36c43a91c6b5d847cb82745a4bc"
+  },
+  {
+    "id": "W13",
+    "root": "workspace",
+    "path": "reports/beacon-joint-overnight-r2-20260930/sol/FREEZE.json",
+    "sha256": "5772bd96b3376d6d0010ecb87e36c2125232c8d3406773aad8a849a44abcdb72"
   }
 ]
