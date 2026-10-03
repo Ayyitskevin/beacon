@@ -26,8 +26,13 @@ ships you will be credited unless you ask otherwise.
 
 ## Supported versions
 
-There are no released versions. `main` is the only supported target, and there is no downloadable
-build yet. Do not run Beacon against anything you cannot afford to lose.
+There are no released versions. `main` is the only supported target. Successful packaging
+workflows can provide short-lived development AppImage artifacts; availability depends on the
+workflow and artifact retention. They are not stable releases or a claim of completed Alpha
+acceptance. See [CONTRIBUTING.md](CONTRIBUTING.md#downloading-the-ci-appimage) for the build
+conditions and measured host limits.
+
+Do not run Beacon against anything you cannot afford to lose.
 
 ## What is in scope
 

@@ -1,288 +1,141 @@
 # Beacon
 
-Beacon is an office suite for AI agent teams.
-Beacon is the canonical project and local-alpha name. It is not yet a cleared public brand.
+**A local-first workspace for AI agent teams, supervised by one human operator.**
 
-One human operator oversees a fleet of agents that can discuss work, plan it, research it,
-build it, evaluate it, request authority, execute within bounds, and leave a complete receipt.
-The agents run the workplace: they form teams, decompose Missions, assign work, and create bounded
-Specialists. The operator checks a concise Briefing, contributes when useful, sets policy and
-budgets, and intervenes when judgment or exceptional authority is required.
+Beacon is being built to keep an agent team's projects, decisions, evidence, and execution
+receipts in one place. Software development is the first proving workflow; research and
+operations are planned to follow.
 
-Beacon proves this solo-operator model first. Multi-Owner Workspaces may follow only after the solo
-product is stable and its authority boundaries are proven. Owner is the only planned human role;
-each Owner acts through an individually attributable Operator Account.
+> **Pre-alpha — for development and evaluation.** Beacon does not yet provide the complete
+> autonomous workflow described in its blueprint. There is no stable release. Use disposable
+> projects and data. Beacon is the project and local-alpha name; public naming clearance
+> remains a separate release decision.
 
-Beacon is for all agent work: software, research, operations, media, analysis, and work we have not
-named yet. It begins with software production, then grows into a broad family of applications over
-the same Workspace. Research is the second production application after Software proves the core
-loop. Operations follows as the third. The long-term shape is an office suite for Agents, not a
-coding-agent wrapper. The goal is a complete, standalone, installable, open-source product.
+[Current capabilities](#what-works-today) · [Build from source](#build-from-source) ·
+[Contribute](CONTRIBUTING.md) · [Architecture](docs/BLUEPRINT.md) · [Security](SECURITY.md)
 
-## The product
+## Why Beacon
 
-Beacon brings the strongest ideas from Athena, Buzz, Minerva, Vulcan, ReplayDeck, Janus, and
-Icarus into one product:
+Running several agents creates more than a coding problem: someone must keep track of what
+each agent knows, what it may do, what was reviewed, and what actually happened.
 
-- a clear desk for missions, ownership, dependencies, and attention;
-- durable conversations between people and agents;
-- evidence-backed claims with precise provenance;
-- model routing, usage, budgets, and replayable invocation records;
-- deterministic and judgment-based evaluation;
-- decisions bound to the exact work they authorize;
-- bounded execution with observable, verifiable receipts.
+Beacon's design brings those responsibilities into one local workspace:
 
-These are not seven external products hidden behind one window. They are capabilities of one
-suite, sharing one vocabulary, one local store, and one authority model.
+- **Projects and Missions** connect long-term goals to finite pieces of work.
+- **Evidence and Evaluations** make claims and reviews inspectable.
+- **Proposals and Rulings** bind approval to the exact change being considered.
+- **Bounded execution and Receipts** record what ran, what changed, and what remains uncertain.
 
-## How it feels
+These are design commitments, not a claim that every workflow is available today.
+The [blueprint](docs/BLUEPRINT.md) defines the full product; the
+[implementation checkpoints](docs/implementation/) record individual delivered slices.
 
-Beacon is project-centered. A Project holds the long-lived purpose and working context. Missions
-inside it hold finite outcomes. The primary applications are Briefing, Projects, Conversations,
-Knowledge, and Software. Model routing, evaluation, authority, execution, activity, and extensions
-appear in context instead of crowding the main navigation. Every surface remains a lens over the
-same Project and Mission rather than a separate silo.
+## What works today
 
-Every agent has a desk: its assignments, context, allowed tools, budget, messages, and blockers.
-A fresh install proposes a professional Starter Organization instead of leaving the operator with
-a blank page or silently activating a canned team. The operator reviews every Resident, role,
-and optional Display Name before admitting it. Admission creates inactive identities only; model
-bindings, permissions, budgets, activation, and execution authority remain separate later
-decisions. The operator has a fleet desk: active work, health, spend, exceptions, and the small set
-of items that genuinely require human attention.
+| Area | Implemented scope | Current boundary |
+| --- | --- | --- |
+| Desktop and local account | Rust supervisor, SQLite store, Tauri/React shell, password enrollment, Recovery Key, and session locking | Passkey sign-in and remote access are planned |
+| Projects and teams | Project Charters, Resident lifecycle and configuration, Owner-created Teams and Missions | Autonomous agent coordination is not a completed workflow |
+| Local model discovery | Explicit Ollama discovery, inspection, activation, and revocation | Discovery and activation do not invoke a model or start agent work |
+| Repository checks | Pinned repository bindings and bounded Declared Check execution on enforcing Linux hosts | An Owner supplies the checks; they do not prove Mission success |
+| Change review and dispatch | Backend Proposal, Candidate, Ruling, Evaluation, and dispatch foundations | Dispatch is restricted to Beacon-created disposable copies; no complete desktop workflow |
+| Linux packaging | AppImage build and recorded first-run setup checks on Ubuntu 22.04, Debian 12, and Ubuntu 24.04 containers | Container evidence does not establish native desktop or Wayland support |
 
-Teams combine persistent named agents with durable history and temporary specialists created for
-one Mission. Agents keep private working memory and deliberately promote useful knowledge into
-shared Project, Mission, or Team memory. One workstation controls the Beacon state and authority
-model while remote fleet workers perform bounded work.
+This is a scoped overview, not a complete inventory. See the
+[repository contract](AGENTS.md), [implementation records](docs/implementation/), and
+[AppImage first-launch evidence](docs/implementation/phase-1-appimage-first-launch.md).
+Some earlier checkpoint descriptions predate later implementation; read each record's scope
+and evidence before treating it as a current capability claim.
 
-One Installation may host several isolated Workspaces, much as an office suite can hold separate
-organizations or bodies of work. Workspace data, Agents, policy, budgets, credentials, and
-authority never cross that boundary merely because they share an Installation.
+## The first milestone
 
-Alpha requires the human operator to sign in to a local Operator Account before opening a
-Workspace. Sign-in is passkey-first with password fallback. Local workflows remain available
-offline after sign-in. Setup does not complete until the Operator confirms that the offline
-Recovery Key was saved. Rotating it immediately invalidates the old key. The human session locks
-after 30 minutes of inactivity by default, at a configurable duration, and immediately when the
-operating system locks or suspends. Already authorized Agent work continues. Multi-factor
-authentication is optional for same-machine access, where password fallback is available. Remote
-access requires a passkey, local approval through a QR code and matching code, and MFA. Paired
-devices show their last use, expire after 90 inactive days, and remain independently revocable with
-one action. Beacon creates an Attention Item seven days before expiry.
+Alpha 1 aims to demonstrate one complete software workflow:
 
-The Operator may add an optional Cloud Link later. Alpha synchronizes only theme, keyboard
-shortcuts, accessibility preferences, and notification preferences. It never synchronizes
-notification contents or history, Workspace data, Projects, Missions, Agents, Policy, secrets, or
-authority. For broad adoption, the official hosted service is the effortless default. An
-operator-hosted endpoint uses the same documented protocol for sovereignty and regulated use. The
-complete local product and protocol-compatible self-hosting remain free without a time limit.
-Official hosting is an optional $5-per-month convenience for people who want managed sync without
-running a server. It lets the Operator choose between United States and European Union data regions
-at launch. Version history for synchronized preferences remains available locally and when
-self-hosted; the hosted service manages its remote copy. Changing regions is an explicit migration,
-never a silent relocation. Self-hosting uses a one-command Docker installer for Linux x86-64 and
-ARM64.
+**Idea → plan → research → build → evaluate → approve → execute → receipt**
 
-The interface is calm, editorial, and quietly academic. Light is selected on first launch. Dark
-and Follow System are first-class options that preserve the same hierarchy, contrast, and status
-meaning. Full evidence, prompts, model responses, tool activity, policy decisions, and receipts
-remain available through deliberate drill-down. Only actionable Attention Items interrupt the
-operator. Local resources are preferred after operator activation; cloud inference is an explicit
-Project choice. After sign-in, Beacon opens to Briefing.
+The demonstration uses a bundled, disposable Rust task-tracker repository. The goal is a
+feature delivered with independent evaluation, an explicit approval boundary, and a
+human-readable outcome. This end-to-end milestone is still in progress.
+Initial releases are planned as invite-only technical alphas.
 
-The desktop is keyboard-complete and targets WCAG 2.2 Level AA. Every completed Mission leaves a
-human-readable Outcome Document that exports as open Markdown or a regenerated PDF, so the
-operator never has to reconstruct results from logs. PDFs stay concise by default and may include
-an optional verification appendix. Policy-classified high-impact Missions include that appendix
-automatically.
+Beyond that milestone, the design expands into research and operations over the same
+workspace and authority model. See the [blueprint](docs/BLUEPRINT.md) for the roadmap and
+acceptance criteria.
 
-One global **Pause Work** control stops new dispatches and asks active Runs to interrupt safely.
-Beacon reports uncertain or residual effects honestly instead of pretending every machine stopped
-at once. The control remains available from the desktop, system tray, and a global shortcut even
-when the main window is closed. Beacon supplies a default shortcut that the operator can change or
-disable.
+## Build from source
 
-## Alpha 1
+Development currently targets Linux. Start with a disposable checkout and local data.
 
-The first alpha proves one complete software-factory loop:
+Prerequisites:
 
-> idea → plan → research → build → evaluate → approve → execute → receipt
+- Git, Rust installed through rustup, and Python 3.
+- Node.js **22.23.2** and npm **10.9.8**, as pinned in
+  [the desktop package](apps/desktop/package.json).
+- The Linux development libraries listed in [CONTRIBUTING.md](CONTRIBUTING.md#setting-up).
+- Python **3.12** and a virtual environment if running the full gate, including the legacy tree.
 
-A solo operator creates a Project and states a Mission's outcome and constraints. Resident Agents
-form the Team, decompose the work, create Specialists when needed, and produce evidence and a
-bounded plan. The operator checks the Briefing, rules on the exact proposed change when required,
-and receives a receipt proving what ran and what changed.
+From the repository root, after installing those prerequisites:
 
-Alpha 1 is local-first and Linux-first. Its demonstration adds one complete feature to a bundled,
-disposable Rust task-tracker Git repository, from brief through evaluated diff and Receipt. It does
-not deploy to production, send public messages, or mutate the retired AI Town systems. Onboarding
-offers the repository as an optional Sample Project before the operator connects real work. It also
-offers background startup as an opt-in choice; Beacon does not enable it silently. Initial builds
-are invite-only technical alphas.
+```sh
+npm --prefix apps/desktop ci
+cd apps/desktop
+npm run tauri dev
+```
 
-## Promise
+The development command builds and stages the supervisor sidecar. First launch opens local
+account setup; signing in does not activate agent work.
 
-Beacon should make capable agent teams feel calm to oversee. Routine work moves without ceremony.
-Risky work stops at an honest gate. Nothing disappears silently. Every material claim can show its
-evidence, every decision can show what it bound, and every action can show its receipt.
-
-Beacon is intended to be a professional, downloadable open-source application with a documented
-contribution path and a permissioned plugin ecosystem. Workspaces remain portable through an open
-export. Import restores safe records immediately, then guides the operator through reconnecting
-matching local resources and credentials in one explicit review. Its complete local core stays
-free, including protocol-compatible self-hosted sync. The optional $5-per-month official service
-funds managed cloud sync and operations rather than unlocking product features.
-
-Diagnostics stay on the operator's device and collection is off by default. Alpha feedback uses a
-locally generated, scrubbed bundle that the Operator previews and exports manually. Beacon neither
-submits the bundle nor sends diagnostics over the network.
-
-Alpha relies on operating-system disk encryption for live Workspace data and says so plainly. It
-shows a persistent but unobtrusive warning without blocking local use when encryption is disabled
-or cannot be detected. The warning opens a one-click, operating-system-specific setup guide and
-status recheck; Beacon does not change system settings on its own.
-The current v1 reports `unknown` with bounded host observations; it does not guess `enabled` or
-`disabled` before the detector rewrite is accepted.
-Portable Safety Snapshots receive Beacon-managed encryption before leaving the Installation.
-
-Beacon is the canonical project and local-alpha product name. Active application IDs, commands,
-packages, source modules, and development paths use Beacon consistently. The earlier naming
-research remains part of the decision record, but it no longer controls local identifiers. A
-domain, public distribution, or claim of exclusive brand rights still requires a separate naming
-and release review.
-
-Preliminary collision research is preserved in the
-[ten-candidate name screen](docs/research/name-collision-screen-2026-08-27.md), the follow-up
-[Beacon, Recall, and Hivemind screen][three-name-screen], and the [Orca collision
-screen][orca-name-screen]. These are historical research artifacts, not the current product name.
-
-[three-name-screen]: docs/research/name-screen-beacon-recall-hivemind-2026-08-27.md
-[orca-name-screen]: docs/research/name-screen-orca-2026-08-27.md
-
-The complete product and technical blueprint is in [docs/BLUEPRINT.md](docs/BLUEPRINT.md).
-The shared vocabulary is in [CONTEXT.md](CONTEXT.md). Architectural decisions live in
-[docs/adr/](docs/adr/). Project stewardship and contribution authority are defined in
-[GOVERNANCE.md](GOVERNANCE.md).
-
-## Development foundation
-
-Phase 0 now includes the first Rust supervisor and a native Tauri desktop shell beside the
-preserved Beacon Legacy Desk. The supervisor creates one empty local Workspace and returns an
-inspectable SQLite diagnostic report:
+To inspect the supervisor's bootstrap report separately, from the repository root:
 
 ```sh
 cargo run -p beacond -- bootstrap
 ```
 
-The desktop intentionally opens in a locked setup-required state. A same-machine Owner can enroll
-with a password and one-time Recovery Key, configure a 1–1,440 minute inactivity lock, and see
-whether Linux screen-lock and suspend monitoring are active. The independently running supervisor
-owns credentials, the authoritative session, OS monitoring, and the managed store; locked UI
-receives no Workspace material and exposes no Operator Command. After sign-in, a fresh Workspace
-offers the editable Starter Organization. The Owner may admit any non-empty selection of Lead,
-Builder, Reviewer, and Researcher identities or explicitly discard the proposal. Every admitted
-Resident begins inactive and receives no authority. The Owner may later activate, suspend,
-reactivate, or permanently retire the identity. Those lifecycle decisions control availability
-only. Separately, the Owner may configure a non-retired Resident with one exact active local-model
-activation, an explicit closed Capability set, and the fixed Alpha no-spend boundary. Configuration
-makes an active Resident eligible for later Team formation but creates no Route, Mission, Run,
-external effect, or execution authority. Clearing the configuration, suspending or retiring the
-Resident, or revoking that exact model activation removes eligibility without erasing history.
-Inside a Project, the authenticated Owner can now form a durable named Team from the exact current
-configurations of one or more eligible Residents. Formation preserves that evidence and reports
-later eligibility changes without rewriting history. It assigns no permanent lead and creates no
-Mission, Run, aggregated capability, spending, model invocation, or external effect. Autonomous
-Resident-issued formation still waits for the Agent command and Policy paths.
-The authenticated Owner can also admit a finite Mission owned by one currently eligible Team.
-Admission binds the exact current Charter revision and every Team member's exact current Resident
-Configuration, then preserves that evidence with the Mission's desired outcome, success
-conditions, constraints, prohibitions, and `admitted` lifecycle. It selects no Team Lead and
-creates no Assignment, Route, Invocation, Run, budget, spending, credential, network scope,
-external effect, or execution authority.
+For the complete development gate, follow the virtual-environment setup in
+[CONTRIBUTING.md](CONTRIBUTING.md), then run:
 
-The authenticated Owner can now publish immutable Project Policy revisions for future Team Lead
-selection, each bound to the exact current Charter revision. Every revision requires
-`work.coordinate_mission`, current Team eligibility, one or more named Track Record evidence
-thresholds, no declared leadership conflict, and Operator adjudication when eligible candidates
-remain ambiguous. Publication records criteria only: it does not evaluate a candidate, select or
-replace a Lead, create an Assignment, or grant authority. Track Record evidence, Policy evaluation,
-and Resident-issued command paths remain subsequent slices.
+```sh
+scripts/gate all
+```
 
-The authenticated Owner can now also bind a Project to the repository it works on. A binding is an
-immutable revision naming one source (an absolute local path or a Git URL), one pinned
-40-character base revision, and one or more Declared Checks, each with a distinct name, an argument
-vector, and a repository-relative working directory. Like a Policy revision, it binds the exact
-current Charter revision and preserves earlier revisions. Binding itself remains a declaration:
-it does not open, clone, or fetch the repository, confirm that the pinned commit exists, or run a
-Declared Check.
+Packaging, checksums, host requirements, and the limits of recorded first-run
+testing are covered in the [contributor guide](CONTRIBUTING.md#downloading-the-ci-appimage).
 
-The current backend can separately preflight that binding and run its Declared Checks. Preflight
-re-verifies the current Charter and binding, repository readability, pinned revision, check set,
-working directories, and observed sandbox capability. On an enforcing Linux host, execution cuts
-a disposable worktree at the pinned revision and runs the Owner-declared checks with Landlock
-containment, a cleared environment, and wall-clock, CPU, address-space, file-size, and captured-
-output bounds. The resulting Receipt preserves each check outcome and reports whether cleanup
-removed or kept the worktree. This path remains backend-only and Owner-bound: it consumes no
-Agent-authored Artifact, Proposal, Evaluation, or Ruling and claims no Mission success.
+## Architecture at a glance
 
-The Projects application is the first working suite surface after Briefing. The Owner can create
-a Project from a structured Charter containing its purpose, desired outcomes, constraints,
-prohibitions, and an Observe or Supervised autonomy profile. Beacon preserves Charter revision 1
-immutably, assigns no spending boundary, prohibits external effects, and starts no work as a side
-effect of creation. The Owner may later publish a new immutable Charter revision from the exact
-current revision, inspect the preserved history, and safely recover from a stale edit without
-overwriting either version.
+| Component | Responsibility |
+| --- | --- |
+| [`crates/beacond`](crates/beacond/) | Rust supervisor, domain logic, managed SQLite persistence, and execution boundaries |
+| [`apps/desktop`](apps/desktop/) | Tauri/React desktop interface |
+| [`src`](src/) | Preserved Python Legacy Desk and migration knowledge |
+| [`docs/adr`](docs/adr/) | Architectural decisions and their rationale |
+| [`scripts`](scripts/) | Development gates, packaging, and verification tools |
 
-Briefing can also check the same computer for installed Ollama models. Discovery is an explicit,
-bounded loopback read: every result remains inactive, nothing is persisted, no model is invoked,
-and unavailable Ollama never blocks the Workspace. The Owner can inspect one exact model, review
-the provider features Ollama advertises, and activate only a chosen subset for this Workspace.
-Activation is a revocable eligibility decision: it creates no Route, Agent binding, invocation,
-credential, budget, data scope, network expansion, or execution authority. Unknown provider
-features remain visible but cannot be approved. Beacon rechecks the model and its digest before
-persisting the append-only decision; deactivation remains available when Ollama is offline.
+The supervisor is the only store writer and the authority boundary for external effects.
+The desktop is a client of that boundary. The legacy Python desk is historical groundwork;
+new product development belongs in the Rust application.
 
-From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
-checkpoints and verified dependency sources are recorded in
-[the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
-[the desktop shell](docs/implementation/phase-0-desktop-shell.md). The closed proposal and
-admission boundary is recorded in
-[the Starter Organization checkpoint](docs/implementation/phase-0-starter-organization.md).
-The Project and immutable Charter boundary is recorded in
-[the Projects checkpoint](docs/implementation/phase-0-projects.md), with revision publishing in
-[the Charter revisions checkpoint](docs/implementation/phase-0-charter-revisions.md).
-The inactive resource boundary is recorded in
-[the local-model discovery checkpoint](docs/implementation/phase-0-local-model-discovery.md).
-[The local-model activation checkpoint](docs/implementation/phase-0-local-model-activation.md)
-records the separate inspection, approval, and revocation boundary.
-[The Resident lifecycle checkpoint](docs/implementation/phase-0-resident-lifecycle.md) records the
-separate Operator-only availability states, append-only audit chain, and terminal retirement
-boundary.
-[The Resident Configuration checkpoint](docs/implementation/phase-0-resident-configuration.md)
-records exact model binding, explicit Capability selection, fixed no-spend scope, and derived Team
-eligibility without execution authority.
-[The Project Teams checkpoint](docs/implementation/phase-0-project-teams.md) records truthful
-Operator attribution, exact formation evidence, current eligibility, and the no-Mission/no-authority
-boundary.
-[The Project Missions checkpoint](docs/implementation/phase-0-project-missions.md) records exact
-Charter, Team, and Resident Configuration admission evidence while keeping Mission leadership and
-execution authority out of scope.
-[The Project Policy checkpoint](docs/implementation/phase-0-project-policy.md) records immutable
-Operator-authored Team Lead selection criteria, exact Charter binding, and the no-selection and
-no-authority boundary.
-[The Project Repository checkpoint](docs/implementation/phase-1-project-repository.md) records the
-immutable repository, pinned base revision, and Declared Checks a Project names, and the
-declaration boundary that keeps opening, cloning, fetching, and execution out of binding itself.
-[The accepted Landlock decision](docs/adr/0029-landlock-sandbox-proven-before-trusted.md) and
-[fails-toward-keep cleanup decision](docs/adr/0030-fails-toward-keep-worktree-cleanup.md) record the
-separate containment and disposable-worktree boundaries used by current Declared Check execution.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for repository-root setup and gate instructions. Run
-`scripts/gate` to verify the preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and
-the native desktop build.
-The exact pre-Beacon compatibility boundary is recorded in the
-[name migration note](docs/implementation/beacon-name-migration.md).
+## Contributing
+
+Code, documentation, design feedback, accessibility testing, and reproducible bug reports
+are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup and review expectations,
+[CONTEXT.md](CONTEXT.md) for terminology, and [GOVERNANCE.md](GOVERNANCE.md) for decision ownership.
+
+For a useful bug report, include the commit, operating system, reproduction steps, expected
+behavior, and observed result. Scrub credentials and private workspace data from logs.
+Report security concerns through the private process in [SECURITY.md](SECURITY.md).
+
+## Security and project status
+
+Beacon executes repository code and is still under active development. Its
+[security policy](SECURITY.md) describes the reporting process and known boundaries,
+including Linux sandbox limitations. Live workspace data relies on operating-system disk
+encryption.
+
+The intended complete local core remains free. Optional managed services described in the
+blueprint are future plans, not services available from this repository.
 
 ## License
 
-Apache-2.0.
+[Apache License 2.0](LICENSE). Project stewardship is described in
+[GOVERNANCE.md](GOVERNANCE.md).
