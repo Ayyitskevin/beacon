@@ -3,7 +3,9 @@
 Beacon is one local-first office suite for AI agent teams supervised by one human operator. It is
 **pre-Alpha**: there is no published release, and [AGENTS.md](AGENTS.md) is explicit that this
 checkpoint must not be described as a usable Alpha. See its *Current state* section for what exists
-— and treat that section as the answer rather than this page, which would go stale naming features.
+and the scoped implementation records in [docs/implementation/](docs/implementation/).
+Older summaries may predate later checkpoints; distinguish implemented slices from the complete
+Alpha workflow.
 `Beacon` is a working title, not a cleared name.
 
 Contributions are welcome. This page is how to work in the repository; [GOVERNANCE.md](GOVERNANCE.md)
@@ -21,6 +23,10 @@ is who decides what.
    rules, and the working agreement. It is written for AI agents and is equally the rules for people.
 
 ## Setting up
+
+Use Linux with Git, Rust installed through rustup, Python 3.12, Node.js **22.23.2**, and
+npm **10.9.8**. Node and npm versions are pinned in `apps/desktop/package.json`.
+Run the following commands from the repository root on an Ubuntu/Debian development machine:
 
 ```sh
 sudo apt-get update && \
@@ -67,9 +73,20 @@ the build. Write what this change uses.
 
 ## Downloading the CI AppImage
 
-After the product job passes for a pull request or a push to `main`, the `package` job attaches a
-`beacon-linux-appimage` artifact to the CI workflow run for 14 days. Download it from the run's
-**Artifacts** section and extract the ZIP archive. GitHub's artifact service does not retain the
+Packaging is conditional; not every CI run produces an AppImage:
+
+- A pull request with the `package` label requests the GitHub-hosted `package` job after
+  the product job passes. An unlabeled pull request skips packaging.
+- Pushes to `main` and explicit `workflow_dispatch` runs select the separate
+  `package-self-hosted` job on the maintainer's Mickey runner, when that runner is available.
+
+The [workflow](.github/workflows/ci.yml) is the source of truth for these conditions.
+A successful packaging job uploads a `beacon-linux-appimage` artifact with a 14-day retention
+period. These are development artifacts, not published stable releases. If a run was skipped,
+failed, or its artifact expired, there may be nothing to download.
+
+Download an available artifact from the workflow run's **Artifacts** section and extract the
+ZIP archive. GitHub's artifact service does not retain the
 executable bit, so verify the bundled checksum and restore that bit before trying the application:
 
 ```sh
