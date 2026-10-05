@@ -21,6 +21,9 @@ The second command requires `--compile-local-transport`. It never executes that 
 and default operation cannot select it. The wrapper accepts no arbitrary target, command, additional
 Cargo options, broad suite, sidecar stage or `scripts/gate` stage. Compilation still executes ordinary
 dependency build scripts/proc macros; it is not a no-execution or process-containment guarantee.
+For verification invocations, each valued option may occur once, including when its first value is
+empty; missing or malformed values and repeated options are refused before any output is created.
+Help remains usage-only and exits immediately when parsed.
 
 The direct installed Linux x86-64 Rust/Cargo/Rustdoc 1.97.1 binaries under the caller's
 `$HOME/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin` are mandatory. Cargo and rustc version
@@ -74,7 +77,13 @@ not a new runtime/authority approval mechanism installed by the script.
 
 The atomic new-directory claim refuses an existing file, directory or dangling symlink. Its parent
 must be canonical, owned and writable; the output cannot be within the source checkout. No overwrite
-or deletion of earlier evidence. The caller must preserve ownership/exclusivity while running;
+or deletion of earlier evidence. The script sets creation umask `077` only in its own process and
+children, atomically creates the new receipt as `0700`, and verifies it is a nonsymlink directory
+owned by the running user with that exact mode before writing receipt files. Ordinary script-created
+files/directories therefore start owner-only even with a permissive caller umask. No existing parent,
+artifact, account default or permission policy is modified. A failed fresh-leaf verification retains
+the leaf but refuses before writing inside it; it has no complete receipt. The caller must preserve
+ownership/exclusivity while running;
 preflight is not a filesystem race-containment proof. No cleanup/finalizer or background process.
 
 Each fixed command gets `.argv`, `.stdout` and `.stderr`; `exits.tsv` records its actual exit. Head,
