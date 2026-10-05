@@ -144,8 +144,8 @@ pub use evaluation::{
     enumerate_evaluation_keys,
 };
 pub use evidence::{
-    MAX_SOURCE_QUOTE_BYTES, MAX_SOURCE_SNAPSHOT_BYTES, SourceSpanDigest, SourceSpanError,
-    SourceSpanMatch, verify_source_span,
+    MAX_SOURCE_QUOTE_BYTES, MAX_SOURCE_SNAPSHOT_BYTES, SourceDigest as EvidenceSourceDigest,
+    SourceSpanError, SourceSpanMatch, verify_source_span,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
