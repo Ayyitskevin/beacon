@@ -21,16 +21,16 @@ pub const MAX_SOURCE_QUOTE_BYTES: usize = 1_048_576;
 
 /// A supplied digest claim, not a verified source identity or an Artifact record digest.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SourceSpanDigest<'a> {
+pub struct SourceDigest<'a> {
     pub algorithm: &'a str,
     pub canonicalizer: &'a str,
     pub value: [u8; 32],
 }
 
-impl fmt::Debug for SourceSpanDigest<'_> {
+impl fmt::Debug for SourceDigest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SourceSpanDigest")
+            .debug_struct("SourceDigest")
             .finish_non_exhaustive()
     }
 }
@@ -111,7 +111,7 @@ impl std::error::Error for SourceSpanError {}
 /// helper does not copy either input buffer or allocate a source record.
 pub fn verify_source_span<'a>(
     snapshot: &'a [u8],
-    expected: &SourceSpanDigest<'_>,
+    expected: &SourceDigest<'_>,
     start: u64,
     end: u64,
     quote: &[u8],

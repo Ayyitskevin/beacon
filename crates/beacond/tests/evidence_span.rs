@@ -6,7 +6,7 @@
 //! hashing implementation. Hand-counted multibyte offsets distinguish bytes from characters.
 
 use beacond::{
-    MAX_SOURCE_QUOTE_BYTES, MAX_SOURCE_SNAPSHOT_BYTES, SourceSpanDigest, SourceSpanError,
+    EvidenceSourceDigest, MAX_SOURCE_QUOTE_BYTES, MAX_SOURCE_SNAPSHOT_BYTES, SourceSpanError,
     verify_source_span,
 };
 
@@ -19,9 +19,9 @@ const NFD_SHA256: &str = "81ef060bcd98adc7824eb5c1ada83c32491b16018e11e79f00ab9d
 const ONE_MIB_A_SHA256: &str = "9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360";
 const FROZEN_BYTE_CAP: usize = 1_048_576;
 
-fn raw_digest(hex: &str) -> SourceSpanDigest<'static> {
+fn raw_digest(hex: &str) -> EvidenceSourceDigest<'static> {
     assert_eq!(hex.len(), 64, "fixture SHA-256 must have 32 bytes");
-    SourceSpanDigest {
+    EvidenceSourceDigest {
         algorithm: "sha256",
         canonicalizer: "beacon.raw.v1",
         value: std::array::from_fn(|index| {
@@ -33,7 +33,7 @@ fn raw_digest(hex: &str) -> SourceSpanDigest<'static> {
 
 fn assert_refusal(
     snapshot: &[u8],
-    expected: &SourceSpanDigest<'_>,
+    expected: &EvidenceSourceDigest<'_>,
     start: u64,
     end: u64,
     quote: &[u8],
@@ -169,7 +169,7 @@ fn digest_algorithm_spelling_is_exact_and_has_no_fallback() {
     for algorithm in [
         "", "SHA256", "sha-256", "sha512", " sha256", "sha256 ", "sha256\0",
     ] {
-        let expected = SourceSpanDigest {
+        let expected = EvidenceSourceDigest {
             algorithm,
             canonicalizer: "beacon.raw.v1",
             value: raw_digest(ABC_SHA256).value,
@@ -196,7 +196,7 @@ fn canonicalizer_spelling_is_exact_and_has_no_normalized_alias() {
         "beacon.raw.v1 ",
         "beacon.raw.v1\0",
     ] {
-        let expected = SourceSpanDigest {
+        let expected = EvidenceSourceDigest {
             algorithm: "sha256",
             canonicalizer,
             value: raw_digest(ABC_SHA256).value,
@@ -244,7 +244,7 @@ fn snapshot_and_quote_exactly_at_both_caps_are_accepted() {
 #[test]
 fn an_over_cap_snapshot_is_refused_before_envelope_encoding_or_hashing() {
     let snapshot = vec![0xff; FROZEN_BYTE_CAP + 1];
-    let expected = SourceSpanDigest {
+    let expected = EvidenceSourceDigest {
         algorithm: "unsupported",
         canonicalizer: "unsupported",
         value: [0; 32],
@@ -262,7 +262,7 @@ fn an_over_cap_snapshot_is_refused_before_envelope_encoding_or_hashing() {
 #[test]
 fn an_over_cap_quote_is_refused_before_envelope_encoding_or_hashing() {
     let quote = vec![0xff; FROZEN_BYTE_CAP + 1];
-    let expected = SourceSpanDigest {
+    let expected = EvidenceSourceDigest {
         algorithm: "unsupported",
         canonicalizer: "unsupported",
         value: [0; 32],
@@ -340,7 +340,7 @@ fn invalid_quote_utf8_has_its_named_error_with_a_valid_snapshot() {
 
 #[test]
 fn unsupported_envelopes_are_refused_before_encoding_checks() {
-    let wrong_algorithm = SourceSpanDigest {
+    let wrong_algorithm = EvidenceSourceDigest {
         algorithm: "sha512",
         canonicalizer: "beacon.raw.v1",
         value: [0; 32],
@@ -353,7 +353,7 @@ fn unsupported_envelopes_are_refused_before_encoding_checks() {
         b"",
         SourceSpanError::UnsupportedDigestAlgorithm,
     );
-    let wrong_canonicalizer = SourceSpanDigest {
+    let wrong_canonicalizer = EvidenceSourceDigest {
         algorithm: "sha256",
         canonicalizer: "beacon.raw.v2",
         value: [0; 32],
