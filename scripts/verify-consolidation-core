@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Selected offline evidence only. Never invoke scripts/gate or execute local_transport.
+set -euo pipefail
+# Restrict creation in this process and its children; never change existing modes.
+umask 077
+
+usage() {
+    cat <<'USAGE'
+usage: scripts/verify-consolidation-core --expected-head <full-lowercase-sha>
+       --output <absolute-fresh-owned-directory> [--compile-local-transport]
+
+Runs ONLY beacond's evidence_span integration target, offline/locked, jobs 2.
+The optional local_transport step is compile-only (--no-run); execution is UNRUN.
+Requires an already installed Linux x86-64 Rust/Cargo 1.97.1 and public crates.io cache.
+Retains receipt, copied cache, target, temporary files and logs. Never cleans or installs.
+Exit: 0 selected commands PASS (not full CI); 1 command FAILED; 2 prerequisite/usage FAILED.
+USAGE
+}
+
+refuse() {
+    printf 'verify-consolidation-core: FAILED prerequisite: %s\n' "$1" >&2
+    if [ "${receipt_owned:-0}" -eq 1 ]; then
+        printf '%s\n' "$1" > "$output/failure.txt"
+    fi
+    exit 2
+}
+
+expected=""
+output=""
+expected_seen=0
+output_seen=0
+compile=0
+invocation=("$0" "$@")
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --expected-head)
+            [ "$#" -ge 2 ] && [ "$expected_seen" -eq 0 ] || refuse "one --expected-head value required"
+            expected_seen=1
+            expected="$2"
+            shift 2
+            ;;
+        --output)
+            [ "$#" -ge 2 ] && [ "$output_seen" -eq 0 ] || refuse "one --output value required"
+            output_seen=1
+            output="$2"
+            shift 2
+            ;;
+        --compile-local-transport)
+            [ "$compile" -eq 0 ] || refuse "duplicate compile option"
+            compile=1
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) refuse "unknown argument (no arbitrary target or command accepted)" ;;
+    esac
+done
+[[ "$expected" =~ ^[0-9a-f]{40}$ ]] || refuse "expected head must be a full lowercase Git SHA"
+[[ "$output" = /* && "$output" != *$'\n'* && "$output" != *$'\t'* ]] || refuse "output must be an absolute single-line path"
+[[ "$output" != */ && "$output" != */. && "$output" != */.. ]] || refuse "output must name a new directory leaf"
+for tool in git realpath dirname mkdir cp sha256sum awk env date stat; do
+    command -v "$tool" >/dev/null || refuse "required local utility unavailable: $tool"
+done
+repo="$(cd -- "$(dirname -- "$0")/.." && pwd -P)"
+parent="$(dirname -- "$output")"
+[ -d "$parent" ] && [ -O "$parent" ] && [ -w "$parent" ] || refuse "output parent must exist and be owned/writable by this user"
+[ "$(realpath -e -- "$parent")" = "$parent" ] || refuse "output parent must be canonical, with no symlink/dot components"
+[[ "$output" != "$repo" && "$output" != "$repo/"* ]] || refuse "output must be outside the source checkout"
+[ ! -e "$output" ] && [ ! -L "$output" ] || refuse "output already exists; evidence will not be overwritten"
+mkdir -m 0700 -- "$output" || refuse "fresh directory claim failed; another writer may own it"
+[ -d "$output" ] && [ ! -L "$output" ] && [ -O "$output" ] && \
+    [ "$(stat -c '%a' -- "$output")" = 700 ] || refuse "fresh receipt must be a nonsymlink owned directory with mode 0700"
+receipt_owned=1
+# After the atomic claim, every file this script creates is new and retained.
+preflight=FAILED
+evidence=UNRUN
+transport=UNRUN
+finish() {
+    local result="$?"
+    trap - EXIT
+    printf 'check\tstatus\npreflight\t%s\nevidence_span\t%s\nlocal_transport_compile\t%s\nlocal_transport_execution\tUNRUN\nfull_gate\tUNRUN\nM2\tUNRUN\nM3_completion\tUNRUN\nscript_exit\t%s\n' \
+        "$preflight" "$evidence" "$transport" "$result" > "$output/STATUS.tsv"
+    printf 'verify-consolidation-core: exit=%s; receipt=%s; full gate/workflow UNRUN\n' "$result" "$output"
+    exit "$result"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '%q ' "${invocation[@]}" > "$output/invocation.txt"
+printf '\n' >> "$output/invocation.txt"
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$output/started-utc.txt"
+printf 'step\texit\n' > "$output/exits.tsv"
+
+# Each fixed command preserves its own argv, full stdout/stderr and actual exit.
+run() {
+    local name="$1" result
+    shift
+    printf '%q ' "$@" > "$output/$name.argv"
+    printf '\n' >> "$output/$name.argv"
+    if "$@" > "$output/$name.stdout" 2> "$output/$name.stderr"; then
+        result=0
+    else
+        result="$?"
+    fi
+    printf '%s\t%s\n' "$name" "$result" >> "$output/exits.tsv"
+    if [ "$result" -ne 0 ]; then
+        printf 'verify-consolidation-core: FAILED %s (exit %s); see retained logs\n' "$name" "$result" >&2
+        return 1
+    fi
+}
+
+mkdir -- "$output/home"
+read_child=(env -i PATH=/usr/bin:/bin "HOME=$output/home" LANG=C.UTF-8 GIT_OPTIONAL_LOCKS=0)
+cd -- "$repo"
+run head "${read_child[@]}" git rev-parse HEAD || exit 1
+[ "$(<"$output/head.stdout")" = "$expected" ] || refuse "source HEAD does not match --expected-head"
+run source-root "${read_child[@]}" git rev-parse --show-toplevel || exit 1
+[ "$(<"$output/source-root.stdout")" = "$repo" ] || refuse "script must be in the source repository root"
+run status-before "${read_child[@]}" git status --porcelain=v1 --untracked-files=all || exit 1
+[ ! -s "$output/status-before.stdout" ] || refuse "checkout is dirty, including untracked files"
+for input in rust-toolchain.toml Cargo.toml Cargo.lock crates/beacond/Cargo.toml \
+    crates/beacond/src/lib.rs crates/beacond/src/evidence.rs crates/beacond/tests/evidence_span.rs; do
+    [ -f "$input" ] && [ ! -L "$input" ] || refuse "required regular source input missing: $input"
+done
+if [ "$compile" -eq 1 ]; then
+    [ -f crates/beacond/tests/local_transport.rs ] && [ ! -L crates/beacond/tests/local_transport.rs ] || refuse "local_transport source missing"
+fi
+run source-pins sha256sum rust-toolchain.toml Cargo.toml Cargo.lock crates/beacond/Cargo.toml \
+    crates/beacond/src/lib.rs crates/beacond/src/evidence.rs crates/beacond/tests/evidence_span.rs \
+    crates/beacond/tests/local_transport.rs scripts/verify-consolidation-core \
+    docs/implementation/consolidation-core-verification.md || exit 1
+
+# Refuse Cargo configuration, without reading its potentially credential-bearing contents.
+# Cargo walks source ancestors even when CARGO_HOME is private.
+ancestor="$repo"
+while :; do
+    for config in "$ancestor/.cargo/config" "$ancestor/.cargo/config.toml"; do
+        [ ! -e "$config" ] && [ ! -L "$config" ] || refuse "ancestor Cargo configuration requires separate inspection; not loaded"
+    done
+    [ "$ancestor" != / ] || break
+    ancestor="$(dirname -- "$ancestor")"
+done
+[ -n "${HOME:-}" ] || refuse "HOME required to locate existing installed toolchain and cache"
+toolchain="${HOME}/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu"
+for tool in cargo rustc rustdoc; do
+    [ -x "$toolchain/bin/$tool" ] || refuse "installed Rust 1.97.1 tool unavailable; no rustup/download fallback"
+done
+run rustc-version "${read_child[@]}" "$toolchain/bin/rustc" --version || exit 1
+run cargo-version "${read_child[@]}" "$toolchain/bin/cargo" --version || exit 1
+[[ "$(<"$output/rustc-version.stdout")" = 'rustc 1.97.1 '* ]] || refuse "rustc version is not 1.97.1"
+[[ "$(<"$output/cargo-version.stdout")" = 'cargo 1.97.1 '* ]] || refuse "cargo version is not 1.97.1"
+awk '$0 ~ /^channel[[:space:]]*=/ { if ($0 != "channel = \"1.97.1\"") exit 1; found = 1 } END { if (!found) exit 1 }' \
+    rust-toolchain.toml || refuse "source toolchain declaration is not the selected 1.97.1"
+awk '/^source = / && $0 != "source = \"registry+https://github.com/rust-lang/crates.io-index\"" { bad = 1 } END { exit bad }' \
+    Cargo.lock || refuse "lock requires a non-public-registry source; unsupported, never fetched"
+
+# Copy ONLY the existing public registry data, not ~/.cargo/config, credentials, bins or git.
+# Private Cargo HOME avoids shared cache locks/extraction/GC writes. Copies are retained.
+cache="${HOME}/.cargo/registry"
+shopt -s nullglob
+for part in index cache src; do
+    candidates=("$cache/$part/"index.crates.io-*)
+    [ "${#candidates[@]}" -eq 1 ] && [ -d "${candidates[0]}" ] && [ ! -L "${candidates[0]}" ] || \
+        refuse "one unpacked public registry directory required for each of index/cache/src"
+done
+mkdir -- "$output/target" "$output/tmp" "$output/cargo-home"
+mkdir -- "$output/cargo-home/registry"
+for part in index cache src; do
+    mkdir -- "$output/cargo-home/registry/$part"
+    candidates=("$cache/$part/"index.crates.io-*)
+    run "cache-copy-$part" cp -R --reflink=auto -- "${candidates[0]}" "$output/cargo-home/registry/$part/" || exit 1
+done
+shopt -u nullglob
+child=(env -i "PATH=$toolchain/bin:/usr/bin:/bin" "HOME=$output/home" \
+    "CARGO_HOME=$output/cargo-home" "TMPDIR=$output/tmp" "LANG=C.UTF-8" \
+    "RUSTC=$toolchain/bin/rustc" "RUSTDOC=$toolchain/bin/rustdoc" \
+    CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true)
+# Metadata verifies locked offline resolution/source availability, not successful linking.
+run offline-inputs "${child[@]}" "$toolchain/bin/cargo" metadata --offline --locked --format-version 1 || exit 1
+preflight=PASS
+evidence=FAILED
+run evidence-span "${child[@]}" "$toolchain/bin/cargo" test --offline --locked --jobs 2 \
+    --target-dir "$output/target" -p beacond --test evidence_span || exit 1
+evidence=PASS
+if [ "$compile" -eq 1 ]; then
+    transport=FAILED
+    run local-transport-compile "${child[@]}" "$toolchain/bin/cargo" test --offline --locked --jobs 2 \
+        --target-dir "$output/target" -p beacond --test local_transport --no-run || exit 1
+    transport=PASS
+fi
+run source-pins-after sha256sum --check "$output/source-pins.stdout" || exit 1
+run head-after "${read_child[@]}" git rev-parse HEAD || exit 1
+[ "$(<"$output/head-after.stdout")" = "$expected" ] || refuse "HEAD changed during selected commands"
+run status-after "${read_child[@]}" git status --porcelain=v1 --untracked-files=all || exit 1
+[ ! -s "$output/status-after.stdout" ] || refuse "source changed during selected commands"
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$output/finished-utc.txt"
+printf 'verify-consolidation-core: selected commands PASS; local transport execution/full CI/M2/M3 UNRUN\n'

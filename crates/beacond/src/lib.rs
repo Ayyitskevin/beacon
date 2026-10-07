@@ -26,6 +26,7 @@ mod disk_encryption;
 mod dispatch;
 mod evaluation;
 mod event_chain;
+mod evidence;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
@@ -141,6 +142,10 @@ pub use evaluation::{
     EvaluationSupersedes, EvaluationV1, Evaluator, Finding, FindingSeverity,
     InconsistentEvaluation, MalformedEvaluation, RubricDeclaration, Verdict,
     enumerate_evaluation_keys,
+};
+pub use evidence::{
+    MAX_SOURCE_QUOTE_BYTES, MAX_SOURCE_SNAPSHOT_BYTES, SourceDigest as EvidenceSourceDigest,
+    SourceSpanError, SourceSpanMatch, verify_source_span,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,

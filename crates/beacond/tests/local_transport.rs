@@ -3,14 +3,14 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beacond::{
     AccessOrigin, AppendixRequestDto, AutonomyProfile, BeaconCapability, BudgetBoundary,
@@ -30,6 +30,7 @@ use beacond::{
     TrackRecordRequirement, Verdict, initialize_local_auth_token,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 struct TestRuntime {
@@ -38,6 +39,7 @@ struct TestRuntime {
     socket: PathBuf,
     token: PathBuf,
     lock: PathBuf,
+    retain: bool,
 }
 
 impl TestRuntime {
@@ -72,7 +74,17 @@ impl TestRuntime {
             token: root.join("client.token"),
             lock: root.join("supervisor.lock"),
             root,
+            retain: false,
         }
+    }
+
+    /// Only the restart journey opts in. No fallible work separates construction from retention;
+    /// every later assertion/unwind leaves the original directory and database in place.
+    fn retained(label: &str) -> Self {
+        let mut runtime = Self::new(label);
+        runtime.retain = true;
+        eprintln!("B14.JOURNEY.RETAINED_FIXTURE={}", runtime.root.display());
+        runtime
     }
 
     fn server(&self) -> LocalSupervisorServer {
@@ -196,6 +208,219 @@ fn read_http_request(stream: &mut impl Read) -> String {
             .unwrap_or(0);
         if request.len() >= header_end + 4 + content_length {
             return String::from_utf8(request).unwrap();
+        }
+    }
+}
+
+// Selected-journey evidence only. Names are fixed at the call sites; no account/token/debug dump.
+// create_new refuses an existing path (including a symlink); no stage overwrites another stage.
+fn write_journey_evidence(root: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(name))?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[derive(serde::Serialize)]
+struct JourneyMetadataObservation {
+    accepted_requests: usize,
+    completed_responses: usize,
+    routes: Vec<&'static str>,
+    failure: Option<&'static str>,
+    worker_elapsed_ms: u128,
+}
+
+/// A held fixture, not a provider. Unlike the older detached helper, this selected case counts
+/// accepted connections and joins on success and unwind. Bounds are cooperative I/O limits, not
+/// a physical-exit promise: scheduling, filesystem finalization and the native server remain outside.
+struct JourneyMetadata {
+    address: SocketAddr,
+    running: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<JourneyMetadataObservation>>,
+    root: PathBuf,
+}
+
+impl JourneyMetadata {
+    fn start(root: &std::path::Path) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("B14.JOURNEY.METADATA_LISTENER_BINDS");
+        listener
+            .set_nonblocking(true)
+            .expect("B14.JOURNEY.METADATA_ACCEPT_IS_NONBLOCKING");
+        let address = listener.local_addr().expect("B14.JOURNEY.METADATA_ADDRESS");
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = Arc::clone(&running);
+        let thread = thread::spawn(move || {
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(30);
+            let mut observation = JourneyMetadataObservation {
+                accepted_requests: 0,
+                completed_responses: 0,
+                routes: Vec::new(),
+                failure: None,
+                worker_elapsed_ms: 0,
+            };
+            let responses = [
+                ("GET /api/tags HTTP/1.1\r\n", tags_response()),
+                (
+                    "POST /api/show HTTP/1.1\r\n",
+                    json!({ "capabilities": ["completion", "tools", "future_audio"] }).to_string(),
+                ),
+                ("GET /api/tags HTTP/1.1\r\n", tags_response()),
+            ];
+            // Initial inspection and activation's reinspection: exactly three requests each.
+            let result = (|| -> Result<(), &'static str> {
+                for (expected, body) in responses.iter().cycle().take(6) {
+                    let mut stream = loop {
+                        if !worker_running.load(Ordering::Acquire) {
+                            return Err("stopped_before_six_responses");
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("metadata_window_elapsed");
+                        }
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => return Err("metadata_accept_failed"),
+                        }
+                    };
+                    observation.accepted_requests += 1;
+                    let request_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+                    let request = Self::read_request(&mut stream, request_deadline)?;
+                    if !request.starts_with(expected) {
+                        return Err("unexpected_metadata_route");
+                    }
+                    // Persist only the allowlisted literal, never the supplied request/body.
+                    observation.routes.push((*expected).trim_end());
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let mut remaining = response.as_bytes();
+                    while !remaining.is_empty() {
+                        let time_left = request_deadline
+                            .checked_duration_since(Instant::now())
+                            .filter(|remaining| !remaining.is_zero())
+                            .ok_or("metadata_request_deadline")?;
+                        stream
+                            .set_write_timeout(Some(time_left))
+                            .map_err(|_| "metadata_timeout_setup")?;
+                        let count = stream
+                            .write(remaining)
+                            .map_err(|_| "metadata_write_failed")?;
+                        if count == 0 {
+                            return Err("metadata_write_closed");
+                        }
+                        remaining = &remaining[count..];
+                    }
+                    observation.completed_responses += 1;
+                }
+                Ok(())
+            })();
+            observation.failure = result.err();
+            observation.worker_elapsed_ms = started.elapsed().as_millis();
+            observation
+        });
+        Self {
+            address,
+            running,
+            thread: Some(thread),
+            root: root.to_owned(),
+        }
+    }
+
+    fn read_request(
+        stream: &mut std::net::TcpStream,
+        deadline: Instant,
+    ) -> Result<String, &'static str> {
+        const LIMIT: usize = 8192;
+        let mut bytes = Vec::new();
+        loop {
+            let time_left = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or("metadata_request_deadline")?;
+            stream
+                .set_read_timeout(Some(time_left))
+                .map_err(|_| "metadata_timeout_setup")?;
+            let mut chunk = [0_u8; 1024];
+            let count = stream
+                .read(&mut chunk)
+                .map_err(|_| "metadata_read_failed")?;
+            if count == 0 {
+                return Err("metadata_request_closed");
+            }
+            if bytes.len() + count > LIMIT {
+                return Err("metadata_request_too_large");
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let header =
+                std::str::from_utf8(&bytes[..end]).map_err(|_| "metadata_header_invalid")?;
+            let mut length = None;
+            for line in header.lines().skip(1) {
+                let (name, value) = line.split_once(':').ok_or("metadata_header_invalid")?;
+                if name.eq_ignore_ascii_case("transfer-encoding") {
+                    return Err("metadata_transfer_encoding");
+                }
+                if name.eq_ignore_ascii_case("content-length") {
+                    if length.is_some() {
+                        return Err("metadata_duplicate_length");
+                    }
+                    length = Some(
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .map_err(|_| "metadata_length_invalid")?,
+                    );
+                }
+            }
+            let total = (end + 4)
+                .checked_add(length.unwrap_or(0))
+                .filter(|total| *total <= LIMIT)
+                .ok_or("metadata_request_too_large")?;
+            if bytes.len() > total {
+                return Err("metadata_trailing_bytes");
+            }
+            if bytes.len() == total {
+                return String::from_utf8(bytes).map_err(|_| "metadata_request_invalid");
+            }
+        }
+    }
+
+    fn stop(&mut self) -> Result<JourneyMetadataObservation, &'static str> {
+        self.running.store(false, Ordering::Release);
+        let joined = self.thread.take().ok_or("metadata_already_joined")?.join();
+        let evidence = match &joined {
+            Ok(observation) => json!({
+                "synthetic": true, "joined": true, "observation": observation,
+                "limits": { "requests": 6, "request_bytes": 8192, "request_seconds": 2, "worker_seconds": 30 },
+                "scope": "accepted fixture connections only; not all process/host network attempts"
+            }),
+            Err(_) => {
+                json!({ "synthetic": true, "joined": true, "failure": "worker_panicked", "counts": "UNKNOWN" })
+            }
+        };
+        write_journey_evidence(&self.root, "metadata.json", evidence.to_string().as_bytes())
+            .map_err(|_| "metadata_evidence_write_failed")?;
+        joined.map_err(|_| "metadata_worker_panicked")
+    }
+}
+
+impl Drop for JourneyMetadata {
+    fn drop(&mut self) {
+        if self.thread.is_some() && self.stop().is_err() {
+            // No raw worker panic payload; do not mask the original journey failure.
+            eprintln!("B14.JOURNEY.METADATA_JOIN_OR_EVIDENCE_FAILED");
         }
     }
 }
@@ -357,6 +582,20 @@ fn authenticated_client_discovers_inactive_local_models_over_both_real_transport
 
 impl Drop for TestRuntime {
     fn drop(&mut self) {
+        if self.retain {
+            let note = json!({
+                "synthetic": true,
+                "fixture_retained": true,
+                "unwinding": thread::panicking(),
+                "scope": "fixture Drop only; not process exit or host-wide effects"
+            });
+            if write_journey_evidence(&self.root, "fixture-drop.json", note.to_string().as_bytes())
+                .is_err()
+            {
+                eprintln!("B14.JOURNEY.RETENTION_NOTE_WRITE_FAILED");
+            }
+            return;
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -2626,9 +2865,34 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
         }
     }
 
-    let runtime = TestRuntime::new("b14journey");
-    let address = serve_ollama_inspections(2);
+    let runtime = TestRuntime::retained("b14journey");
+    let save_json = |name: &str, value: serde_json::Value| {
+        write_journey_evidence(&runtime.root, name, value.to_string().as_bytes())
+            .expect("B14.JOURNEY.EVIDENCE_IS_RETAINED_WITHOUT_OVERWRITE");
+    };
+    save_json(
+        "inputs.json",
+        json!({
+            "synthetic": true,
+            "desired_outcome": "Ship one reviewed feature",
+            "success_conditions": ["Relevant gates pass"],
+            "setup": "existing public prepare_c6_fixture; classification before completion",
+            "completion_claim": "fixture declaration only; no performed work or passing gate implied",
+            "spend": "not_measured",
+            "model_invocation": "NOT_RUN",
+            "evaluation": "NOT_RUN",
+            "publication_delivery_pdf_par": "NOT_RUN",
+            "host_wide_effects": "UNKNOWN",
+            "whole_journey_deadline": "NOT_ESTABLISHED"
+        }),
+    );
+    let mut metadata = JourneyMetadata::start(&runtime.root);
+    let address = metadata.address;
     let bind_server = |phase| {
+        assert!(
+            matches!(fs::symlink_metadata(&runtime.socket), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "B14.JOURNEY.BIND_NEVER_REMOVES_A_PREEXISTING_SOCKET"
+        );
         LocalSupervisorServer::bind(LocalServerConfig {
             store_path: runtime.store.clone(),
             initial_workspace_name: "Personal".to_owned(),
@@ -2644,6 +2908,76 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
         .expect("B14.JOURNEY.ORIGINAL_CLIENT_CONNECTS");
     let fixture = prepare_c6_fixture(&client);
+    let mission = client
+        .mission(fixture.mission_id)
+        .expect("B14.JOURNEY.MISSION_READS");
+    let project = client
+        .project(fixture.project_id)
+        .expect("B14.JOURNEY.PROJECT_READS");
+    let team = client
+        .team(fixture.team_id)
+        .expect("B14.JOURNEY.TEAM_READS");
+    let classification = client
+        .get_mission_classification(fixture.mission_id)
+        .expect("B14.JOURNEY.CLASSIFICATION_READS")
+        .latest
+        .expect("B14.JOURNEY.CLASSIFICATION_EXISTS");
+    save_json(
+        "stored-inputs.json",
+        json!({
+            "synthetic": true, "mission": mission, "project": project,
+            "team": team, "classification": classification
+        }),
+    );
+    assert_eq!(
+        mission.desired_outcome, "Ship one reviewed feature",
+        "B14.JOURNEY.STORED_OUTCOME_MATCHES_INPUT"
+    );
+    assert_eq!(
+        mission.success_conditions,
+        ["Relevant gates pass"],
+        "B14.JOURNEY.STORED_CONDITIONS_MATCH_INPUT"
+    );
+    assert_eq!(mission.workspace_id, fixture.workspace_id);
+    assert_eq!(mission.project_id, project.id);
+    assert_eq!(mission.charter_revision, fixture.charter_revision);
+    assert_eq!(project.charter.revision, fixture.charter_revision);
+    assert_eq!(project.workspace_id, fixture.workspace_id);
+    assert_eq!(mission.team_id, team.id);
+    assert_eq!(team.project_id, project.id);
+    assert_eq!(team.workspace_id, fixture.workspace_id);
+    assert_eq!(mission.admitted_by, MissionAdmissionActor::Operator);
+    assert_eq!(team.formed_by, TeamFormationActor::Operator);
+    assert_eq!(mission.members.len(), 1);
+    assert_eq!(team.members.len(), 1);
+    assert_eq!(mission.members[0].resident_id, fixture.resident_id);
+    assert_eq!(
+        mission.members[0].admission_configuration_id,
+        fixture.configuration_id
+    );
+    assert_eq!(team.members[0].resident_id, fixture.resident_id);
+    assert_eq!(
+        team.members[0].formation_configuration_id,
+        fixture.configuration_id
+    );
+    assert_eq!(classification.mission_id, fixture.mission_id);
+    assert_eq!(classification.policy.project_id, fixture.project_id);
+    assert_eq!(
+        classification.policy.policy_revision,
+        fixture.policy_revision
+    );
+    assert_eq!(
+        classification.policy.charter_revision,
+        fixture.charter_revision
+    );
+    assert_eq!(classification.impact, "high");
+    assert_eq!(classification.basis, "operator_declared");
+    assert!(
+        client
+            .mission_publications(fixture.mission_id)
+            .expect("B14.JOURNEY.PUBLICATIONS_READ_BEFORE_PREPARE")
+            .is_empty()
+    );
     let completion_before = client
         .mission_completion(fixture.mission_id)
         .expect("B14.JOURNEY.COMPLETION_READS_BEFORE_RESTART")
@@ -2658,6 +2992,15 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     let document_before = client
         .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
         .expect("B14.JOURNEY.DOCUMENT_READS_BEFORE_RESTART");
+    // Capture returned data even when the following independent owner comparisons fail. These
+    // DTOs contain only this synthetic document/provenance, never a transport auth envelope.
+    save_json(
+        "before-restart.json",
+        json!({
+            "synthetic": true, "receipt": receipt_before, "document": document_before,
+            "completion": completion_before
+        }),
+    );
 
     // Independent immutable records, not expectations reconstructed from transport fields. The
     // public completion view is deliberately partial, so its owner's verified reader supplies the
@@ -2698,10 +3041,228 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     let bytes_before = data_encoding::BASE64
         .decode(document_before.candidate_content_base64.as_bytes())
         .expect("B14.JOURNEY.DOCUMENT_DECODES_BEFORE_RESTART");
+    for (name, bytes) in [
+        ("candidate-before.md", bytes_before.clone()),
+        (
+            "manifest-owner.bin",
+            manifest_before.canonical_bytes().to_vec(),
+        ),
+        (
+            "artifact-owner.bin",
+            candidate_before
+                .payload()
+                .canonical_bytes()
+                .expect("B14.JOURNEY.ARTIFACT_CANONICAL_BYTES"),
+        ),
+        (
+            "completion-owner.bin",
+            full_completion_before
+                .canonical_bytes()
+                .expect("B14.JOURNEY.COMPLETION_CANONICAL_BYTES"),
+        ),
+    ] {
+        write_journey_evidence(&runtime.root, name, &bytes)
+            .expect("B14.JOURNEY.OWNER_BYTES_ARE_RETAINED");
+    }
     assert_eq!(
         bytes_before.as_slice(),
         candidate_before.content(),
         "B14.JOURNEY.INITIAL_DOCUMENT_IS_THE_OWNERS_BYTES"
+    );
+    let manifest = manifest_before.manifest();
+    assert_eq!(full_completion_before.workspace_id, fixture.workspace_id);
+    assert_eq!(full_completion_before.project_id, fixture.project_id);
+    assert_eq!(full_completion_before.mission_id, fixture.mission_id);
+    assert_eq!(
+        full_completion_before.actor,
+        beacond::CompletionActor::Operator
+    );
+    assert_eq!(
+        full_completion_before.accountable_resident_id,
+        fixture.resident_id
+    );
+    assert_eq!(
+        full_completion_before.accountable_resident_configuration_id,
+        fixture.configuration_id
+    );
+    assert_eq!(
+        full_completion_before.declared_conditions_sha256,
+        beacond::declared_conditions_digest(&["Relevant gates pass".to_owned()])
+    );
+    assert_eq!(manifest.workspace_id, fixture.workspace_id);
+    assert_eq!(manifest.mission_id, fixture.mission_id);
+    assert_eq!(manifest.accountable_resident_id, fixture.resident_id);
+    assert_eq!(
+        manifest.boundary_event_seq,
+        full_completion_before.boundary_event_seq
+    );
+    assert_eq!(
+        manifest.completion_recorded_at_ms,
+        full_completion_before.completed_at_ms
+    );
+    assert_eq!(manifest.completion.kind, beacond::SourceKind::Completion);
+    assert_eq!(
+        manifest
+            .completion
+            .identity
+            .as_ref()
+            .map(|identity| identity.object_id),
+        Some(full_completion_before.completion_id)
+    );
+    let completion_digest = full_completion_before
+        .digest()
+        .expect("B14.JOURNEY.COMPLETION_DIGEST");
+    assert_eq!(
+        (
+            &manifest.completion.digest.algorithm,
+            &manifest.completion.digest.canonicalizer,
+            &manifest.completion.digest.value
+        ),
+        (
+            &completion_digest.algorithm,
+            &completion_digest.canonicalizer,
+            &completion_digest.value
+        )
+    );
+    assert_eq!(
+        manifest.policy_classification.kind,
+        beacond::SourceKind::Policy
+    );
+    assert_eq!(
+        manifest
+            .policy_classification
+            .identity
+            .as_ref()
+            .map(|identity| identity.object_id),
+        Some(classification.classification_id)
+    );
+    assert_eq!(
+        (
+            &manifest.policy_classification.digest.algorithm,
+            &manifest.policy_classification.digest.canonicalizer,
+            &manifest.policy_classification.digest.value
+        ),
+        (
+            &classification.digest.algorithm,
+            &classification.digest.canonicalizer,
+            &classification.digest.value
+        )
+    );
+    assert!(manifest.policy_high_impact);
+    let payload = candidate_before.payload();
+    assert_eq!(payload.workspace_id, fixture.workspace_id);
+    assert_eq!(payload.accountable_resident_id, fixture.resident_id);
+    assert_eq!(
+        payload.accountable_configuration_id,
+        fixture.configuration_id
+    );
+    assert_eq!(
+        payload.context,
+        beacond::ArtifactContext::Mission {
+            project_id: fixture.project_id,
+            mission_id: fixture.mission_id
+        }
+    );
+    assert_eq!(document_before.mission_id, fixture.mission_id);
+    assert_eq!(receipt_before.mission_id, fixture.mission_id);
+    assert_eq!(document_before.manifest_id, manifest_before.manifest_id());
+    assert_eq!(receipt_before.manifest_id, document_before.manifest_id);
+    assert_eq!(
+        receipt_before.manifest_digest,
+        document_before.manifest_digest
+    );
+    assert_eq!(
+        receipt_before.candidate_artifact_digest,
+        document_before.candidate_artifact_digest
+    );
+    assert_eq!(
+        receipt_before.appendix_request,
+        AppendixRequestDto::PolicyDefault
+    );
+    assert_eq!(
+        serde_json::to_value(&receipt_before.appendix_mode)
+            .expect("B14.JOURNEY.APPENDIX_MODE_SERIALIZES"),
+        json!("included")
+    );
+    assert_eq!(
+        (
+            &document_before.manifest_digest.algorithm,
+            &document_before.manifest_digest.canonicalizer,
+            &document_before.manifest_digest.value
+        ),
+        (
+            &manifest_before.digest().algorithm,
+            &manifest_before.digest().canonicalizer,
+            &manifest_before.digest().value
+        )
+    );
+    assert_eq!(
+        (
+            &document_before.candidate_artifact_digest.algorithm,
+            &document_before.candidate_artifact_digest.canonicalizer,
+            &document_before.candidate_artifact_digest.value
+        ),
+        (
+            &candidate_before.digest().algorithm,
+            &candidate_before.digest().canonicalizer,
+            &candidate_before.digest().value
+        )
+    );
+    assert_eq!(
+        document_before.candidate_artifact_digest.value,
+        manifest_before.candidate_artifact_digest()
+    );
+    assert_eq!(document_before.candidate_content_digest.algorithm, "sha256");
+    assert_eq!(
+        document_before.candidate_content_digest.canonicalizer,
+        "beacon.raw.v1"
+    );
+    assert_ne!(
+        document_before.candidate_artifact_digest.canonicalizer,
+        document_before.candidate_content_digest.canonicalizer
+    );
+    assert_eq!(
+        document_before.candidate_content_digest.value,
+        data_encoding::HEXLOWER.encode(&Sha256::digest(&bytes_before)),
+        "B14.JOURNEY.RAW_CONTENT_HASH_IS_INDEPENDENT_OF_THE_RECORD_HASH"
+    );
+    assert_eq!(
+        document_before.candidate_content_bytes,
+        bytes_before.len() as u64
+    );
+    assert_eq!(
+        document_before.candidate_content_digest.value,
+        payload.content_digest.value
+    );
+    assert_eq!(
+        receipt_before.candidate_content_digest,
+        document_before.candidate_content_digest
+    );
+    assert_eq!(
+        receipt_before.candidate_content_bytes,
+        document_before.candidate_content_bytes
+    );
+    assert_eq!(
+        full_completion_before.spend,
+        beacond::SpendReference::NotMeasured("no meter on this Mission".to_owned())
+    );
+    assert!(
+        matches!(&manifest.spend_ref, beacond::OutcomeState::NotEvaluated(reason) if reason == "no meter on this Mission")
+    );
+    let markdown = std::str::from_utf8(&bytes_before).expect("B14.JOURNEY.CANDIDATE_IS_UTF8");
+    assert!(
+        markdown.contains("Ship one reviewed feature"),
+        "B14.JOURNEY.MARKDOWN_RETAINS_THE_OUTCOME"
+    );
+    assert!(
+        markdown.contains("Relevant gates pass"),
+        "B14.JOURNEY.MARKDOWN_RETAINS_THE_CONDITION"
+    );
+    assert!(
+        markdown.contains(
+            "No amount is stated. An unmeasured or absent spend record is not zero spend."
+        ),
+        "B14.JOURNEY.MARKDOWN_DOES_NOT_PROMOTE_UNMEASURED_TO_ZERO"
     );
 
     drop(client);
@@ -2709,6 +3270,14 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     assert!(
         !runtime.socket.exists(),
         "B14.JOURNEY.ORIGINAL_SERVER_RELEASES_ITS_SOCKET"
+    );
+    save_json(
+        "original-server-stopped.json",
+        json!({
+            "synthetic": true, "serve_until_joined": true,
+            "socket_absent": true, "mechanism": "native server Drop unlinks its owned socket",
+            "physical_exit_deadline": "NOT_ESTABLISHED"
+        }),
     );
     let mut reopened_server = ServerSession::start(bind_server("reopened same store"));
     let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
@@ -2757,6 +3326,13 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     let document_after = client
         .read_outcome_candidate_document(&receipt_before.manifest_digest.value)
         .expect("B14.JOURNEY.HELD_DOCUMENT_READS_BEFORE_REPEAT");
+    save_json(
+        "after-restart-before-repeat.json",
+        json!({
+            "synthetic": true, "reopened_locked_then_authenticated": true,
+            "repeat_prepare_issued": false, "document": document_after
+        }),
+    );
     assert_eq!(
         document_after, document_before,
         "B14.JOURNEY.FULL_DOCUMENT_AND_BYTES_SURVIVE_RESTART"
@@ -2776,6 +3352,27 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
         "B14.JOURNEY.FULL_CANDIDATE_AND_CREATION_EVENT_SURVIVE_RESTART"
     );
 
+    // A narrow snapshot, not a whole-store/no-write claim. Owner authentication legitimately
+    // writes account/security_events; these three domain tables exclude that bookkeeping.
+    let counts = || {
+        let mut connection = rusqlite::Connection::open_with_flags(
+            &runtime.store,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("B14.JOURNEY.CENSUS_OPENS_READ_ONLY");
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .expect("B14.JOURNEY.CENSUS_BUSY_TIMEOUT");
+        let read = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            .expect("B14.JOURNEY.CENSUS_SNAPSHOT");
+        let row: (i64, i64, i64) = read.query_row(
+            "SELECT (SELECT count(*) FROM outcome_manifests), (SELECT count(*) FROM artifacts), (SELECT count(*) FROM events)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("B14.JOURNEY.CENSUS_READS");
+        read.commit().expect("B14.JOURNEY.CENSUS_CLOSES");
+        row
+    };
+    let before_repeat_counts = counts();
     let receipt_after = client
         .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
         .expect("B14.JOURNEY.REPEAT_PREPARE_ACCEPTED_AFTER_RESTART");
@@ -2797,7 +3394,64 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     );
     // The same receipt/document is public observational idempotence. The owner equality also
     // retains the Artifact creation event; neither proves that no unrelated row or Event was written.
+    let after_repeat_counts = counts();
+    let publications = client
+        .mission_publications(fixture.mission_id)
+        .expect("B14.JOURNEY.PUBLICATIONS_READ_AFTER_REPEAT");
+    save_json(
+        "after-repeat.json",
+        json!({
+            "synthetic": true, "receipt": receipt_after,
+            "count_order": ["outcome_manifests", "artifacts", "events"],
+            "before_counts": before_repeat_counts, "after_counts": after_repeat_counts,
+            "publications": publications,
+            "account_security_events": "AUTHENTICATION_WRITES_EXPECTED_NOT_CENSUSED",
+            "other_tables_or_host_effects": "UNKNOWN"
+        }),
+    );
+    assert_eq!(
+        after_repeat_counts, before_repeat_counts,
+        "B14.JOURNEY.REPEAT_PRESERVES_THREE_DOMAIN_COUNTS"
+    );
+    assert!(
+        publications.is_empty(),
+        "B14.JOURNEY.CANDIDATE_IS_NOT_PUBLICATION"
+    );
     reopened_server.stop();
+    let metadata_observation = metadata
+        .stop()
+        .expect("B14.JOURNEY.METADATA_JOINS_AND_RETAINS_COUNTS");
+    assert_eq!(
+        metadata_observation.failure, None,
+        "B14.JOURNEY.METADATA_HAS_NO_FIXTURE_FAILURE"
+    );
+    assert_eq!(metadata_observation.accepted_requests, 6);
+    assert_eq!(metadata_observation.completed_responses, 6);
+    assert_eq!(
+        metadata_observation.routes,
+        [
+            "GET /api/tags HTTP/1.1",
+            "POST /api/show HTTP/1.1",
+            "GET /api/tags HTTP/1.1",
+            "GET /api/tags HTTP/1.1",
+            "POST /api/show HTTP/1.1",
+            "GET /api/tags HTTP/1.1"
+        ]
+    );
+    assert!(
+        runtime.root.is_dir() && runtime.store.is_file(),
+        "B14.JOURNEY.ORIGINAL_FIXTURE_STILL_EXISTS"
+    );
+    save_json(
+        "journey-assertions.json",
+        json!({
+            "synthetic": true, "assertions_reached_end": true,
+            "both_native_servers_joined": true, "metadata_thread_joined": true,
+            "scope": "declared synthetic records and candidate bytes survive same-store restart",
+            "performed_work_evaluation_publication_delivery": "NOT_PROVEN",
+            "process_physical_exit_or_global_effects": "UNKNOWN"
+        }),
+    );
 }
 
 /// A foreign Workspace's REAL manifest and a digest that never existed answer with the same bytes.
