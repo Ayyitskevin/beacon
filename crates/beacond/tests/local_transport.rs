@@ -3180,7 +3180,7 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
         AppendixRequestDto::PolicyDefault
     );
     assert_eq!(
-        serde_json::to_value(&receipt_before.appendix_mode)
+        serde_json::to_value(receipt_before.appendix_mode)
             .expect("B14.JOURNEY.APPENDIX_MODE_SERIALIZES"),
         json!("included")
     );
