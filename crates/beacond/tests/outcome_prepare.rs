@@ -10481,12 +10481,11 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
     }
 }
 
-/// A task-owned private prefix the bar creates for itself: `0700` at creation, under the temp
-/// directory, removed when the test ends.
+/// A task-owned private prefix the bar creates for itself: `0700` at creation, beneath literal
+/// `/tmp`, removed when the test ends. This matches `validated_private_prefix`'s location guard.
 ///
-/// The bars mint inside one of these rather than inside `TMPDIR` directly, so they hold whatever
-/// `TMPDIR` happens to be -- including a bare `/tmp`, which the guard now refuses as a prefix. A
-/// test whose result depends on how the operator exported one variable is measuring the operator.
+/// Other fixtures may use a disk-backed `TMPDIR`; it does not broaden the mint's allowed root.
+/// The bars mint inside a unique private child, never the shared `/tmp` directory itself.
 struct PrivatePrefix {
     path: PathBuf,
 }
@@ -10494,7 +10493,7 @@ struct PrivatePrefix {
 impl PrivatePrefix {
     fn new(label: &str) -> Self {
         let path =
-            std::env::temp_dir().join(format!("b18-prefix-{label}-{}", Uuid::new_v4().simple()));
+            PathBuf::from("/tmp").join(format!("b18-prefix-{label}-{}", Uuid::new_v4().simple()));
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
