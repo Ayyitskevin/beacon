@@ -1021,6 +1021,53 @@ fn verify_one_project(
     Ok(())
 }
 
+/// Transaction-bound current Charter proof for the inert pilot successor. No authority is
+/// widened: the original no-spend/prohibited reader and every historical Event still apply.
+pub(crate) fn verified_current_pilot_charter(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(u32, AutonomyProfile), ProjectError> {
+    let (revisions, oversized): (i64, bool) = connection.query_row(
+        "SELECT count(*), coalesce(max(length(CAST(purpose AS BLOB))>65536
+          OR length(CAST(desired_outcomes_json AS BLOB))>65536
+          OR length(CAST(constraints_json AS BLOB))>65536
+          OR length(CAST(prohibitions_json AS BLOB))>65536),0)
+         FROM project_charter_revisions WHERE workspace_id=?1 AND project_id=?2",
+        params![workspace_id.to_string(), project_id.to_string()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (events, oversized_event): (i64, bool) = connection.query_row(
+        "SELECT count(*), coalesce(max(length(CAST(payload_json AS BLOB))>65536),0)
+         FROM events WHERE workspace_id=?1 AND kind IN ('project.created','project.charter_revised')",
+        [workspace_id.to_string()], |r|Ok((r.get(0)?,r.get(1)?)),
+    )?;
+    if revisions > 256 || events > 10000 || oversized || oversized_event {
+        return Err(ProjectError::InvalidStore);
+    }
+    verify_one_project(connection, workspace_id, project_id)?;
+    let current = load_project(connection, workspace_id, project_id)?;
+    let mut statement = connection.prepare(
+        "SELECT kind, payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND
+          ((kind = 'project.created' AND json_extract(payload_json, '$.project.id') = ?2)
+           OR (kind = 'project.charter_revised' AND json_extract(payload_json, '$.project_id') = ?2))
+         ORDER BY sequence",
+    )?;
+    let mut rows = statement.query(params![workspace_id.to_string(), project_id.to_string()])?;
+    while let Some(row) = rows.next()? {
+        let kind: String = row.get(0)?;
+        let payload: String = row.get(1)?;
+        let now = nonnegative_u64(row.get(2)?)?;
+        if kind == "project.created" {
+            verify_project_event(connection, workspace_id, now, &payload)?;
+        } else {
+            verify_project_charter_revised_event(connection, workspace_id, now, &payload)?;
+        }
+    }
+    Ok((current.charter.revision, current.charter.autonomy_profile))
+}
+
 /// The checks that are about the STORE rather than one Project.
 fn verify_project_totals(connection: &rusqlite::Connection) -> Result<(), ProjectStateFault> {
     let project_count: i64 = connection
