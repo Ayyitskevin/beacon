@@ -16,8 +16,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[2]
 
 FAKE_DOCKER = """#!/bin/sh
@@ -229,13 +227,6 @@ def test_secrets_in_a_persisted_driver_log_refuse_export(tmp_path: Path) -> None
         assert planted_secret not in result.stderr
 
 
-def test_ci_upload_requires_the_export_clearance_marker() -> None:
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
-
-    clearance = "hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != ''"
-    assert workflow.count(clearance) == 2
-
-
 def test_an_absent_appimage_is_not_reported_as_a_broken_host(tmp_path: Path) -> None:
     root, environment = _isolated_harness(tmp_path)
     output = tmp_path / "evidence"
@@ -342,17 +333,30 @@ sleep 1
     }
 
 
-@pytest.mark.parametrize("job", ["package", "package-self-hosted"])
-def test_workflow_first_run_does_not_reuse_cached_evidence(tmp_path: Path, job: str) -> None:
+def _workflow_job(name: str) -> str:
+    workflow = (REPO / ".github/workflows/ci.yml").read_text()
+    body = workflow.split(f"\n  {name}:\n", 1)[1]
+    return re.split(r"^  [a-z][a-z-]*:\n", body, maxsplit=1, flags=re.M)[0]
+
+
+def test_ci_packages_on_the_hosted_compatibility_image_at_the_tested_commit() -> None:
+    product = _workflow_job("product")
+    package = _workflow_job("package")
+
+    assert "    runs-on: ubuntu-22.04\n" in package
+    assert "    needs: product\n" in package
+    assert "tested_commit: ${{ steps.checkout.outputs.commit }}" in product
+    assert "ref: ${{ needs.product.outputs.tested_commit }}" in package
+
+
+def test_workflow_first_run_does_not_reuse_cached_evidence(tmp_path: Path) -> None:
     """Execute the workflow's shell, with the real harness and fixture Docker.
 
     Old target evidence and its export marker must neither block this attempt
     nor become this attempt's upload. Even identical run/attempt retries must
     allocate their own evidence; a fresh broken run must still fail.
     """
-    workflow = (REPO / ".github/workflows/ci.yml").read_text()
-    job_body = workflow.split(f"  {job}:\n", 1)[1]
-    job_body = re.split(r"^  [a-z][a-z-]*:\n", job_body, maxsplit=1, flags=re.M)[0]
+    job_body = _workflow_job("package")
     step = job_body.split("      - name: Drive first-run setup on clean hosts\n", 1)[1]
     # Stop at the next YAML step: its nested values are not shell commands.
     script = step.split("        run: |\n", 1)[1].split("      # Source:", 1)[0]
@@ -400,67 +404,3 @@ def test_workflow_first_run_does_not_reuse_cached_evidence(tmp_path: Path, job: 
     assert "steps.first_run.outputs.path != ''" in upload
     assert "hashFiles(format('{0}/.export-safe', steps.first_run.outputs.path)) != ''" in upload
     assert "path: ${{ steps.first_run.outputs.path }}" in upload
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        None,
-        "missing",
-        "empty_labels",
-        "broad_labels",
-        "relative_socket",
-        "extra_field",
-        "option_injection",
-        "traversal",
-        "wrong_type",
-    ],
-)
-def test_portable_package_bindings_refuse_missing_or_unsafe_inputs(tmp_path, bad):
-    workflow = (REPO / ".github/workflows/ci.yml").read_text()
-    if "      - name: Validate portable package bindings\n" not in workflow:
-        pytest.skip("historical workflow predates portable self-hosted bindings")
-    step = workflow.split("      - name: Validate portable package bindings\n", 1)[1]
-    script = step.split("        run: |\n", 1)[1].split("      - ", 1)[0]
-    script = "\n".join(line[10:] for line in script.splitlines() if line.startswith("          "))
-    labels = ["self-hosted", "linux", "x64", "example-package-runner"]
-    socket = {"source": "/example/host.sock", "target": "/example/container.sock"}
-    if bad == "empty_labels":
-        labels = []
-    elif bad == "broad_labels":
-        labels.pop()
-    elif bad == "relative_socket":
-        socket["source"] = "relative.sock"
-    elif bad == "extra_field":
-        socket["options"] = "--privileged"
-    elif bad == "option_injection":
-        socket["source"] = "/example/socket --privileged"
-    elif bad == "traversal":
-        socket["target"] = "/example/../socket"
-    elif bad == "wrong_type":
-        socket = ["source", "target"]
-    output = tmp_path / "outputs"
-    environment = {
-        "PATH": os.environ["PATH"],
-        "GITHUB_OUTPUT": str(output),
-        "PACKAGE_RUNNER_LABELS": "" if bad == "missing" else json.dumps(labels),
-        "PACKAGE_SOCKET": json.dumps(socket),
-    }
-    result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        env=environment,
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-    )
-    if bad is not None:
-        assert result.returncode != 0
-        assert not output.exists()
-    else:
-        assert result.returncode == 0, result.stderr
-        actual = dict(line.split("=", 1) for line in output.read_text().splitlines())
-        assert actual == {
-            "runner_labels": '["self-hosted","linux","x64","example-package-runner"]',
-            "container_options": "--volume /example/host.sock:/example/container.sock",
-            "docker_host": "unix:///example/container.sock",
-        }

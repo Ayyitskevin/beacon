@@ -73,12 +73,10 @@ the build. Write what this change uses.
 
 ## Downloading the CI AppImage
 
-Packaging is conditional; not every CI run produces an AppImage:
-
-- A pull request with the `package` label requests the GitHub-hosted `package` job after
-  the product job passes. An unlabeled pull request skips packaging.
-- Pushes to `main` and explicit `workflow_dispatch` runs select the separate
-  `package-self-hosted` job on the maintainer's node-a runner, when that runner is available.
+A push to `main`, a manual CI run with an explicit `ref`, or a pull request with the
+`package` label builds the AppImage on GitHub-hosted Ubuntu 22.04. Packaging starts after
+the product checks pass and uses the exact commit they checked out. For a repeatable manual
+run, supply a full commit SHA. Other branch pushes and unlabeled pull requests skip packaging.
 
 The [workflow](.github/workflows/ci.yml) is the source of truth for these conditions.
 A successful packaging job uploads a `beacon-linux-appimage` artifact with a 14-day retention
