@@ -1,0 +1,749 @@
+{
+  "schema_version": "pbdep.fixture-files.v1",
+  "a2_listing_preimages": [
+    {
+      "role": "full",
+      "retained_locator": "reports/beacon-i1-phaseB-20261020/r2/EXPECTED-ROSTER.txt",
+      "sha256": "80176813d5049c5db9ec2750ea6ec343603cfbc9d8ded6a3843fc2b74b28dc27",
+      "bytes": 40524,
+      "rows": 518,
+      "identifier_only_sorted_unique_lf": true
+    },
+    {
+      "role": "pilot",
+      "retained_locator": "reports/beacon-i1-phaseB-20261020/r2/PILOT-ROSTER.txt",
+      "sha256": "464efb7b12934af12c91a537130a0303ed1a1bda73595a0ff1e2c0765e0caf9f",
+      "bytes": 5120,
+      "rows": 68,
+      "identifier_only_sorted_unique_lf": true
+    },
+    {
+      "role": "overlay",
+      "retained_locator": "reports/beacon-i1-phaseB-20261020/r2/EXPECTED-OVERLAY.txt",
+      "sha256": "be9e58b9677ab50ba2c954c3435f9d0f0d45d37674a01be5e929d6fe1d169641",
+      "bytes": 439,
+      "rows": 5,
+      "identifier_only_sorted_unique_lf": true
+    }
+  ],
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "Cargo.toml",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/Cargo.toml",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/lib.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/artifact.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/artifact_phase_b_contract.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/sample-project/Cargo.lock",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/migrations/0001_initial.sql",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/pilot_admission.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/pilot_authority.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    },
+    {
+      "path": "crates/beacond/src/pilot_store.rs",
+      "kind": "regular",
+      "text_utf8": "pbdep fixture\n",
+      "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+    }
+  ],
+  "subjects": [
+    {
+      "subject_id": "qd-base",
+      "synthetic": true,
+      "phase": "base",
+      "source_root": "/fixture/QD/fixtures/base/source",
+      "target_root": "/fixture/QD/fixtures/base/target",
+      "subject_head": "1111111111111111111111111111111111111111",
+      "manifest": {
+        "schema_version": "phase-b.source-manifest.v1",
+        "subject_head": "1111111111111111111111111111111111111111",
+        "source_root": "/fixture/QD/fixtures/base/source",
+        "files": {
+          "Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "rust-toolchain.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/lib.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact_phase_b_contract.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/sample-project/Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/migrations/0001_initial.sql": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      },
+      "manifest_sha256": "8122e28c41d85956ac8036d65a9b3cd25c9098672c31960ae3c53d3380ffa20f",
+      "dep_binding_schema": "phase-b.dep-binding.v1",
+      "dep_bindings": [
+        {
+          "raw_token": "crates/beacond/src/lib.rs",
+          "canonical_relative": "crates/beacond/src/lib.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact.rs",
+          "canonical_relative": "crates/beacond/src/artifact.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+          "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      ],
+      "dep_bindings_sha256": "f54657adfbd57ca9e4dc55af6bd73a0ac2c4684a6ef0f2dd3908ebb7875b565b",
+      "depfile_utf8": "/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef.d: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql\n\n/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql\n\ncrates/beacond/src/lib.rs:\ncrates/beacond/src/artifact.rs:\ncrates/beacond/src/artifact_phase_b_contract.rs:\ncrates/beacond/src/../sample-project/Cargo.lock:\ncrates/beacond/src/../migrations/0001_initial.sql:\n\n# env-dep:CARGO_MANIFEST_DIR=/fixture/QD/fixtures/base/source/crates/beacond\n# env-dep:CARGO_PKG_VERSION=0.1.0\n",
+      "depfile_sha256": "6347b706de245c8eda33ad0e5c2e6b9bc711aecd7fcd0e93073e128a3b43d256",
+      "compiler_utf8": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///fixture/QD/fixtures/base/source/crates/beacond#0.1.0\",\"manifest_path\":\"/fixture/QD/fixtures/base/source/crates/beacond/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"beacond\",\"src_path\":\"/fixture/QD/fixtures/base/source/crates/beacond/src/lib.rs\",\"edition\":\"2024\",\"test\":true},\"profile\":{\"test\":true},\"filenames\":[\"/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\"],\"executable\":\"/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\",\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 48s\n",
+      "compiler_sha256": "1bf3e53e75f24f5aa6bea9b1e69016cefbe5e7cddc3a09b0fcb9ebad5fe49b51",
+      "binary": {
+        "path": "/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef",
+        "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+        "dev": "7",
+        "ino": "11",
+        "size": "14",
+        "mtime_ns": "1"
+      },
+      "expected_traversed_directories": [
+        "crates",
+        "crates/beacond",
+        "crates/beacond/migrations",
+        "crates/beacond/sample-project",
+        "crates/beacond/src"
+      ]
+    },
+    {
+      "subject_id": "qd-base-canonical",
+      "synthetic": true,
+      "phase": "base",
+      "source_root": "/fixture/QD/fixtures/base/source",
+      "target_root": "/fixture/QD/fixtures/base/target",
+      "subject_head": "1111111111111111111111111111111111111111",
+      "manifest": {
+        "schema_version": "phase-b.source-manifest.v1",
+        "subject_head": "1111111111111111111111111111111111111111",
+        "source_root": "/fixture/QD/fixtures/base/source",
+        "files": {
+          "Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "rust-toolchain.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/lib.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact_phase_b_contract.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/sample-project/Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/migrations/0001_initial.sql": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      },
+      "manifest_sha256": "8122e28c41d85956ac8036d65a9b3cd25c9098672c31960ae3c53d3380ffa20f",
+      "dep_binding_schema": "phase-b.dep-binding.v1",
+      "dep_bindings": [
+        {
+          "raw_token": "crates/beacond/src/lib.rs",
+          "canonical_relative": "crates/beacond/src/lib.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact.rs",
+          "canonical_relative": "crates/beacond/src/artifact.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/migrations/0001_initial.sql",
+          "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      ],
+      "dep_bindings_sha256": "ac71b83b85f894f3c5e4de6900107f841d666c41a16a6301fef1fb19cb47a7ae",
+      "depfile_utf8": "/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef.d: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/sample-project/Cargo.lock crates/beacond/migrations/0001_initial.sql\n\n/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/sample-project/Cargo.lock crates/beacond/migrations/0001_initial.sql\n\ncrates/beacond/src/lib.rs:\ncrates/beacond/src/artifact.rs:\ncrates/beacond/src/artifact_phase_b_contract.rs:\ncrates/beacond/sample-project/Cargo.lock:\ncrates/beacond/migrations/0001_initial.sql:\n\n# env-dep:CARGO_MANIFEST_DIR=/fixture/QD/fixtures/base/source/crates/beacond\n# env-dep:CARGO_PKG_VERSION=0.1.0\n",
+      "depfile_sha256": "669f479901da0c2d3d88859a45daa89030267e3a66f065f73adb687bd8821db2",
+      "compiler_utf8": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///fixture/QD/fixtures/base/source/crates/beacond#0.1.0\",\"manifest_path\":\"/fixture/QD/fixtures/base/source/crates/beacond/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"beacond\",\"src_path\":\"/fixture/QD/fixtures/base/source/crates/beacond/src/lib.rs\",\"edition\":\"2024\",\"test\":true},\"profile\":{\"test\":true},\"filenames\":[\"/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\"],\"executable\":\"/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\",\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 48s\n",
+      "compiler_sha256": "1bf3e53e75f24f5aa6bea9b1e69016cefbe5e7cddc3a09b0fcb9ebad5fe49b51",
+      "binary": {
+        "path": "/fixture/QD/fixtures/base/target/debug/deps/beacond-0123456789abcdef",
+        "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+        "dev": "7",
+        "ino": "11",
+        "size": "14",
+        "mtime_ns": "1"
+      },
+      "expected_traversed_directories": [
+        "crates",
+        "crates/beacond",
+        "crates/beacond/migrations",
+        "crates/beacond/sample-project",
+        "crates/beacond/src"
+      ]
+    },
+    {
+      "subject_id": "qd-candidate",
+      "synthetic": true,
+      "phase": "candidate",
+      "source_root": "/fixture/QD/fixtures/candidate/source",
+      "target_root": "/fixture/QD/fixtures/candidate/target",
+      "subject_head": "2222222222222222222222222222222222222222",
+      "manifest": {
+        "schema_version": "phase-b.source-manifest.v1",
+        "subject_head": "2222222222222222222222222222222222222222",
+        "source_root": "/fixture/QD/fixtures/candidate/source",
+        "files": {
+          "Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "rust-toolchain.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/lib.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact_phase_b_contract.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/sample-project/Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/migrations/0001_initial.sql": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_admission.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_authority.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_store.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      },
+      "manifest_sha256": "2e71c0f8d4bce1af95534c46cbc50bc46ce5e3a686484b37ed6ebf0d386ec185",
+      "dep_binding_schema": "phase-b.dep-binding.v1",
+      "dep_bindings": [
+        {
+          "raw_token": "crates/beacond/src/lib.rs",
+          "canonical_relative": "crates/beacond/src/lib.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact.rs",
+          "canonical_relative": "crates/beacond/src/artifact.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+          "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_admission.rs",
+          "canonical_relative": "crates/beacond/src/pilot_admission.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_authority.rs",
+          "canonical_relative": "crates/beacond/src/pilot_authority.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_store.rs",
+          "canonical_relative": "crates/beacond/src/pilot_store.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      ],
+      "dep_bindings_sha256": "ff01f315aaadf3ecb4dbaefa787023099e60393b4166b2263d558a229ed47bdb",
+      "depfile_utf8": "/fixture/QD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef.d: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql crates/beacond/src/pilot_admission.rs crates/beacond/src/pilot_authority.rs crates/beacond/src/pilot_store.rs\n\n/fixture/QD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql crates/beacond/src/pilot_admission.rs crates/beacond/src/pilot_authority.rs crates/beacond/src/pilot_store.rs\n\ncrates/beacond/src/lib.rs:\ncrates/beacond/src/artifact.rs:\ncrates/beacond/src/artifact_phase_b_contract.rs:\ncrates/beacond/src/../sample-project/Cargo.lock:\ncrates/beacond/src/../migrations/0001_initial.sql:\ncrates/beacond/src/pilot_admission.rs:\ncrates/beacond/src/pilot_authority.rs:\ncrates/beacond/src/pilot_store.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=/fixture/QD/fixtures/candidate/source/crates/beacond\n# env-dep:CARGO_PKG_VERSION=0.1.0\n",
+      "depfile_sha256": "b254c31ce7fc87f79afd2ac61bbf0636dd37160b5ff60a6243712f4c86b1dc0c",
+      "compiler_utf8": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///fixture/QD/fixtures/candidate/source/crates/beacond#0.1.0\",\"manifest_path\":\"/fixture/QD/fixtures/candidate/source/crates/beacond/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"beacond\",\"src_path\":\"/fixture/QD/fixtures/candidate/source/crates/beacond/src/lib.rs\",\"edition\":\"2024\",\"test\":true},\"profile\":{\"test\":true},\"filenames\":[\"/fixture/QD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef\"],\"executable\":\"/fixture/QD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef\",\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 48s\n",
+      "compiler_sha256": "7cd147ca945197bde014a0ddff7cc0a417663223438519ba71e5be53e7ce137e",
+      "binary": {
+        "path": "/fixture/QD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef",
+        "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+        "dev": "7",
+        "ino": "11",
+        "size": "14",
+        "mtime_ns": "1"
+      },
+      "expected_traversed_directories": [
+        "crates",
+        "crates/beacond",
+        "crates/beacond/migrations",
+        "crates/beacond/sample-project",
+        "crates/beacond/src"
+      ]
+    },
+    {
+      "subject_id": "rd-base",
+      "synthetic": true,
+      "phase": "base",
+      "source_root": "/fixture/RD/fixtures/base/source",
+      "target_root": "/fixture/RD/fixtures/base/target",
+      "subject_head": "1111111111111111111111111111111111111111",
+      "manifest": {
+        "schema_version": "phase-b.source-manifest.v1",
+        "subject_head": "1111111111111111111111111111111111111111",
+        "source_root": "/fixture/RD/fixtures/base/source",
+        "files": {
+          "Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "rust-toolchain.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/lib.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact_phase_b_contract.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/sample-project/Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/migrations/0001_initial.sql": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      },
+      "manifest_sha256": "8eff5618c73d55e83e166f4fe1e40e71ef438a45a30c1e4ae7d9c3d9a9ec34be",
+      "dep_binding_schema": "phase-b.dep-binding.v1",
+      "dep_bindings": [
+        {
+          "raw_token": "crates/beacond/src/lib.rs",
+          "canonical_relative": "crates/beacond/src/lib.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact.rs",
+          "canonical_relative": "crates/beacond/src/artifact.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+          "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      ],
+      "dep_bindings_sha256": "f54657adfbd57ca9e4dc55af6bd73a0ac2c4684a6ef0f2dd3908ebb7875b565b",
+      "depfile_utf8": "/fixture/RD/fixtures/base/target/debug/deps/beacond-0123456789abcdef.d: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql\n\n/fixture/RD/fixtures/base/target/debug/deps/beacond-0123456789abcdef: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql\n\ncrates/beacond/src/lib.rs:\ncrates/beacond/src/artifact.rs:\ncrates/beacond/src/artifact_phase_b_contract.rs:\ncrates/beacond/src/../sample-project/Cargo.lock:\ncrates/beacond/src/../migrations/0001_initial.sql:\n\n# env-dep:CARGO_MANIFEST_DIR=/fixture/RD/fixtures/base/source/crates/beacond\n# env-dep:CARGO_PKG_VERSION=0.1.0\n",
+      "depfile_sha256": "0ad01e4a0ac905f53b9dd4af332a9c19940121f35b3ff1d0f55b3aa0c76a2597",
+      "compiler_utf8": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///fixture/RD/fixtures/base/source/crates/beacond#0.1.0\",\"manifest_path\":\"/fixture/RD/fixtures/base/source/crates/beacond/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"beacond\",\"src_path\":\"/fixture/RD/fixtures/base/source/crates/beacond/src/lib.rs\",\"edition\":\"2024\",\"test\":true},\"profile\":{\"test\":true},\"filenames\":[\"/fixture/RD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\"],\"executable\":\"/fixture/RD/fixtures/base/target/debug/deps/beacond-0123456789abcdef\",\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 48s\n",
+      "compiler_sha256": "922514a02768c568cf020e9524bff28fc618c2f705b5eaefe132bb7bd114f228",
+      "binary": {
+        "path": "/fixture/RD/fixtures/base/target/debug/deps/beacond-0123456789abcdef",
+        "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+        "dev": "7",
+        "ino": "11",
+        "size": "14",
+        "mtime_ns": "1"
+      },
+      "expected_traversed_directories": [
+        "crates",
+        "crates/beacond",
+        "crates/beacond/migrations",
+        "crates/beacond/sample-project",
+        "crates/beacond/src"
+      ]
+    },
+    {
+      "subject_id": "rd-candidate",
+      "synthetic": true,
+      "phase": "candidate",
+      "source_root": "/fixture/RD/fixtures/candidate/source",
+      "target_root": "/fixture/RD/fixtures/candidate/target",
+      "subject_head": "2222222222222222222222222222222222222222",
+      "manifest": {
+        "schema_version": "phase-b.source-manifest.v1",
+        "subject_head": "2222222222222222222222222222222222222222",
+        "source_root": "/fixture/RD/fixtures/candidate/source",
+        "files": {
+          "Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "rust-toolchain.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/Cargo.toml": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/lib.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/artifact_phase_b_contract.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/sample-project/Cargo.lock": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/migrations/0001_initial.sql": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_admission.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_authority.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+          "crates/beacond/src/pilot_store.rs": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      },
+      "manifest_sha256": "03db053e3c750d3723cfd8e75ae727dbe13857655ab12d85e5754a12326ea602",
+      "dep_binding_schema": "phase-b.dep-binding.v1",
+      "dep_bindings": [
+        {
+          "raw_token": "crates/beacond/src/lib.rs",
+          "canonical_relative": "crates/beacond/src/lib.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact.rs",
+          "canonical_relative": "crates/beacond/src/artifact.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+          "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_admission.rs",
+          "canonical_relative": "crates/beacond/src/pilot_admission.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_authority.rs",
+          "canonical_relative": "crates/beacond/src/pilot_authority.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        },
+        {
+          "raw_token": "crates/beacond/src/pilot_store.rs",
+          "canonical_relative": "crates/beacond/src/pilot_store.rs",
+          "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+        }
+      ],
+      "dep_bindings_sha256": "ff01f315aaadf3ecb4dbaefa787023099e60393b4166b2263d558a229ed47bdb",
+      "depfile_utf8": "/fixture/RD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef.d: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql crates/beacond/src/pilot_admission.rs crates/beacond/src/pilot_authority.rs crates/beacond/src/pilot_store.rs\n\n/fixture/RD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef: crates/beacond/src/lib.rs crates/beacond/src/artifact.rs crates/beacond/src/artifact_phase_b_contract.rs crates/beacond/src/../sample-project/Cargo.lock crates/beacond/src/../migrations/0001_initial.sql crates/beacond/src/pilot_admission.rs crates/beacond/src/pilot_authority.rs crates/beacond/src/pilot_store.rs\n\ncrates/beacond/src/lib.rs:\ncrates/beacond/src/artifact.rs:\ncrates/beacond/src/artifact_phase_b_contract.rs:\ncrates/beacond/src/../sample-project/Cargo.lock:\ncrates/beacond/src/../migrations/0001_initial.sql:\ncrates/beacond/src/pilot_admission.rs:\ncrates/beacond/src/pilot_authority.rs:\ncrates/beacond/src/pilot_store.rs:\n\n# env-dep:CARGO_MANIFEST_DIR=/fixture/RD/fixtures/candidate/source/crates/beacond\n# env-dep:CARGO_PKG_VERSION=0.1.0\n",
+      "depfile_sha256": "efacc26682e84968e631e5ecf60922b008b13b2b7440fa586b4f30f3f7a15864",
+      "compiler_utf8": "{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///fixture/RD/fixtures/candidate/source/crates/beacond#0.1.0\",\"manifest_path\":\"/fixture/RD/fixtures/candidate/source/crates/beacond/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"beacond\",\"src_path\":\"/fixture/RD/fixtures/candidate/source/crates/beacond/src/lib.rs\",\"edition\":\"2024\",\"test\":true},\"profile\":{\"test\":true},\"filenames\":[\"/fixture/RD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef\"],\"executable\":\"/fixture/RD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef\",\"fresh\":false}\n{\"reason\":\"build-finished\",\"success\":true}\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 48s\n",
+      "compiler_sha256": "dafc294a082616450fe7fff2151f1636d1a916ced1cd9ea0b7f95c12a0271caa",
+      "binary": {
+        "path": "/fixture/RD/fixtures/candidate/target/debug/deps/beacond-0123456789abcdef",
+        "sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+        "dev": "7",
+        "ino": "11",
+        "size": "14",
+        "mtime_ns": "1"
+      },
+      "expected_traversed_directories": [
+        "crates",
+        "crates/beacond",
+        "crates/beacond/migrations",
+        "crates/beacond/sample-project",
+        "crates/beacond/src"
+      ]
+    }
+  ],
+  "filesystem_cases": [
+    {
+      "fixture_id": "D19",
+      "source_root": "/fixture/QD/fixtures/D19/source",
+      "raw_token": "a/cancelled/../leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        },
+        {
+          "path": "a/cancelled",
+          "kind": "symlink",
+          "text_utf8": null,
+          "target": ".",
+          "expected_nlink": 1
+        }
+      ],
+      "mutation": null
+    },
+    {
+      "fixture_id": "D20",
+      "source_root": "/fixture/QD/fixtures/D20/source",
+      "raw_token": "a/leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/payload.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "symlink",
+          "text_utf8": null,
+          "target": "payload.txt",
+          "expected_nlink": 1
+        }
+      ],
+      "mutation": null
+    },
+    {
+      "fixture_id": "D21",
+      "source_root": "/fixture/QD/fixtures/D21/source",
+      "raw_token": "a/leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/payload.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 2
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "hardlink",
+          "text_utf8": null,
+          "target": "a/payload.txt",
+          "expected_nlink": 2
+        }
+      ],
+      "mutation": null
+    },
+    {
+      "fixture_id": "D22",
+      "source_root": "/fixture/QD/fixtures/D22/source",
+      "raw_token": "a/cancelled/../leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        },
+        {
+          "path": "a/cancelled",
+          "kind": "absent",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        }
+      ],
+      "mutation": null
+    },
+    {
+      "fixture_id": "D23",
+      "source_root": "/fixture/QD/fixtures/D23/source",
+      "raw_token": "a/cancelled/../leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        },
+        {
+          "path": "a/cancelled",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        }
+      ],
+      "mutation": null
+    },
+    {
+      "fixture_id": "D24",
+      "source_root": "/fixture/QD/fixtures/D24/source",
+      "raw_token": "a/leaf.txt",
+      "canonical_relative": "a/leaf.txt",
+      "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672",
+      "objects": [
+        {
+          "path": "a",
+          "kind": "directory",
+          "text_utf8": null,
+          "target": null,
+          "expected_nlink": null
+        },
+        {
+          "path": "a/leaf.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        },
+        {
+          "path": "a/replacement.txt",
+          "kind": "regular",
+          "text_utf8": "pbdep fixture\n",
+          "target": null,
+          "expected_nlink": 1
+        }
+      ],
+      "mutation": {
+        "operation": "replace_leaf_after_first_observation",
+        "source": "a/replacement.txt",
+        "destination": "a/leaf.txt",
+        "expect_same_sha256": true,
+        "expect_different_inode": true
+      }
+    }
+  ],
+  "producer_schema": {
+    "supervise_source_sha256": "add620d26bcb21b522e113904cea585c40009cce212100384aebe1ae70c64978",
+    "schema_map_sha256": "71dfe7b4ddcd5737509fdd4168843c3cc658bdf7cacf6f2e4b0b164eac81d814",
+    "projection": {
+      "top_level_keys": [
+        "leader_pid",
+        "leader_returncode",
+        "leader_exit_monotonic",
+        "whole_descendant_set_exit",
+        "echild_monotonic",
+        "pipe_eof",
+        "pipe_eof_monotonic",
+        "subreaper_verified",
+        "wait_options",
+        "elapsed_seconds",
+        "stop",
+        "metadata_overflow",
+        "event_counts",
+        "reaped",
+        "signals",
+        "errors",
+        "resource_peak_sampled",
+        "log_bytes",
+        "discarded_log_bytes",
+        "log_sha256"
+      ],
+      "reaped_keys": [
+        "pid",
+        "status",
+        "exit_code",
+        "at"
+      ],
+      "signals_keys": [
+        "pid",
+        "signal",
+        "at"
+      ],
+      "ordinary_error_keys": [
+        "where",
+        "type"
+      ],
+      "classified_error_keys": [
+        "where",
+        "type",
+        "pathname_class",
+        "errno"
+      ]
+    }
+  }
+}

@@ -1,0 +1,661 @@
+{
+  "schema_version": "pbdep.controls.v2",
+  "controls": [
+    {
+      "id": "D01",
+      "observations": [
+        {
+          "observation_id": "D01.1",
+          "scenario": "predecessor_canonical",
+          "input": {
+            "subject_id": "qd-base-canonical"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        },
+        {
+          "observation_id": "D01.2",
+          "scenario": "predecessor_parent",
+          "input": {
+            "subject_id": "qd-base-canonical",
+            "index": 3,
+            "raw_token": "crates/beacond/src/../sample-project/Cargo.lock"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "PATH",
+            "provenance": "deliberate-contract"
+          }
+        },
+        {
+          "observation_id": "D01.3",
+          "scenario": "successor_parent",
+          "input": {
+            "subject_id": "qd-base"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "D02",
+      "observations": [
+        {
+          "observation_id": "D02.1",
+          "scenario": "successor_canonical",
+          "input": {
+            "subject_id": "qd-base-canonical"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "D03",
+      "observations": [
+        {
+          "observation_id": "D03.1",
+          "scenario": "retained_replay",
+          "input": {
+            "replay_id": "a2-retained"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "D04",
+      "observations": [
+        {
+          "observation_id": "D04.1",
+          "scenario": "retained_migration",
+          "input": {
+            "replay_id": "a2-retained",
+            "index": 79,
+            "binding": {
+              "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+              "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+              "source_sha256": "fc30b28e53784fac0d7b214b313134d5a4aa7ffd33817aea166c7820c1d714d5"
+            }
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "D05",
+      "observations": [
+        {
+          "observation_id": "D05.1",
+          "scenario": "raw_normalization_forgery",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "replacement_token": "crates/beacond/sample-project/Cargo.lock"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEPFILE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D06",
+      "observations": [
+        {
+          "observation_id": "D06.1",
+          "scenario": "raw_reorder",
+          "input": {
+            "subject_id": "qd-base",
+            "first_index": 0,
+            "second_index": 1
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEPFILE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D07",
+      "observations": [
+        {
+          "observation_id": "D07.1",
+          "scenario": "raw_missing",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEPFILE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D08",
+      "observations": [
+        {
+          "observation_id": "D08.1",
+          "scenario": "raw_extra",
+          "input": {
+            "subject_id": "qd-base",
+            "raw_token": "crates/beacond/src/extra.rs"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEPFILE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D09",
+      "observations": [
+        {
+          "observation_id": "D09.1",
+          "scenario": "duplicate_raw",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_DUPLICATE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D10",
+      "observations": [
+        {
+          "observation_id": "D10.1",
+          "scenario": "canonical_alias",
+          "input": {
+            "subject_id": "qd-base",
+            "binding": {
+              "raw_token": "crates/beacond/sample-project/Cargo.lock",
+              "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_ALIAS",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D11",
+      "observations": [
+        {
+          "observation_id": "D11.1",
+          "scenario": "root_escape",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "binding": {
+              "raw_token": "../Cargo.lock",
+              "canonical_relative": "Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_ESCAPE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D12",
+      "observations": [
+        {
+          "observation_id": "D12.1",
+          "scenario": "escape_reentry",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "binding": {
+              "raw_token": "x/../../crates/beacond/sample-project/Cargo.lock",
+              "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_ESCAPE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D13",
+      "observations": [
+        {
+          "observation_id": "D13.1",
+          "scenario": "absolute_token",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "binding": {
+              "raw_token": "/crates/beacond/sample-project/Cargo.lock",
+              "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_PATH",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D14",
+      "observations": [
+        {
+          "observation_id": "D14.1",
+          "scenario": "unsupported_continuation",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "binding": {
+              "raw_token": "crates/beacond/src/\\\n../sample-project/Cargo.lock",
+              "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_PATH",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D15",
+      "observations": [
+        {
+          "observation_id": "D15.1",
+          "scenario": "canonical_disagreement",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "canonical_relative": "crates/beacond/Cargo.toml"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_BINDING",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D16",
+      "observations": [
+        {
+          "observation_id": "D16.1",
+          "scenario": "source_absent",
+          "input": {
+            "subject_id": "qd-base",
+            "canonical_relative": "crates/beacond/sample-project/Cargo.lock"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_SOURCE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D17",
+      "observations": [
+        {
+          "observation_id": "D17.1",
+          "scenario": "required_module_absent",
+          "input": {
+            "subject_id": "qd-base",
+            "canonical_relative": "crates/beacond/src/artifact_phase_b_contract.rs"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEPFILE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D18",
+      "observations": [
+        {
+          "observation_id": "D18.1",
+          "scenario": "source_digest_disagreement",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_DIGEST",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D19",
+      "observations": [
+        {
+          "observation_id": "D19.1",
+          "scenario": "runtime_cancelled_symlink",
+          "input": {
+            "fixture_id": "D19"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_directory",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D20",
+      "observations": [
+        {
+          "observation_id": "D20.1",
+          "scenario": "runtime_terminal_symlink",
+          "input": {
+            "fixture_id": "D20"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_terminal",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D21",
+      "observations": [
+        {
+          "observation_id": "D21.1",
+          "scenario": "runtime_terminal_hardlink",
+          "input": {
+            "fixture_id": "D21"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_terminal",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D22",
+      "observations": [
+        {
+          "observation_id": "D22.1",
+          "scenario": "runtime_cancelled_missing",
+          "input": {
+            "fixture_id": "D22"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_missing_component",
+            "provenance": "verified-missing-component"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D23",
+      "observations": [
+        {
+          "observation_id": "D23.1",
+          "scenario": "runtime_cancelled_nondirectory",
+          "input": {
+            "fixture_id": "D23"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_directory",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D24",
+      "observations": [
+        {
+          "observation_id": "D24.1",
+          "scenario": "runtime_identity_drift",
+          "input": {
+            "fixture_id": "D24"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "dependency_observation_drift",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D25",
+      "observations": [
+        {
+          "observation_id": "D25.1",
+          "scenario": "pre_binding_digest_drift",
+          "input": {
+            "subject_id": "qd-base",
+            "replacement_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "PROVENANCE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D26",
+      "observations": [
+        {
+          "observation_id": "D26.1",
+          "scenario": "completion_binding_digest_drift",
+          "input": {
+            "subject_id": "qd-base",
+            "replacement_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_COMPLETION",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D27",
+      "observations": [
+        {
+          "observation_id": "D27.1",
+          "scenario": "binding_version_missing",
+          "input": {
+            "subject_id": "qd-base"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "SHAPE",
+            "provenance": "deliberate-contract"
+          }
+        },
+        {
+          "observation_id": "D27.2",
+          "scenario": "binding_version_old",
+          "input": {
+            "subject_id": "qd-base",
+            "dep_binding_schema": "phase-b.dep-binding.v0"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_VERSION",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D28",
+      "observations": [
+        {
+          "observation_id": "D28.1",
+          "scenario": "binding_version_unknown",
+          "input": {
+            "subject_id": "qd-base",
+            "dep_binding_schema": "phase-b.dep-binding.v999"
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_VERSION",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D29",
+      "observations": [
+        {
+          "observation_id": "D29.1",
+          "scenario": "binding_wrong_type",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "canonical_relative": 17
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_BINDING",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D30",
+      "observations": [
+        {
+          "observation_id": "D30.1",
+          "scenario": "binding_extra_field",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "unexpected": true
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "SHAPE",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D31",
+      "observations": [
+        {
+          "observation_id": "D31.1",
+          "scenario": "overlong_token",
+          "input": {
+            "subject_id": "qd-base",
+            "index": 3,
+            "binding": {
+              "raw_token": "a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../a/../crates/beacond/sample-project/Cargo.lock",
+              "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+              "source_sha256": "9c98419a1c6052c61d94fd48cade8fe7a02b236c91f7b58d05c58c7eee8b8672"
+            }
+          },
+          "expected": {
+            "outcome": "REJECT_TYPED",
+            "code": "DEP_PATH",
+            "provenance": "deliberate-contract"
+          }
+        }
+      ]
+    },
+    {
+      "id": "D32",
+      "observations": [
+        {
+          "observation_id": "D32.1",
+          "scenario": "composed_chain",
+          "input": {
+            "subject_id": "qd-base"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        },
+        {
+          "observation_id": "D32.2",
+          "scenario": "composed_chain",
+          "input": {
+            "subject_id": "qd-candidate"
+          },
+          "expected": {
+            "outcome": "ACCEPT",
+            "code": null,
+            "provenance": null
+          }
+        }
+      ]
+    }
+  ]
+}

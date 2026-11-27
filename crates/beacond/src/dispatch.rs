@@ -3431,6 +3431,35 @@ pub(crate) fn reconcile_pause_state(
     Ok(None)
 }
 
+/// Read-only I1 seam: the existing Installation Pause owner remains authoritative.
+/// Its terminal pause/resume Event sequence is the generation, not a second pilot counter.
+/// Call inside the caller's transaction; this neither pauses nor resumes anything.
+pub(crate) fn verified_pilot_pause(connection: &Connection) -> Result<(bool, u64), DispatchError> {
+    if reconcile_pause_state(connection)?.is_some() {
+        return Err(DispatchError::InvalidStore);
+    }
+    let terminal = connection.query_row(
+        "SELECT sequence, kind, payload_json, occurred_at_ms FROM events
+         WHERE kind IN ('installation.paused','installation.resumed') ORDER BY sequence DESC LIMIT 1",
+        [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)),
+    ).optional()?;
+    match terminal {
+        None => Ok((false, 0)),
+        Some((sequence, kind, payload, occurred)) => {
+            let paused = kind == "installation.paused";
+            verify_pause_event(
+                paused,
+                u64::try_from(occurred).map_err(|_| DispatchError::InvalidStore)?,
+                &payload,
+            )?;
+            Ok((
+                paused,
+                u64::try_from(sequence).map_err(|_| DispatchError::InvalidStore)?,
+            ))
+        }
+    }
+}
+
 /// Replay one Pause or Resume Event: it must decode, and its recorded state and time must agree
 /// with the kind it was stored under and when it happened.
 ///

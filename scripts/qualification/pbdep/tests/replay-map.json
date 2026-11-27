@@ -1,0 +1,678 @@
+{
+  "schema_version": "pbdep.replay-map.v2",
+  "replay_id": "a2-retained",
+  "scope": "historical-dependency-grammar-and-membership-only",
+  "dep_binding_schema": "phase-b.dep-binding.v1",
+  "binding": {
+    "path": "/fixture/retained/binding.json",
+    "sha256": "9af981fdbf8f48b216b505c24c73938948d6aa8e70675fd398583e9a6860e5d3"
+  },
+  "provenance": {
+    "path": "/fixture/retained/provenance.json",
+    "sha256": "6cc574770f9cbc25545c6e8e3c6b40860d380372079c89e575c09b17e5067a77"
+  },
+  "manifest": {
+    "path": "/fixture/retained/source-manifest.json",
+    "sha256": "8474f23ef524d2e743bb7a64c65f35578ec8d161f968a0eda68359196d0f52aa"
+  },
+  "depfile": {
+    "path": "/fixture/retained/depfile.d",
+    "sha256": "2745e52cc62bebd4983c8725a7e6ba3d6e530b857add0ce8fbf2b2d7f6870c23"
+  },
+  "source_root": "/fixture/retained/source",
+  "subject_head": "f00635bbd91590dbae6b7931072a973dd31e291b",
+  "executable": "/fixture/retained/target/debug/deps/beacond-retained",
+  "dep_bindings": [
+    {
+      "raw_token": "crates/beacond/src/lib.rs",
+      "canonical_relative": "crates/beacond/src/lib.rs",
+      "source_sha256": "104634bd06ae01411e7e76584bccfad0b784c41c54ee3cd832d197cc2af8514c"
+    },
+    {
+      "raw_token": "crates/beacond/src/artifact.rs",
+      "canonical_relative": "crates/beacond/src/artifact.rs",
+      "source_sha256": "20c51ca4d5630c4756c0cf4403af56340d5846acf3f100c69c3243d2c07fbf27"
+    },
+    {
+      "raw_token": "crates/beacond/src/artifact_identity_contract.rs",
+      "canonical_relative": "crates/beacond/src/artifact_identity_contract.rs",
+      "source_sha256": "4bcf1c73a7e083ebc86cc4bc7760ee403b6107195f8ff95d1b56ed54cc8082f8"
+    },
+    {
+      "raw_token": "crates/beacond/src/candidate.rs",
+      "canonical_relative": "crates/beacond/src/candidate.rs",
+      "source_sha256": "dab656fb30736f419e960108bd3c09435bf8d9a99684c57715203f9794b820fb"
+    },
+    {
+      "raw_token": "crates/beacond/src/candidate_evaluation.rs",
+      "canonical_relative": "crates/beacond/src/candidate_evaluation.rs",
+      "source_sha256": "0406ef437fed234aa6e77c89c3d4ca09d447b0704eec143b2818d186f7c3d7ac"
+    },
+    {
+      "raw_token": "crates/beacond/src/candidate_evaluation_collector.rs",
+      "canonical_relative": "crates/beacond/src/candidate_evaluation_collector.rs",
+      "source_sha256": "3c286839781295a9394615d0c28e894ad6378577a3a5324f84fbcdab08208976"
+    },
+    {
+      "raw_token": "crates/beacond/src/candidate_evaluation_packet.rs",
+      "canonical_relative": "crates/beacond/src/candidate_evaluation_packet.rs",
+      "source_sha256": "b1227734807a22a6289c1226814d268807bcde2a5ad1ae236c7ebf77493b1056"
+    },
+    {
+      "raw_token": "crates/beacond/src/candidate_evaluation_result.rs",
+      "canonical_relative": "crates/beacond/src/candidate_evaluation_result.rs",
+      "source_sha256": "4ef0ba6f03f1e7e245b6ae4440278d72d4fb08ea2b7b4613f88e6cbf0cc78adb"
+    },
+    {
+      "raw_token": "crates/beacond/src/check_preflight.rs",
+      "canonical_relative": "crates/beacond/src/check_preflight.rs",
+      "source_sha256": "a904cbc8c69bbae2e47c6aa24e43e4058d9381fc9b2f9f95966d959e721924b9"
+    },
+    {
+      "raw_token": "crates/beacond/src/declared_checks.rs",
+      "canonical_relative": "crates/beacond/src/declared_checks.rs",
+      "source_sha256": "2e816a79c34135c477396c285bd66b80bec851936e0bd877e0ffbc6f8bb5cafa"
+    },
+    {
+      "raw_token": "crates/beacond/src/disk_encryption.rs",
+      "canonical_relative": "crates/beacond/src/disk_encryption.rs",
+      "source_sha256": "27fb46fc92602ebc5105ee5a6e1ae9fb2e1e638fee3da3780b154c89d76678a1"
+    },
+    {
+      "raw_token": "crates/beacond/src/dispatch.rs",
+      "canonical_relative": "crates/beacond/src/dispatch.rs",
+      "source_sha256": "5f91bf61042990f58ee5020fbd352393a3fc0470272d9ac4134ac6cb97ea18b5"
+    },
+    {
+      "raw_token": "crates/beacond/src/evaluation.rs",
+      "canonical_relative": "crates/beacond/src/evaluation.rs",
+      "source_sha256": "240ceedd5342e645c8d849379400d4cf61f722ea8fe5697efe839580977dec10"
+    },
+    {
+      "raw_token": "crates/beacond/src/event_chain.rs",
+      "canonical_relative": "crates/beacond/src/event_chain.rs",
+      "source_sha256": "44c7d9b7cc7d4ec5eddfd479c9a9b706cd79776371d542c1383a6e961ff8e04a"
+    },
+    {
+      "raw_token": "crates/beacond/src/evidence.rs",
+      "canonical_relative": "crates/beacond/src/evidence.rs",
+      "source_sha256": "b8868430f46e2273819a36394a47f6d6f1019714d072234f6208834209b25d11"
+    },
+    {
+      "raw_token": "crates/beacond/src/git_object_store.rs",
+      "canonical_relative": "crates/beacond/src/git_object_store.rs",
+      "source_sha256": "e7fd27fc644c6dd50176d035a94dcc125ee958de7b851b84770e379fa4a7f052"
+    },
+    {
+      "raw_token": "crates/beacond/src/local_model_activation.rs",
+      "canonical_relative": "crates/beacond/src/local_model_activation.rs",
+      "source_sha256": "64a29d2ea0e71ce024c757182730f5f23d438c5c00da4e3831c181b01494b5c6"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission.rs",
+      "canonical_relative": "crates/beacond/src/mission.rs",
+      "source_sha256": "916c51c9124caa226e3dfdbbc558c34b11dbe807cddc0492f68862c56243442f"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission_completion.rs",
+      "canonical_relative": "crates/beacond/src/mission_completion.rs",
+      "source_sha256": "f0306c18cbaf6975307abfdcaafdafa669c52a96ad7f81c7fa62646115ce68c3"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission_completion_command.rs",
+      "canonical_relative": "crates/beacond/src/mission_completion_command.rs",
+      "source_sha256": "d6aa4bfbd0f339bd4c2a5cb14fc7a13bad204de3477abddbbdfbec518ae010e5"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission_completion_store.rs",
+      "canonical_relative": "crates/beacond/src/mission_completion_store.rs",
+      "source_sha256": "a2e9df2e6545a18b865b113c79627f2bda21b756af1c061b692d831bc130e64b"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission_impact.rs",
+      "canonical_relative": "crates/beacond/src/mission_impact.rs",
+      "source_sha256": "c00a5d6daa5e8abe9fc9d6f2a322bb83ed0e849d1d42f7b568aad143c0f9bee3"
+    },
+    {
+      "raw_token": "crates/beacond/src/mission_impact_command.rs",
+      "canonical_relative": "crates/beacond/src/mission_impact_command.rs",
+      "source_sha256": "afabdf7598ee69934ff91740b141fc8c535d75c48727caf8842adc3f1a51daac"
+    },
+    {
+      "raw_token": "crates/beacond/src/model_invocation.rs",
+      "canonical_relative": "crates/beacond/src/model_invocation.rs",
+      "source_sha256": "b180e5c12c2fdcb50595cc92bd35befc81e1c8524fa6a415bc46832c1115269a"
+    },
+    {
+      "raw_token": "crates/beacond/src/model_invocation_store.rs",
+      "canonical_relative": "crates/beacond/src/model_invocation_store.rs",
+      "source_sha256": "1ecfe1e6cace0fe427fea7d87a0565ce16b6c4180af0920f3d9b79f281dd1b5d"
+    },
+    {
+      "raw_token": "crates/beacond/src/operator_account.rs",
+      "canonical_relative": "crates/beacond/src/operator_account.rs",
+      "source_sha256": "ba4095bde45988b75edac210fad64a43179c3f0ac891857c3787e2f4cacba7eb"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome.rs",
+      "canonical_relative": "crates/beacond/src/outcome.rs",
+      "source_sha256": "0897b53318c4e17e4622e40c1b2dcd3932d9aeda78220df1de126360f3e1814c"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_assembler.rs",
+      "canonical_relative": "crates/beacond/src/outcome_assembler.rs",
+      "source_sha256": "02304faaa2bbbf06dfec392c0e1387a6441469382c176077114868cf6e3ef21a"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_collector.rs",
+      "canonical_relative": "crates/beacond/src/outcome_collector.rs",
+      "source_sha256": "6c2d0a7680c1be59d80f592b4e5f110d3231e5784646b5a0d622ba8f2ed2899d"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_pdf.rs",
+      "canonical_relative": "crates/beacond/src/outcome_pdf.rs",
+      "source_sha256": "734938c49d53118887ee96fde13b0d2a933dc6219a3e2865d680d7dce5452a2b"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_publication.rs",
+      "canonical_relative": "crates/beacond/src/outcome_publication.rs",
+      "source_sha256": "731e572ab6d99ff973dcf8375de431b9d30767a12c9b40aec99de47c438f9b92"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_store.rs",
+      "canonical_relative": "crates/beacond/src/outcome_store.rs",
+      "source_sha256": "ff6148bb2bad2bcf6b4962909e1449da1febafbfa5581a59787bca0f7571050e"
+    },
+    {
+      "raw_token": "crates/beacond/src/outcome_typst.rs",
+      "canonical_relative": "crates/beacond/src/outcome_typst.rs",
+      "source_sha256": "a581e9494027cbd0292a93e415b157c8ba544ca731ad4734d2e3f5f48510f091"
+    },
+    {
+      "raw_token": "crates/beacond/src/pilot_admission.rs",
+      "canonical_relative": "crates/beacond/src/pilot_admission.rs",
+      "source_sha256": "5789367963d5304784722f11535c096cdb1034eddf1ce80da48b1f17f2e97ba9"
+    },
+    {
+      "raw_token": "crates/beacond/src/pilot_authority.rs",
+      "canonical_relative": "crates/beacond/src/pilot_authority.rs",
+      "source_sha256": "1ed9613b4c3d71859c38da68095612959fafdc7d5dcbddc777d10a1cd8f2ba0a"
+    },
+    {
+      "raw_token": "crates/beacond/src/pilot_store.rs",
+      "canonical_relative": "crates/beacond/src/pilot_store.rs",
+      "source_sha256": "04b5a38187bb868c5e51d25629a5d2467b4ffcd3917b308585d601ef3626b57e"
+    },
+    {
+      "raw_token": "crates/beacond/src/platform_session.rs",
+      "canonical_relative": "crates/beacond/src/platform_session.rs",
+      "source_sha256": "4bb62fbaf78c031713ae99efbd52af04eed7e5d51bbea21108636af3e52f5424"
+    },
+    {
+      "raw_token": "crates/beacond/src/project.rs",
+      "canonical_relative": "crates/beacond/src/project.rs",
+      "source_sha256": "8e68ab02ac9f1da39fe989b8570f109119901dd912527ae285040e9960051525"
+    },
+    {
+      "raw_token": "crates/beacond/src/project_policy.rs",
+      "canonical_relative": "crates/beacond/src/project_policy.rs",
+      "source_sha256": "805b7b21b20605cef011eb2d73d28d33a23a90d221a5deca48b7e33c6f57a88e"
+    },
+    {
+      "raw_token": "crates/beacond/src/project_repository.rs",
+      "canonical_relative": "crates/beacond/src/project_repository.rs",
+      "source_sha256": "00db918955f247914b08a3b278b8652a7fcdd0199f4e455ff3585646d5af42f7"
+    },
+    {
+      "raw_token": "crates/beacond/src/proposal.rs",
+      "canonical_relative": "crates/beacond/src/proposal.rs",
+      "source_sha256": "4c598e0b3eb3f9f31ca8202a607080ae7fccbb5e5eb583857e1ac7adfa5f5289"
+    },
+    {
+      "raw_token": "crates/beacond/src/publication_seam.rs",
+      "canonical_relative": "crates/beacond/src/publication_seam.rs",
+      "source_sha256": "d4172e0f5db64fba0d1c8796c4bbe43161bf6e31abd63efbc86fd3e3c97f7f53"
+    },
+    {
+      "raw_token": "crates/beacond/src/recent_receipts.rs",
+      "canonical_relative": "crates/beacond/src/recent_receipts.rs",
+      "source_sha256": "e5e355bc9864b48a235e5fc102b1482be5f2718df9fa8b260a333fbad3be091e"
+    },
+    {
+      "raw_token": "crates/beacond/src/resident_configuration.rs",
+      "canonical_relative": "crates/beacond/src/resident_configuration.rs",
+      "source_sha256": "ab94e42c4b57f01b7893975b0599c5daace459df5ee553e35084c2b37c011969"
+    },
+    {
+      "raw_token": "crates/beacond/src/resident_lifecycle.rs",
+      "canonical_relative": "crates/beacond/src/resident_lifecycle.rs",
+      "source_sha256": "bd83682949e38bf6b2cd9e626fd2bb44cd1385d4616c16e106e88d95e65dd8de"
+    },
+    {
+      "raw_token": "crates/beacond/src/resource_discovery.rs",
+      "canonical_relative": "crates/beacond/src/resource_discovery.rs",
+      "source_sha256": "3a6c6c42fa8655dc0d36a1aab57f72ba35889bfa6c4e9ad817ff3ecd68a2847a"
+    },
+    {
+      "raw_token": "crates/beacond/src/ruling.rs",
+      "canonical_relative": "crates/beacond/src/ruling.rs",
+      "source_sha256": "4b7a65bb3fe27e3b4c74078bcfdff126c156f6bebfd2ec636ae1d02fb64cb149"
+    },
+    {
+      "raw_token": "crates/beacond/src/sample_project.rs",
+      "canonical_relative": "crates/beacond/src/sample_project.rs",
+      "source_sha256": "e9f5e289942de0d9805b4cd3ecae0c642194273e20df4daf071e2a66b1afa151"
+    },
+    {
+      "raw_token": "crates/beacond/src/sandbox/mod.rs",
+      "canonical_relative": "crates/beacond/src/sandbox/mod.rs",
+      "source_sha256": "be0d79e616a21e79738bc356ddcc679fa4ee51b0ffdec7fb3452f30c94e9546e"
+    },
+    {
+      "raw_token": "crates/beacond/src/sandbox/bounded.rs",
+      "canonical_relative": "crates/beacond/src/sandbox/bounded.rs",
+      "source_sha256": "9da116dc5e963271caceeca6b0f28cb94aec7b7169fa3145345338ebadaa7302"
+    },
+    {
+      "raw_token": "crates/beacond/src/sandbox/landlock.rs",
+      "canonical_relative": "crates/beacond/src/sandbox/landlock.rs",
+      "source_sha256": "85b478af5d6c1539e1e0355e79aff520625ba7f3b46c623374d2e7962301101f"
+    },
+    {
+      "raw_token": "crates/beacond/src/sandbox/probe.rs",
+      "canonical_relative": "crates/beacond/src/sandbox/probe.rs",
+      "source_sha256": "b4ab1e5d11917a53c9f7a6f179624760a93f655bcef64adc82964d81a356c024"
+    },
+    {
+      "raw_token": "crates/beacond/src/sandbox/worktree_launcher.rs",
+      "canonical_relative": "crates/beacond/src/sandbox/worktree_launcher.rs",
+      "source_sha256": "c00b9548c8f1f7e7d8fa88d5f626cdcebbd207bcf4180a74b2342067bf067071"
+    },
+    {
+      "raw_token": "crates/beacond/src/spend.rs",
+      "canonical_relative": "crates/beacond/src/spend.rs",
+      "source_sha256": "354deb4e45dcea19616786ac6cb4ab09ead521ec508bd23ccbb10df2604cff8d"
+    },
+    {
+      "raw_token": "crates/beacond/src/starter_organization.rs",
+      "canonical_relative": "crates/beacond/src/starter_organization.rs",
+      "source_sha256": "b67202272465607b6202a62d0b582c3dc621304331cde47b24b21f52bbe43d25"
+    },
+    {
+      "raw_token": "crates/beacond/src/team.rs",
+      "canonical_relative": "crates/beacond/src/team.rs",
+      "source_sha256": "34b058b78c352fa6e450ebee9382451ec96eccefda03959387f9f769c699424b"
+    },
+    {
+      "raw_token": "crates/beacond/src/worktree.rs",
+      "canonical_relative": "crates/beacond/src/worktree.rs",
+      "source_sha256": "8f3e068a98f1d429926efd585a46dc37bfe3e061d4542256b850bd8434a5d777"
+    },
+    {
+      "raw_token": "crates/beacond/src/local_transport.rs",
+      "canonical_relative": "crates/beacond/src/local_transport.rs",
+      "source_sha256": "c69734aa2a303d85c9e0395e494b27f8fe3b562e1d606b24df56fe53cfdb023b"
+    },
+    {
+      "raw_token": "crates/beacond/src/../resources/evaluation/outcome-fidelity-v1.txt",
+      "canonical_relative": "crates/beacond/resources/evaluation/outcome-fidelity-v1.txt",
+      "source_sha256": "197ef3953c74199426346177b1996ee2cb3360bad599266577f5ef8dbd4559e0"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/c4-complete-request.json",
+      "canonical_relative": "crates/beacond/tests/fixtures/c4-complete-request.json",
+      "source_sha256": "0433236b9f88a388507d0e417cc73efbf0ddec805c85a584c4c558c307bfa69f"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/c4-vector-canonical-v1.bin",
+      "canonical_relative": "crates/beacond/tests/fixtures/c4-vector-canonical-v1.bin",
+      "source_sha256": "705034373a787f7936d2bc2d086f5ef0295bbea5aa02ef3ccc66fb8deb951dfe"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/c4-vector-same-token.bin",
+      "canonical_relative": "crates/beacond/tests/fixtures/c4-vector-same-token.bin",
+      "source_sha256": "68c9ea95ea71180794c0f871e5ef1ae6330fcc3fdb46c9bb683d73f1fca3ba5b"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/c4-vector-different-context.bin",
+      "canonical_relative": "crates/beacond/tests/fixtures/c4-vector-different-context.bin",
+      "source_sha256": "95593b761810d435f8b50b26461173d6d99655526699a22f7eeabb8d227ad6d2"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/c4-vector-different-content.bin",
+      "canonical_relative": "crates/beacond/tests/fixtures/c4-vector-different-content.bin",
+      "source_sha256": "728208fa64df16e4912918a845b089582ea07556205c3a49b5f96e5bffbe9b28"
+    },
+    {
+      "raw_token": "crates/beacond/src/../assets/fonts/LibertinusSerif-Regular.otf",
+      "canonical_relative": "crates/beacond/assets/fonts/LibertinusSerif-Regular.otf",
+      "source_sha256": "fcf06307a77367394fcb0ccb241e59eea70dba3d732be309647611224679c733"
+    },
+    {
+      "raw_token": "crates/beacond/src/../assets/fonts/LibertinusSerif-Bold.otf",
+      "canonical_relative": "crates/beacond/assets/fonts/LibertinusSerif-Bold.otf",
+      "source_sha256": "0264914210ed51b3231ebc92ce529e9f2e166ba9eebf0cd4a579558690a27b64"
+    },
+    {
+      "raw_token": "crates/beacond/src/../assets/fonts/DejaVuSansMono.ttf",
+      "canonical_relative": "crates/beacond/assets/fonts/DejaVuSansMono.ttf",
+      "source_sha256": "b4a6c3e4faab8773f4ff761d56451646409f29abedd68f05d38c2df667d3c582"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/authority.hex",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/authority.hex",
+      "source_sha256": "9d73824be8f63a6c715ef0bfdb25aa62c6355fabeaa8c9225fca9b02f9c09900"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/operation.hex",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/operation.hex",
+      "source_sha256": "cc7a91f2dedad3f1e097f8d0248a126eda83725818ae8ad15f7f85fa38d2dfb5"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/workspace.hex",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/workspace.hex",
+      "source_sha256": "f473c97ef979d2485802c39a63f6e023f63b3c16a968395c709fa396068f59ee"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/schema.sql",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/schema.sql",
+      "source_sha256": "db7b1189cab8facc11cd9f49c0ac3af4b49fa6e3515ba51f656273e95ea521af"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/revocation.json",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/revocation.json",
+      "source_sha256": "02c7dd528d3b7b6728a5a3e39528487b69eb972972ef86951510607ff7449e3a"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/observation.json",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/observation.json",
+      "source_sha256": "5a6f32878e8f7f2479a030ea00fbd51cac91195edfb94b0d8a2b320d886187fb"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/observation-measured.json",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/observation-measured.json",
+      "source_sha256": "1d767a6080a1edfc3ff8050789770e3c42f267e24d3ddadb8bd5c2976d13e2e8"
+    },
+    {
+      "raw_token": "crates/beacond/src/../tests/fixtures/i1/uncertainty.json",
+      "canonical_relative": "crates/beacond/tests/fixtures/i1/uncertainty.json",
+      "source_sha256": "eb21cd73a4950b77bd735ded85eef9ed09306b70b39b04fa9e6eef1aa333bbba"
+    },
+    {
+      "raw_token": "crates/beacond/src/../sample-project/Cargo.lock",
+      "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+      "source_sha256": "446edf6b4e852e781d19d0f401673bfb34b24408e21aca1bd4325ab93f42eed9"
+    },
+    {
+      "raw_token": "crates/beacond/src/../sample-project/Cargo.toml",
+      "canonical_relative": "crates/beacond/sample-project/Cargo.toml",
+      "source_sha256": "c25cfd8ae591b7c9c7e5ecf2ca98950a78339e666ee83deb64d228623c524f3b"
+    },
+    {
+      "raw_token": "crates/beacond/src/../sample-project/README.md",
+      "canonical_relative": "crates/beacond/sample-project/README.md",
+      "source_sha256": "91429d6446fd498754864b3341350acf8dcfc3b49d93d63437f1b9dbe8647062"
+    },
+    {
+      "raw_token": "crates/beacond/src/../sample-project/src/lib.rs",
+      "canonical_relative": "crates/beacond/sample-project/src/lib.rs",
+      "source_sha256": "ea47901c54881ee74b1d123fd5eabdaf834b4af41348a717d0bdaa732b535e92"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0001_initial.sql",
+      "canonical_relative": "crates/beacond/migrations/0001_initial.sql",
+      "source_sha256": "fc30b28e53784fac0d7b214b313134d5a4aa7ffd33817aea166c7820c1d714d5"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0002_operator_account.sql",
+      "canonical_relative": "crates/beacond/migrations/0002_operator_account.sql",
+      "source_sha256": "11de827a095aecb763f83f73cd67239f8880f4621657fcdd495f6898e357cd3b"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0003_session_policy.sql",
+      "canonical_relative": "crates/beacond/migrations/0003_session_policy.sql",
+      "source_sha256": "4eae8decb5bc982351298be987d6272ad32911d079b3e5be85aa37ef84e92152"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0004_starter_organization.sql",
+      "canonical_relative": "crates/beacond/migrations/0004_starter_organization.sql",
+      "source_sha256": "d2e16f97fb1e7bf5f65788cdf26c17ed90361d0b47b8f800a6b67765d526182c"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0005_projects.sql",
+      "canonical_relative": "crates/beacond/migrations/0005_projects.sql",
+      "source_sha256": "07b54482b7ecbab742c56e114a101fbefad7a0050daaa9b977693d888ae206a9"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0006_project_charter_revisions.sql",
+      "canonical_relative": "crates/beacond/migrations/0006_project_charter_revisions.sql",
+      "source_sha256": "a7c98f59e8a6b49e3bb1cb873778cc78365a8ad9d6344122b2c2a2ff45d08d7a"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0007_local_model_activations.sql",
+      "canonical_relative": "crates/beacond/migrations/0007_local_model_activations.sql",
+      "source_sha256": "aceeedddc5f2081700bc0f2d4a439da7bde7c85f005ecdea50d0a0f8f17ace07"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0008_resident_lifecycle.sql",
+      "canonical_relative": "crates/beacond/migrations/0008_resident_lifecycle.sql",
+      "source_sha256": "5c1316977c789da59ad7d0d50fc35f4e6aa9745c146988d5ce7986200b0090df"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0009_resident_configurations.sql",
+      "canonical_relative": "crates/beacond/migrations/0009_resident_configurations.sql",
+      "source_sha256": "dd53ffc6b2d23f7566c24a32c48fac8cb6bb664a40ad164848133f38204ce325"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0010_teams.sql",
+      "canonical_relative": "crates/beacond/migrations/0010_teams.sql",
+      "source_sha256": "42ef381121028ecef917262cebb3106f9e41578b7a2ea5a7906f8ff56e93154b"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0011_missions.sql",
+      "canonical_relative": "crates/beacond/migrations/0011_missions.sql",
+      "source_sha256": "0ba2b400b44898140a0595601141f4baa649c924ccadabdcfa8918b29d9aa231"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0012_project_policy.sql",
+      "canonical_relative": "crates/beacond/migrations/0012_project_policy.sql",
+      "source_sha256": "80b1721ce11f1c4c0681f002118d6afb3df8a29d3338aca0dcde32a98ac32960"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0013_project_repository.sql",
+      "canonical_relative": "crates/beacond/migrations/0013_project_repository.sql",
+      "source_sha256": "36919461416fbef9cd26c4ab6c36937feb05add67a8046d8b956a3bf3ba6806f"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0014_run_receipt.sql",
+      "canonical_relative": "crates/beacond/migrations/0014_run_receipt.sql",
+      "source_sha256": "e56214226c86cd6ddb3333957365455b86429a6ccb16fe0251421540440c98bc"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0015_declared_check_runs.sql",
+      "canonical_relative": "crates/beacond/migrations/0015_declared_check_runs.sql",
+      "source_sha256": "861a8eccc9045269d0b1214ce7114c61cfe140fef013a268f82e686b2e5c62f9"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0016_execution_receipt_v2.sql",
+      "canonical_relative": "crates/beacond/migrations/0016_execution_receipt_v2.sql",
+      "source_sha256": "870d615e7f659ded3c665e52fccc75c7e21335f5bf6f03017d59ac848f8c8e91"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0017_sample_project.sql",
+      "canonical_relative": "crates/beacond/migrations/0017_sample_project.sql",
+      "source_sha256": "b5bbc3c1d7ec3a01f5f8fee66e8ab67a8e13f82bc022a0dab9f2d2b1a76efc79"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0018_proposals.sql",
+      "canonical_relative": "crates/beacond/migrations/0018_proposals.sql",
+      "source_sha256": "7bdb87196544ff4817978e3be735d00269264cf5d3052d3e240c2ad50eaeffe4"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0019_rulings.sql",
+      "canonical_relative": "crates/beacond/migrations/0019_rulings.sql",
+      "source_sha256": "f3ef2388ea781b371139c538d38a057893937954492363301f51fbe99e545e38"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0020_recent_receipts_index.sql",
+      "canonical_relative": "crates/beacond/migrations/0020_recent_receipts_index.sql",
+      "source_sha256": "1a72e45ebd0d0a134bb1e49cfc66a7a8238db5492a1caaa2a20d528b791d28e9"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0022_candidates.sql",
+      "canonical_relative": "crates/beacond/migrations/0022_candidates.sql",
+      "source_sha256": "eebf1da4ffc1622c1ad4a4f1c00e89807d19059e738735a424c6355ed555c865"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0023_evaluations.sql",
+      "canonical_relative": "crates/beacond/migrations/0023_evaluations.sql",
+      "source_sha256": "63660b0bb09294f6d7fecea78c672478d70ac5edf76cd445d22fd3beb835c9f1"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0024_mission_success_conditions.sql",
+      "canonical_relative": "crates/beacond/migrations/0024_mission_success_conditions.sql",
+      "source_sha256": "ba0b41ef61016a639c21484ba91a623d0932ab34a0203b6ab5adbe93ecf24ed1"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0025_spend_and_impact.sql",
+      "canonical_relative": "crates/beacond/migrations/0025_spend_and_impact.sql",
+      "source_sha256": "6f896c06ba8bc76562dae16939265e7cc325ed35ec7cab08bdff900df2ef6edc"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0026_mission_completions.sql",
+      "canonical_relative": "crates/beacond/migrations/0026_mission_completions.sql",
+      "source_sha256": "a1ed00490e7027cef83c0dff2074993b499fc1698f180f2838a4ff4470f70b07"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0027_artifacts.sql",
+      "canonical_relative": "crates/beacond/migrations/0027_artifacts.sql",
+      "source_sha256": "372ece0ee3cc6c74ec4620a1816ee7548ad1cd60eeffe9b38c519918e3429fd0"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0028_evaluation_subjects.sql",
+      "canonical_relative": "crates/beacond/migrations/0028_evaluation_subjects.sql",
+      "source_sha256": "b4bd03b914985ca0e36edcd81afa1e4c18ebe51ac2522a9b354f1639a734dbe4"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0029_outcome_manifests.sql",
+      "canonical_relative": "crates/beacond/migrations/0029_outcome_manifests.sql",
+      "source_sha256": "3866c7ea0d5c3a7e99031f23cfce74afda85225ae418aad8140de0e59935b8e4"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0030_outcome_manifest_canonicalizer_v2.sql",
+      "canonical_relative": "crates/beacond/migrations/0030_outcome_manifest_canonicalizer_v2.sql",
+      "source_sha256": "a6f80770224250f8b7cd3c01a107977b17e0369a14e2a58ee4982dfccf42ad29"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0031_outcome_publications.sql",
+      "canonical_relative": "crates/beacond/migrations/0031_outcome_publications.sql",
+      "source_sha256": "e82b1f2d9214ce5e40c3eb9e95c73ef7044acb48339759be0d13a4635cb4de73"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0032_classification_mission_project_key.sql",
+      "canonical_relative": "crates/beacond/migrations/0032_classification_mission_project_key.sql",
+      "source_sha256": "87d074ad6e65c3cab3039ac773aea52f809ac8bfc55a99a544838512810ed6a6"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0033_receipt_pre_image_unreadable.sql",
+      "canonical_relative": "crates/beacond/migrations/0033_receipt_pre_image_unreadable.sql",
+      "source_sha256": "927c64bb6b555071ee6cb3f9cccb57aec641cb548be5a39a3b552f72fa864390"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0034_receipt_outcome_typed_owner.sql",
+      "canonical_relative": "crates/beacond/migrations/0034_receipt_outcome_typed_owner.sql",
+      "source_sha256": "95a64e81c37dcbc611e9a2b7e74ac23b4545e49541da9a4e094880246f59d868"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0035_spend_attribution_dimensions.sql",
+      "canonical_relative": "crates/beacond/migrations/0035_spend_attribution_dimensions.sql",
+      "source_sha256": "71407830b11658c5bb1dacb5f418a0b5829e6c4471cfea9a9a7628de9761a76a"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0036_event_chain.sql",
+      "canonical_relative": "crates/beacond/migrations/0036_event_chain.sql",
+      "source_sha256": "a79f203066cb81bcba10c941f3c639e6b390c7556a299a76b1b902ca01a3e225"
+    },
+    {
+      "raw_token": "crates/beacond/src/../migrations/0037_model_invocations.sql",
+      "canonical_relative": "crates/beacond/migrations/0037_model_invocations.sql",
+      "source_sha256": "7e1646b61f0bd73fb47b5d9373b5e9eb47d0009770d2c431a54f14739ef3487f"
+    }
+  ],
+  "dep_bindings_sha256": "6922eb5edf4a4fb29ed204fc43b71e391342c2d6ab0010b4d4977590623e99fd",
+  "replay_observations": [
+    {
+      "observation_id": "RD01",
+      "scenario": "rd_retained_replay",
+      "input": {
+        "replay_id": "a2-retained"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "code": null,
+        "provenance": null
+      }
+    },
+    {
+      "observation_id": "RD02",
+      "scenario": "rd_raw_normalization_forgery",
+      "input": {
+        "replay_id": "a2-retained",
+        "index": 75,
+        "replacement_token": "crates/beacond/sample-project/Cargo.lock"
+      },
+      "expected": {
+        "outcome": "REJECT_TYPED",
+        "code": "DEPFILE",
+        "provenance": "deliberate-contract"
+      }
+    },
+    {
+      "observation_id": "RD03",
+      "scenario": "rd_canonical_alias",
+      "input": {
+        "replay_id": "a2-retained",
+        "binding": {
+          "raw_token": "crates/beacond/sample-project/Cargo.lock",
+          "canonical_relative": "crates/beacond/sample-project/Cargo.lock",
+          "source_sha256": "446edf6b4e852e781d19d0f401673bfb34b24408e21aca1bd4325ab93f42eed9"
+        }
+      },
+      "expected": {
+        "outcome": "REJECT_TYPED",
+        "code": "DEP_ALIAS",
+        "provenance": "deliberate-contract"
+      }
+    },
+    {
+      "observation_id": "RD04",
+      "scenario": "rd_composed_chain",
+      "input": {
+        "subject_id": "rd-base"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "code": null,
+        "provenance": null
+      }
+    },
+    {
+      "observation_id": "RD05",
+      "scenario": "rd_composed_chain",
+      "input": {
+        "subject_id": "rd-candidate"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "code": null,
+        "provenance": null
+      }
+    }
+  ],
+  "synthetic_root_adaptation": {
+    "status": "SYNTHETIC_LOCATOR_ADAPTATION",
+    "fixture_root": "/fixture/retained",
+    "historical_raw_hashes_remain_historical": true,
+    "exact_retained_replay": "UNBOUND"
+  }
+}
