@@ -340,13 +340,13 @@ def _workflow_job(name: str) -> str:
 
 
 def test_ci_packages_on_the_hosted_compatibility_image_at_the_tested_commit() -> None:
-    product = _workflow_job("product")
-    package = _workflow_job("package")
+    assert "commit: ${{ steps.checkout.outputs.commit }}" in _workflow_job("source")
+    for job in ("product", "quality", "tests", "no-runtime-dependencies", "package"):
+        assert "ref: ${{ needs.source.outputs.commit }}" in _workflow_job(job), job
 
+    package = _workflow_job("package")
     assert "    runs-on: ubuntu-22.04\n" in package
-    assert "    needs: product\n" in package
-    assert "tested_commit: ${{ steps.checkout.outputs.commit }}" in product
-    assert "ref: ${{ needs.product.outputs.tested_commit }}" in package
+    assert "    needs: [source, product]\n" in package
 
 
 def test_workflow_first_run_does_not_reuse_cached_evidence(tmp_path: Path) -> None:
