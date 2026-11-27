@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -451,9 +451,16 @@ it("ignores a read that settles after the operator selected another version", as
   });
 
   render(<MissionOutcomes missionId={missionId} />);
-  // Version 2 is genuinely in flight before anything replaces it.
+  // Selecting version 2 can render Loading before its effect invokes the native reader.
+  // Observe the request itself before replacing it; a loading label alone is not that barrier.
+  await waitFor(() => {
+    expect(documentCalls, "B14.DEFERRED.FIRST_READ_PENDING").toBe(1);
+  });
+  expect(invokeMock, "B14.DEFERRED.FIRST_READ_EXACT_TUPLE").toHaveBeenCalledWith(
+    "outcome_document",
+    { missionId, version: 2 },
+  );
   expect(await screen.findByText(/loading version 2/i)).toBeInTheDocument();
-  expect(documentCalls, "B14.DEFERRED.FIRST_READ_PENDING").toBe(1);
 
   await user.click(screen.getByRole("button", { name: "Show version 1" }));
   expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent(
