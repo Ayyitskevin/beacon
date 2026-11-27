@@ -1,19 +1,8 @@
-# Beacon package runner on node-a (illustrative configuration)
+# Legacy self-hosted Beacon package runner
 
-This installs one repository-scoped, ephemeral GitHub Actions runner for
-`Ayyitskevin/beacon`. The runner process is an unprivileged `example-runner` system
-user. It has no login shell and no sudo access. GitHub assigns one job, removes
-the ephemeral registration, and the runner exits. A fresh short-lived
-registration token is required before the next job.
-
-The self-hosted package job runs in the digest-pinned Ubuntu 22.04 container
-declared in `.github/workflows/ci.yml`; package-labeled PRs retain the original
-GitHub-hosted Ubuntu 22.04 job. node-a is Ubuntu 24.04 with glibc 2.39; building
-directly on the host would undo the glibc 2.35 compatibility floor accepted in
-[ADR 0036](../../docs/adr/0036-appimage-compatibility-floor.md). The runner work
-root is therefore `/example-work`: GitHub mounts that same path into the job container,
-so the first-run harness's nested `docker run --volume ...` paths also exist on
-the host.
+Beacon now packages on GitHub-hosted Ubuntu 22.04 for main pushes, manual builds and
+package-labeled pull requests. See the [current CI instructions](../../CONTRIBUTING.md#downloading-the-ci-appimage).
+The following notes document the former ephemeral runner for operators maintaining an existing installation.
 
 ## Security boundary
 
@@ -26,9 +15,8 @@ The exception is Docker. `scripts/clean-host-first-run` calls the rootful Docker
 daemon, so the unit receives the `docker` supplementary group. Access to that
 socket is effectively root access and can bypass `ProtectHome` by asking the
 daemon to mount host paths. Because a PR label persists across `synchronize` and
-is not bound to the reviewed head SHA, even package-labeled PRs run only on
-hosted Ubuntu 22.04; the root-equivalent node-a runner is reserved for pushes to
-`main` and explicit `workflow_dispatch` refs. The direct runner process cannot
+is not bound to the reviewed head SHA, the former workflow ran package-labeled PRs on hosted Ubuntu 22.04 and reserved the
+self-hosted runner for main pushes and explicit dispatches. The direct runner process cannot
 read `/home/example`; Docker-capable workflow code is not inside that boundary.
 
 The runner otherwise reads the checked-out repository, ordinary system files,
@@ -194,13 +182,6 @@ unreviewed build state between ephemeral registrations, so the unit deletes the
 job-local workspace instead. The runner's journald output remains available
 after its one-shot registration is gone.
 
-## Workflow check
-
-An unlabeled pull request skips packaging. Adding the exact `package` label
-schedules the GitHub-hosted Ubuntu 22.04 job, including after later synchronize
-events. Pushes to `main` and manual dispatches with an explicit `ref` schedule
-the node-a job. Fast suites remain on GitHub-hosted runners.
-
 ## Remove the runner
 
 Stop execution first. Removing a registered-but-unused runner also requires a
@@ -219,11 +200,5 @@ sudo userdel --remove example-runner
 
 The final four commands permanently remove local state; inspect the paths and
 confirm the GitHub runner entry is absent before running them.
-
-
-## Required private CI configuration after privacy rewrite
-
-An operator must configure repository variables `BEACON_PACKAGE_RUNNER_LABELS` (a JSON string array containing `self-hosted`, `linux`, `x64` and a site-specific label) and `BEACON_PACKAGE_SOCKET` (a JSON object with exactly `source` and `target` absolute socket paths). Neither is supplied by this public example. Missing or malformed values fail the product/package admission step; packaging is not silently skipped. The validated target supplies `DOCKER_HOST` inside the existing pinned package container. Configure only a trusted runner and the narrowly intended socket mapping; Docker socket access retains its existing authority risk. The host and job container must expose the checkout at the same absolute path for nested first-run tests. No runner registration, service installation, repository setting or secret was changed by this privacy rewrite. Hosted execution is unverified until the operator supplies those bindings. All package and first-run checks remain required.
-
 
 > Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.
