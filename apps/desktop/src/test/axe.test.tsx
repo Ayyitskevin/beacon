@@ -40,6 +40,23 @@ function live(source: string): string {
     .join("\n");
 }
 
+// Keep this lexical witness scoped to the two existing helper spellings. It is
+// not an AST or a claim that a named call ran; the shell tests execute the bar.
+function hasWcagWitness(source: string): boolean {
+  return /\b(?:expectNoWcagViolations|expectNoWcag22Violations)\(/.test(live(source));
+}
+
+it.each<[string, string, boolean]>([
+  ["2.1 call", "await expectNoWcagViolations(document.body);", true],
+  ["2.2 call", "await expectNoWcag22Violations(document.body);", true],
+  ["missing call", "render(<App />);", false],
+  ["line-comment-only call", "// await expectNoWcag22Violations(document.body);", false],
+  ["block-comment-only call", "/* await expectNoWcagViolations(document.body); */", false],
+  ["different helper", "await expectNoWcag22ViolationsLater(document.body);", false],
+])("the per-render WCAG witness recognizes %s", (_name, source, expected) => {
+  expect(hasWcagWitness(source)).toBe(expected);
+});
+
 
 /// A12 round 2, Fable's first mutant: making the helper silent
 /// (`if (results.violations.length === 0)` -> `if (true)`) passed all 161 tests, because the
@@ -114,6 +131,7 @@ it("every surface test file runs the WCAG bar", () => {
     "MissionOutcomePreparation.test.tsx",
     "MissionOutcomes.test.tsx",
     "OutcomeCandidateDocument.test.tsx",
+    "PreparedCandidateJourney.test.tsx",
     "ProjectMissions.test.tsx",
     "SampleProject.test.tsx",
   ]);
@@ -145,7 +163,19 @@ it("every rendered test body has a per-render WCAG witness", () => {
     for (const header of headers) { const arrow = source.indexOf("=>", header.index); const open = source.indexOf("{", arrow); if (arrow < 0 || open < 0) continue; let depth = 0; for (let i = open; i < source.length; i += 1) { if (source[i] === "{") depth += 1; else if (source[i] === "}" && --depth === 0) { found.push(source.slice(open + 1, i)); break; } } }
     return found;
   }
-  let total = 0; let headers = 0;
-  for (const [path, raw] of Object.entries(SOURCES)) { if (!path.endsWith("App.test.tsx")) continue; const source = live(raw); headers += [...source.matchAll(/(?:^|\n)\s*(?:it|test)(?:\.each\s*\([\s\S]*?\))?\s*\(/gm)].length; for (const body of bodies(source)) { total += 1; if (/render\s*\(/.test(body)) expect(body, `${baseName(path)} render lacks WCAG bar`).toContain("expectNoWcagViolations("); } }
-  expect(total, `bodies found ${total} / headers ${headers}`).toBe(headers); expect(total).toBeGreaterThanOrEqual(52);
+  let total = 0;
+  let headers = 0;
+  for (const [path, raw] of Object.entries(SOURCES)) {
+    if (!path.endsWith("App.test.tsx")) continue;
+    const source = live(raw);
+    headers += [...source.matchAll(/(?:^|\n)\s*(?:it|test)(?:\.each\s*\([\s\S]*?\))?\s*\(/gm)].length;
+    for (const body of bodies(source)) {
+      total += 1;
+      if (/render\s*\(/.test(body)) {
+        expect(hasWcagWitness(body), `${baseName(path)} render lacks WCAG bar`).toBe(true);
+      }
+    }
+  }
+  expect(total, `bodies found ${total} / headers ${headers}`).toBe(headers);
+  expect(total).toBeGreaterThanOrEqual(52);
 });

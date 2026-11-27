@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { expectNoWcagViolations } from "./test/axe";
+import { expectNoWcag22Violations, expectNoWcagViolations } from "./test/axe";
 
 import { App } from "./App";
 
@@ -307,7 +307,7 @@ describe("Beacon desktop shell", () => {
 
     await user.keyboard("{Enter}");
     expect(screen.getByRole("main")).toHaveFocus();
-    await expectNoWcagViolations(document.body);
+    await expectNoWcag22Violations(document.body);
   });
 
   it.each(["{Enter}", " "])(
@@ -342,7 +342,7 @@ describe("Beacon desktop shell", () => {
       expect(projects).toHaveAttribute("aria-current", "page");
       await user.tab();
       expect(screen.getByRole("button", { name: "Create Project" })).toHaveFocus();
-      await expectNoWcagViolations(document.body);
+      await expectNoWcag22Violations(document.body);
     },
   );
 
